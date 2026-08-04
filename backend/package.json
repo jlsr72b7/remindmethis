@@ -9,6 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "prebuild": "prisma generate",
     "build": "tsc -p tsconfig.json",
+    "render:build": "prisma generate && prisma db push && tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",

@@ -501,26 +501,42 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+const mapDatabaseErrorToResponse = (error: unknown) => {
+  const err = error as { code?: string; message?: string };
+
+  if (err.code === 'P2021' || (err.message && err.message.includes('does not exist'))) {
+    return {
+      status: 503,
+      body: {
+        error: 'database schema is not initialized',
+        action: 'Run `npm run prisma:push` (or `npm run prisma:migrate -- --name init`) in backend folder, then retry.',
+      },
+    };
+  }
+
+  if (err.code === 'P1001') {
+    return {
+      status: 503,
+      body: {
+        error: 'database is unreachable',
+        action: 'Start Postgres (`npm run db:up`) and verify DATABASE_URL in .env.',
+      },
+    };
+  }
+
+  return null;
+};
+
 app.get('/admin/user-count', async (_req, res) => {
   try {
     const userCount = await prisma.user.count();
     return res.json({ userCount });
   } catch (error) {
     console.error('user count failed', error);
-    const err = error as { code?: string; message?: string };
 
-    if (err.code === 'P2021' || (err.message && err.message.includes('does not exist'))) {
-      return res.status(503).json({
-        error: 'database schema is not initialized',
-        action: 'Run `npm run prisma:push` (or `npm run prisma:migrate -- --name init`) in backend folder, then retry.',
-      });
-    }
-
-    if (err.code === 'P1001') {
-      return res.status(503).json({
-        error: 'database is unreachable',
-        action: 'Start Postgres (`npm run db:up`) and verify DATABASE_URL in .env.',
-      });
+    const databaseError = mapDatabaseErrorToResponse(error);
+    if (databaseError) {
+      return res.status(databaseError.status).json(databaseError.body);
     }
 
     return res.status(500).json({ error: 'internal server error' });
@@ -544,20 +560,10 @@ app.get('/admin/event-reminder-counts', async (_req, res) => {
     });
   } catch (error) {
     console.error('event/reminder counts failed', error);
-    const err = error as { code?: string; message?: string };
 
-    if (err.code === 'P2021' || (err.message && err.message.includes('does not exist'))) {
-      return res.status(503).json({
-        error: 'database schema is not initialized',
-        action: 'Run `npm run prisma:push` (or `npm run prisma:migrate -- --name init`) in backend folder, then retry.',
-      });
-    }
-
-    if (err.code === 'P1001') {
-      return res.status(503).json({
-        error: 'database is unreachable',
-        action: 'Start Postgres (`npm run db:up`) and verify DATABASE_URL in .env.',
-      });
+    const databaseError = mapDatabaseErrorToResponse(error);
+    if (databaseError) {
+      return res.status(databaseError.status).json(databaseError.body);
     }
 
     return res.status(500).json({ error: 'internal server error' });
@@ -660,6 +666,12 @@ app.post('/auth/signup', async (req, res) => {
     });
   } catch (error) {
     console.error('signup failed', error);
+
+    const databaseError = mapDatabaseErrorToResponse(error);
+    if (databaseError) {
+      return res.status(databaseError.status).json(databaseError.body);
+    }
+
     return res.status(500).json({ error: 'internal server error' });
   }
 });
