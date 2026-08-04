@@ -1,0 +1,25 @@
+@baseUrl = http://localhost:4000
+@userId = jlucas1028@aol.com
+
+### Health check
+GET {{baseUrl}}/health
+
+### Admin counts check
+GET {{baseUrl}}/admin/event-reminder-counts
+
+### SMS test by userId (uses saved mobile number)
+POST {{baseUrl}}/admin/test-reminder-sms
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}"
+}
+
+### SMS test by direct phone number
+POST {{baseUrl}}/admin/test-reminder-sms
+Content-Type: application/json
+
+{
+  "phoneNumber": "+17325474920",
+  "message": "Hello World"
+}
