@@ -51,6 +51,7 @@ import {
   saveReminderTimeZoneSettings,
   sendContactSupportMessage,
   resetPassword,
+  resendVerificationEmail,
   signInUser,
   StoredUser,
   updateUserProfile,
@@ -300,6 +301,8 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
   const [hasAcceptedUserAgreement, setHasAcceptedUserAgreement] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [showResendVerificationLink, setShowResendVerificationLink] = useState(false);
+  const [isResendingVerification, setIsResendingVerification] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -382,6 +385,13 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
   useEffect(() => {
     if (mode !== 'signup') {
       setHasAcceptedUserAgreement(false);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== 'signin') {
+      setShowResendVerificationLink(false);
+      setIsResendingVerification(false);
     }
   }, [mode]);
 
@@ -561,6 +571,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
 
       if (result.error) {
         setMessage(result.error);
+        setShowResendVerificationLink(false);
         return;
       }
 
@@ -592,14 +603,40 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
     if (!signInResult.user) {
       if (signInResult.error && /email not verified/i.test(signInResult.error)) {
         setMessage('Please verify your email address before signing in. Check your inbox for the verification link.');
+        setShowResendVerificationLink(true);
         return;
       }
 
       setMessage('We could not find an account with those details.');
+      setShowResendVerificationLink(false);
       return;
     }
 
+    setShowResendVerificationLink(false);
     onAuthenticated(signInResult.user.email, signInResult.user.id);
+  };
+
+  const handleResendVerification = async () => {
+    if (!email.trim()) {
+      setMessage('Enter your email address first, then resend verification.');
+      return;
+    }
+
+    if (!validateEmail(email)) {
+      setMessage('Please enter a valid email address before resending verification.');
+      return;
+    }
+
+    setIsResendingVerification(true);
+    const result = await resendVerificationEmail(email.trim().toLowerCase());
+    setIsResendingVerification(false);
+
+    if (!result.success) {
+      setMessage(result.error || 'Unable to resend verification email right now.');
+      return;
+    }
+
+    setMessage(result.message || 'Verification email resent. Check your inbox.');
   };
 
   const handleOpenUserAgreement = async () => {
@@ -674,6 +711,18 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
           {bootstrapNote ? <Text style={styles.bootstrapNote}>{bootstrapNote}</Text> : null}
 
           {message ? <Text style={styles.message}>{message}</Text> : null}
+          {mode === 'signin' && showResendVerificationLink ? (
+            <TouchableOpacity
+              style={styles.resendVerificationLinkWrap}
+              onPress={() => void handleResendVerification()}
+              disabled={isResendingVerification || isSubmitting}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.resendVerificationLinkText, (isResendingVerification || isSubmitting) && styles.resendVerificationLinkTextDisabled]}>
+                {isResendingVerification ? 'Resending verification email...' : 'Resend verification email'}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
 
           {successMessage ? (
             <Animated.View style={[styles.successToast, { opacity: successAnim }] }>
@@ -689,6 +738,9 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
               setEmail(value);
               if (message) {
                 setMessage(null);
+              }
+              if (showResendVerificationLink) {
+                setShowResendVerificationLink(false);
               }
             }}
             autoCapitalize="none"
@@ -5000,6 +5052,19 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     marginBottom: 12,
     fontSize: 13,
+  },
+  resendVerificationLinkWrap: {
+    marginTop: -4,
+    marginBottom: 10,
+  },
+  resendVerificationLinkText: {
+    color: '#1d4ed8',
+    fontSize: 13,
+    fontWeight: '700',
+    textDecorationLine: 'underline',
+  },
+  resendVerificationLinkTextDisabled: {
+    color: '#93c5fd',
   },
   successToast: {
     backgroundColor: '#dcfce7',

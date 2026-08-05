@@ -92,6 +92,12 @@ export interface SignInResult {
   error?: string;
 }
 
+export interface ResendVerificationResult {
+  success: boolean;
+  message?: string;
+  error?: string;
+}
+
 export type ReminderSoundPattern = 'single' | 'double';
 export type ReminderSoundVolume = 'normal' | 'loud';
 
@@ -1450,6 +1456,37 @@ export async function resetPassword(email: string) {
   const nextUsers = users.map((entry) => entry.id === user.id ? { ...entry, password: temporaryPassword } : entry);
   await AsyncStorage.setItem(USERS_KEY, JSON.stringify(nextUsers));
   return temporaryPassword;
+}
+
+export async function resendVerificationEmail(email: string): Promise<ResendVerificationResult> {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) {
+    return { success: false, error: 'Please enter your email address first.' };
+  }
+
+  if (USE_API_STORAGE) {
+    try {
+      const response = await apiRequest<{ success: boolean; message?: string }>('/auth/resend-verification', {
+        method: 'POST',
+        body: JSON.stringify({ email: normalizedEmail }),
+      });
+
+      return {
+        success: Boolean(response.success),
+        message: response.message,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unable to resend verification email.',
+      };
+    }
+  }
+
+  return {
+    success: false,
+    error: 'Resend verification is only available when API storage is enabled.',
+  };
 }
 
 export async function loadUser(userId: string) {

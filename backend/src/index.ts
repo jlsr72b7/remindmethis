@@ -795,6 +795,53 @@ app.get('/auth/verify-email', async (req, res) => {
   }
 });
 
+app.post('/auth/resend-verification', async (req, res) => {
+  try {
+    const { email } = req.body ?? {};
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+
+    if (!normalizedEmail) {
+      return res.status(400).json({ error: 'email is required' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    if (!user) {
+      return res.json({
+        success: true,
+        message: 'If an account exists for this email, a verification link has been sent.',
+      });
+    }
+
+    if (user.emailVerified) {
+      return res.json({
+        success: true,
+        message: 'This email is already verified. You can sign in now.',
+      });
+    }
+
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerificationToken: verificationToken,
+        emailVerificationExpiresAt: verificationExpiresAt,
+      },
+    });
+
+    await sendVerificationEmail(user.email, verificationToken, req);
+
+    return res.json({
+      success: true,
+      message: 'Verification email resent. Check your inbox.',
+    });
+  } catch (error) {
+    console.error('resend verification failed', error);
+    return res.status(500).json({ error: 'Unable to resend verification email right now. Please try again later.' });
+  }
+});
+
 app.post('/auth/signin', async (req, res) => {
   try {
     const { email, password } = req.body ?? {};

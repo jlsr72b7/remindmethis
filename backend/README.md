@@ -128,6 +128,7 @@ If the key is missing, the backend returns HTTP 500 with:
 
 - `POST /auth/signup`
 - `POST /auth/signin`
+- `POST /auth/resend-verification`
 - `GET /auth/verify-email?token=...`
 - `POST /notifications/reminder-email`
 - `POST /notifications/reminder-sms`
