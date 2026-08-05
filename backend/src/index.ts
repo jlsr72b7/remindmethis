@@ -1536,13 +1536,13 @@ app.get('/calendar-sync/outlook/callback', async (req, res) => {
       }));
     }
 
-    let tokenResponse: Response | null = null;
+    let tokenResponse: globalThis.Response | null = null;
     let tokenData: { refresh_token?: string; scope?: string; error_description?: string; error?: string } | null = null;
     let tokenExchangeError: unknown = null;
 
     for (const candidateRedirectUri of getRedirectUriCandidates(String(outlookOauthRedirectUri || '').trim())) {
       try {
-        tokenResponse = await fetch(`${outlookOauthBaseUrl}/token`, {
+        const exchangeResponse = await fetch(`${outlookOauthBaseUrl}/token`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -1557,8 +1557,9 @@ app.get('/calendar-sync/outlook/callback', async (req, res) => {
           }),
         });
 
-        tokenData = await tokenResponse.json() as { refresh_token?: string; scope?: string; error_description?: string; error?: string };
-        if (tokenResponse.ok && tokenData?.refresh_token) {
+        tokenResponse = exchangeResponse;
+        tokenData = await exchangeResponse.json() as { refresh_token?: string; scope?: string; error_description?: string; error?: string };
+        if (exchangeResponse.ok && tokenData?.refresh_token) {
           break;
         }
 
