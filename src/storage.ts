@@ -576,7 +576,7 @@ export function isApiStorageEnabled() {
   return USE_API_STORAGE;
 }
 
-export async function isApiReachable(timeoutMs = 1800): Promise<boolean> {
+export async function isApiReachable(timeoutMs = 7000): Promise<boolean> {
   if (!USE_API_STORAGE) {
     return false;
   }

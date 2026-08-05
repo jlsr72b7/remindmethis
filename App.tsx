@@ -4319,7 +4319,13 @@ export default function App() {
         return;
       }
 
-      const apiReachable = await isApiReachable();
+      let apiReachable = await isApiReachable();
+      if (!apiReachable) {
+        // Render cold starts can exceed a single short health-check window.
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        apiReachable = await isApiReachable();
+      }
+
       if (!apiReachable) {
         if (isMounted) {
           setMigrationSummary('Cloud sync is currently unavailable. You can still sign in and continue with local storage.');
