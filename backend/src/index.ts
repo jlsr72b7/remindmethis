@@ -1,9 +1,11 @@
 import 'dotenv/config';
-import express from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import fs from 'fs';
 import nodemailer from 'nodemailer';
+import path from 'path';
 import twilio from 'twilio';
 import { google } from 'googleapis';
 import { Prisma } from '@prisma/client';
@@ -14,9 +16,26 @@ const port = Number(process.env.PORT || 4000);
 
 app.use(cors());
 app.use(express.json());
+app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+  const parseError = error as { type?: string; status?: number; message?: string };
+  if (parseError?.type === 'entity.parse.failed' || parseError?.status === 400) {
+    return res.status(400).json({ error: 'invalid JSON body' });
+  }
+  return next(error);
+});
 
 const verificationBaseUrl = (process.env.EMAIL_VERIFICATION_BASE_URL || `http://localhost:${port}`).replace(/\/$/, '');
 const emailFromAddress = process.env.EMAIL_FROM || 'no-reply@special-date-reminder.local';
+const supportEmailAddress = String(process.env.SUPPORT_EMAIL || '').trim();
+const legalDocumentsDir = path.resolve(process.cwd(), 'public', 'legal');
+const userAgreementFileNames = [
+  'Remind_Me_This_EULA_August_5_2026.pdf',
+  'Remind_Me_This_EULA_August_5_2026.docx',
+  'user-agreement.pdf',
+  'user-agreement.docx',
+  'user-agreement.html',
+  'user-agreement.txt',
+];
 
 const smtpHost = process.env.SMTP_HOST;
 const smtpPort = Number(process.env.SMTP_PORT || 587);
@@ -78,6 +97,17 @@ const resolveOutlookAuthorityTenant = () => {
   }
 
   return normalized.replace(/^\/+|\/+$/g, '') || 'common';
+};
+
+const resolveUserAgreementFilePath = () => {
+  for (const fileName of userAgreementFileNames) {
+    const candidatePath = path.join(legalDocumentsDir, fileName);
+    if (fs.existsSync(candidatePath)) {
+      return candidatePath;
+    }
+  }
+
+  return null;
 };
 
 const outlookOauthTenant = resolveOutlookAuthorityTenant();
@@ -501,6 +531,19 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/legal/user-agreement', (_req, res) => {
+  const agreementPath = resolveUserAgreementFilePath();
+  if (!agreementPath) {
+    return res.status(404).json({
+      error: 'user agreement file not found',
+      expectedDirectory: 'backend/public/legal',
+      acceptedFileNames: userAgreementFileNames,
+    });
+  }
+
+  return res.sendFile(agreementPath);
+});
+
 const mapDatabaseErrorToResponse = (error: unknown) => {
   const err = error as { code?: string; message?: string };
 
@@ -568,6 +611,19 @@ app.get('/admin/event-reminder-counts', async (_req, res) => {
 
     return res.status(500).json({ error: 'internal server error' });
   }
+});
+
+app.get('/admin/notification-config', (_req, res) => {
+  return res.json({
+    smtpConfigured: Boolean(smtpTransport),
+    smtpHostSet: Boolean(smtpHost),
+    smtpUserSet: Boolean(smtpUser),
+    smtpPassSet: Boolean(smtpPass),
+    smtpPort,
+    smtpSecure,
+    emailFromAddress,
+    smsProvider: smsProviderName,
+  });
 });
 
 app.post('/admin/test-reminder-sms', async (req, res) => {
@@ -796,6 +852,10 @@ app.post('/notifications/reminder-email', async (req, res) => {
       });
     }
 
+    if (!smtpTransport) {
+      return res.status(503).json({ error: 'SMTP is not configured on the server' });
+    }
+
     const user = await prisma.user.findUnique({ where: { id: String(userId) } });
     if (!user) {
       return res.status(404).json({ error: 'user not found' });
@@ -860,6 +920,80 @@ app.post('/notifications/share-email', async (req, res) => {
     return res.status(500).json({ error: 'internal server error' });
   }
 });
+
+const handleContactSupportNotification = async (req: express.Request, res: express.Response) => {
+  try {
+    const {
+      userId,
+      userEmail,
+      subject,
+      message,
+    } = req.body ?? {};
+
+    const normalizedSubject = String(subject || '').trim();
+    const normalizedMessage = String(message || '').trim();
+    const normalizedUserId = String(userId || '').trim();
+    const normalizedUserEmail = String(userEmail || '').trim().toLowerCase();
+
+    if (!normalizedSubject || !normalizedMessage) {
+      return res.status(400).json({ error: 'subject and message are required' });
+    }
+
+    if (normalizedMessage.length > 255) {
+      return res.status(400).json({ error: 'message must be 255 characters or fewer' });
+    }
+
+    if (!smtpTransport) {
+      return res.status(503).json({ error: 'SMTP is not configured on the server' });
+    }
+
+    if (!supportEmailAddress) {
+      return res.status(503).json({ error: 'SUPPORT_EMAIL is not configured on the server' });
+    }
+
+    const senderLine = normalizedUserEmail
+      ? `User email: ${normalizedUserEmail}`
+      : 'User email: not provided';
+    const userIdLine = normalizedUserId
+      ? `User ID: ${normalizedUserId}`
+      : 'User ID: not provided';
+
+    const textBody = [
+      'Special Date Reminder support request',
+      '',
+      `Subject: ${normalizedSubject}`,
+      senderLine,
+      userIdLine,
+      '',
+      normalizedMessage,
+    ].join('\n');
+
+    const htmlBody = `
+      <p><strong>Special Date Reminder support request</strong></p>
+      <p><strong>Subject:</strong> ${escapeHtml(normalizedSubject)}</p>
+      <p><strong>User email:</strong> ${escapeHtml(normalizedUserEmail || 'not provided')}</p>
+      <p><strong>User ID:</strong> ${escapeHtml(normalizedUserId || 'not provided')}</p>
+      <p><strong>Message:</strong></p>
+      <p>${escapeHtml(normalizedMessage).replace(/\n/g, '<br />')}</p>
+    `;
+
+    await smtpTransport.sendMail({
+      from: emailFromAddress,
+      to: supportEmailAddress,
+      subject: `Support request: ${normalizedSubject}`,
+      text: textBody,
+      html: htmlBody,
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('contact support notification failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+};
+
+app.post('/notifications/contact-support', handleContactSupportNotification);
+app.post('/notifications/support-email', handleContactSupportNotification);
 
 app.post('/notifications/reminder-sms', async (req, res) => {
   try {
@@ -2366,4 +2500,7 @@ app.put('/users/:userId/events', async (req, res) => {
 
 app.listen(port, () => {
   console.log(`backend listening on port ${port}`);
+  if (!smtpTransport) {
+    console.warn('SMTP is not configured at startup. Set SMTP_HOST, SMTP_USER, and SMTP_PASS in environment variables.');
+  }
 });

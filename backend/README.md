@@ -41,8 +41,30 @@ npm run dev
 Health check:
 
 - `GET http://localhost:4000/health`
+- `GET http://localhost:4000/legal/user-agreement`
 - `GET http://localhost:4000/admin/user-count`
 - `GET http://localhost:4000/admin/event-reminder-counts`
+
+## User agreement hosting
+
+The backend serves the signup agreement from a fixed route:
+
+- `GET /legal/user-agreement`
+
+Place the agreement file in:
+
+- `backend/public/legal/`
+
+Accepted file names:
+
+- `Remind_Me_This_EULA_August_5_2026.pdf`
+- `Remind_Me_This_EULA_August_5_2026.docx`
+- `user-agreement.pdf`
+- `user-agreement.docx`
+- `user-agreement.html`
+- `user-agreement.txt`
+
+If `EXPO_PUBLIC_USER_AGREEMENT_URL` is not set in the frontend, the signup link defaults to the backend route above.
 
 ## Email verification setup
 
