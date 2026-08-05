@@ -80,6 +80,10 @@ Required `.env` fields:
 - `SMTP_PASS`
 - `SMTP_SECURE`
 
+Production note:
+
+- On Render, set `EMAIL_VERIFICATION_BASE_URL` to your backend public URL (for example `https://remindmethis.onrender.com`) so verification links do not point to localhost.
+
 If SMTP is not configured, the backend will log the verification link for local development.
 
 ## SMS setup (Twilio provider interface)

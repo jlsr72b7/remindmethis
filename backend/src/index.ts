@@ -13,6 +13,7 @@ import { prisma } from './prisma';
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
+app.set('trust proxy', true);
 
 app.use(cors());
 app.use(express.json());
@@ -24,7 +25,7 @@ app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
   return next(error);
 });
 
-const verificationBaseUrl = (process.env.EMAIL_VERIFICATION_BASE_URL || `http://localhost:${port}`).replace(/\/$/, '');
+const verificationBaseUrlFromEnv = String(process.env.EMAIL_VERIFICATION_BASE_URL || '').trim().replace(/\/$/, '');
 const emailFromAddress = process.env.EMAIL_FROM || 'no-reply@special-date-reminder.local';
 const supportEmailAddress = String(process.env.SUPPORT_EMAIL || '').trim();
 const legalDocumentsDir = path.resolve(process.cwd(), 'public', 'legal');
@@ -97,6 +98,27 @@ const resolveOutlookAuthorityTenant = () => {
   }
 
   return normalized.replace(/^\/+|\/+$/g, '') || 'common';
+};
+
+const resolveVerificationBaseUrl = (req?: Request) => {
+  if (verificationBaseUrlFromEnv) {
+    return verificationBaseUrlFromEnv;
+  }
+
+  if (req) {
+    const forwardedProtoHeader = req.headers['x-forwarded-proto'];
+    const forwardedHostHeader = req.headers['x-forwarded-host'];
+    const forwardedProto = String(Array.isArray(forwardedProtoHeader) ? forwardedProtoHeader[0] : forwardedProtoHeader || '').split(',')[0].trim();
+    const forwardedHost = String(Array.isArray(forwardedHostHeader) ? forwardedHostHeader[0] : forwardedHostHeader || '').split(',')[0].trim();
+    const host = forwardedHost || String(req.get('host') || '').trim();
+    const protocol = forwardedProto || req.protocol || 'https';
+
+    if (host && (protocol === 'http' || protocol === 'https')) {
+      return `${protocol}://${host}`.replace(/\/$/, '');
+    }
+  }
+
+  return `http://localhost:${port}`;
 };
 
 const resolveUserAgreementFilePath = () => {
@@ -209,11 +231,11 @@ const smsProvider: SmsProvider = (() => {
   return new NoOpSmsProvider();
 })();
 
-const sendVerificationEmail = async (email: string, token: string) => {
-  const verifyUrl = `${verificationBaseUrl}/auth/verify-email?token=${encodeURIComponent(token)}`;
-  const subject = 'Verify your Special Date Reminder account';
+const sendVerificationEmail = async (email: string, token: string, req?: Request) => {
+  const verifyUrl = `${resolveVerificationBaseUrl(req)}/auth/verify-email?token=${encodeURIComponent(token)}`;
+  const subject = 'Verify your Remind Me This account';
   const textBody = [
-    'Welcome to Special Date Reminder.',
+    'Welcome to Remind Me This.',
     '',
     'Please verify your email address by opening this link:',
     verifyUrl,
@@ -222,7 +244,7 @@ const sendVerificationEmail = async (email: string, token: string) => {
   ].join('\n');
 
   const htmlBody = `
-    <p>Welcome to <strong>Special Date Reminder</strong>.</p>
+    <p>Welcome to <strong>Remind Me This</strong>.</p>
     <p>Please verify your email address by opening this link:</p>
     <p><a href="${verifyUrl}">${verifyUrl}</a></p>
     <p>This link expires in 24 hours.</p>
@@ -707,7 +729,7 @@ app.post('/auth/signup', async (req, res) => {
     });
 
     try {
-      await sendVerificationEmail(user.email, verificationToken);
+      await sendVerificationEmail(user.email, verificationToken, req);
     } catch (mailError) {
       console.error('verification email send failed', mailError);
       return res.status(500).json({ error: 'Account created, but verification email could not be sent. Please try again later.' });
