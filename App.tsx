@@ -293,6 +293,8 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
   const [isSignupAddressFocused, setIsSignupAddressFocused] = useState(false);
   const [signupAddressAutocompleteSessionToken] = useState(() => `addr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const skipNextSignupAutocompleteFetchRef = useRef(0);
+  const isSelectingSignupAddressPredictionRef = useRef(false);
+  const signupAddressBlurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [hasAcceptedUserAgreement, setHasAcceptedUserAgreement] = useState(false);
@@ -383,6 +385,12 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
     }
   }, [mode]);
 
+  useEffect(() => () => {
+    if (signupAddressBlurTimeoutRef.current) {
+      clearTimeout(signupAddressBlurTimeoutRef.current);
+    }
+  }, []);
+
   useEffect(() => {
     let isActive = true;
     const query = streetAddress.trim();
@@ -425,7 +433,9 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
 
   const applySignupAddressPrediction = useCallback(async (prediction: GoogleAddressPrediction) => {
     skipNextSignupAutocompleteFetchRef.current = 2;
+    isSelectingSignupAddressPredictionRef.current = false;
     setSignupAddressPredictions([]);
+    setIsSignupAddressFocused(false);
     setStreetAddress(prediction.mainText || prediction.description || '');
 
     const resolved = await resolveGoogleAddressPrediction(prediction.placeId, signupAddressAutocompleteSessionToken);
@@ -737,8 +747,14 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
                   value={streetAddress}
                   onFocus={() => setIsSignupAddressFocused(true)}
                   onBlur={() => {
-                    setIsSignupAddressFocused(false);
-                    setSignupAddressPredictions([]);
+                    signupAddressBlurTimeoutRef.current = setTimeout(() => {
+                      if (isSelectingSignupAddressPredictionRef.current) {
+                        isSelectingSignupAddressPredictionRef.current = false;
+                        return;
+                      }
+                      setIsSignupAddressFocused(false);
+                      setSignupAddressPredictions([]);
+                    }, 120);
                   }}
                   onChangeText={(value) => {
                     setStreetAddress(value);
@@ -755,6 +771,12 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
                       <TouchableOpacity
                         key={prediction.placeId}
                         style={styles.addressSuggestionItem}
+                        onPressIn={() => {
+                          isSelectingSignupAddressPredictionRef.current = true;
+                          if (signupAddressBlurTimeoutRef.current) {
+                            clearTimeout(signupAddressBlurTimeoutRef.current);
+                          }
+                        }}
                         onPress={() => void applySignupAddressPrediction(prediction)}
                       >
                         <Text style={styles.addressSuggestionMainText} numberOfLines={1}>{prediction.mainText}</Text>
@@ -1175,6 +1197,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [contactAddressPredictions, setContactAddressPredictions] = useState<GoogleAddressPrediction[]>([]);
   const [contactAddressAutocompleteSessionToken] = useState(() => `addr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const skipNextContactAutocompleteFetchRef = useRef(0);
+  const isSelectingAccountAddressPredictionRef = useRef(false);
+  const accountAddressBlurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDescription, setNewGroupDescription] = useState('');
   const [selectedGroupId, setSelectedGroupId] = useState('');
@@ -1240,6 +1264,12 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   useEffect(() => {
     setSelectedGroupDescriptionDraft(selectedGroup?.description || '');
   }, [selectedGroup?.description, selectedGroup?.id]);
+
+  useEffect(() => () => {
+    if (accountAddressBlurTimeoutRef.current) {
+      clearTimeout(accountAddressBlurTimeoutRef.current);
+    }
+  }, []);
   const isAppleLocalSyncSupported = Platform.OS === 'ios';
   const isGoogleConfigured = Boolean(googleCalendarId.trim());
   const googleSyncStatus: 'not-synched' | 'synched' | 'paused' | 'disconnected' = !isGoogleConfigured
@@ -1341,7 +1371,9 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
   const applyAccountAddressPrediction = useCallback(async (prediction: GoogleAddressPrediction) => {
     skipNextAccountAutocompleteFetchRef.current = 2;
+    isSelectingAccountAddressPredictionRef.current = false;
     setAddressPredictions([]);
+    setIsAccountAddressLine1Focused(false);
     setAddressLine1(prediction.mainText || prediction.description || '');
 
     const resolved = await resolveGoogleAddressPrediction(prediction.placeId, addressAutocompleteSessionToken);
@@ -4030,8 +4062,14 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                         value={addressLine1}
                         onFocus={() => setIsAccountAddressLine1Focused(true)}
                         onBlur={() => {
-                          setIsAccountAddressLine1Focused(false);
-                          setAddressPredictions([]);
+                          accountAddressBlurTimeoutRef.current = setTimeout(() => {
+                            if (isSelectingAccountAddressPredictionRef.current) {
+                              isSelectingAccountAddressPredictionRef.current = false;
+                              return;
+                            }
+                            setIsAccountAddressLine1Focused(false);
+                            setAddressPredictions([]);
+                          }, 120);
                         }}
                         onChangeText={(value) => {
                           setAddressLine1(value);
@@ -4047,6 +4085,12 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                             <TouchableOpacity
                               key={prediction.placeId}
                               style={styles.addressSuggestionItem}
+                              onPressIn={() => {
+                                isSelectingAccountAddressPredictionRef.current = true;
+                                if (accountAddressBlurTimeoutRef.current) {
+                                  clearTimeout(accountAddressBlurTimeoutRef.current);
+                                }
+                              }}
                               onPress={() => void applyAccountAddressPrediction(prediction)}
                             >
                               <Text style={styles.addressSuggestionMainText} numberOfLines={1}>{prediction.mainText}</Text>

@@ -5,6 +5,7 @@ import {
   Button,
   Linking,
   Modal,
+  Pressable,
   Platform,
   ScrollView,
   StyleSheet,
@@ -44,7 +45,7 @@ import { EventLocationAddress, ReminderFrequency, SpecialDateEvent, VariableRemi
 type EventTypeValue = 'birthday' | 'party' | 'wedding' | 'anniversary' | 'medical' | 'dental' | 'work' | 'school' | 'other';
 type PartySubtypeValue = 'birthday' | 'anniversary' | 'retirement' | 'engagement' | 'holiday' | 'other';
 type MedicalSubtypeValue = 'appointment' | 'surgery' | 'blood-work' | 'radiology' | 'rehab' | 'other';
-type DentalSubtypeValue = 'cleaning' | 'extraction' | 'check-up' | 'root-canal' | 'bridge' | 'dentures' | 'cavities' | 'other';
+type DentalSubtypeValue = 'cleaning' | 'extraction' | 'check-up' | 'root-canal' | 'bridge' | 'dentures' | 'cavities' | 'implants' | 'crown' | 'fitting' | 'other';
 type WorkSubtypeValue = 'meeting' | 'review' | 'conference' | 'demo' | 'workshop' | 'presentation' | 'interview' | 'other';
 type SchoolSubtypeValue = 'quiz' | 'test' | 'paper-due' | 'project-due' | 'class-presentation' | 'other';
 type ReminderModeValue = 'none' | 'default' | 'static' | 'variable';
@@ -168,6 +169,9 @@ const dentalSubtypeLabels: Record<DentalSubtypeValue, string> = {
   bridge: 'Bridge',
   dentures: 'Dentures',
   cavities: 'Cavities',
+  implants: 'Implants',
+  crown: 'Crown',
+  fitting: 'Fitting',
   other: 'Other',
 };
 
@@ -242,6 +246,21 @@ const isScheduledReminderMode = (mode: ReminderModeValue) => mode === 'default' 
 
 const isReminderTimeZoneMode = (mode: ReminderModeValue) => mode === 'static' || mode === 'variable';
 
+const getReminderModeHoverMessage = (mode: ReminderModeValue) => {
+  switch (mode) {
+    case 'none':
+      return 'No Reminders will be written to the queue';
+    case 'default':
+      return 'Up to four Reminders will be written to the queue';
+    case 'static':
+      return 'Choose the Frequency of your Reminders';
+    case 'variable':
+      return 'Create Custom Reminders';
+    default:
+      return '';
+  }
+};
+
 const getEventTitle = (
   eventType: EventTypeValue,
   partySubtype: PartySubtypeValue,
@@ -298,6 +317,15 @@ const normalizeDuplicateText = (value: string) => String(value || '').trim().toL
 const getUtcDateKey = (value: Date) => (
   `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, '0')}-${String(value.getUTCDate()).padStart(2, '0')}`
 );
+
+const getLocalDateFromUtcDay = (value: string | Date) => {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return new Date(value);
+  }
+
+  return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0);
+};
 
 const getMinuteTimestamp = (value: Date) => Math.floor(value.getTime() / (60 * 1000));
 
@@ -658,6 +686,9 @@ const getEventFormState = (event: SpecialDateEvent) => {
       bridge: 'bridge',
       dentures: 'dentures',
       cavities: 'cavities',
+      implants: 'implants',
+      crown: 'crown',
+      fitting: 'fitting',
     };
 
     if (dentalSubtypeMap[dentalLabel]) {
@@ -677,6 +708,9 @@ const getEventFormState = (event: SpecialDateEvent) => {
     bridge: 'bridge',
     dentures: 'dentures',
     cavities: 'cavities',
+    implants: 'implants',
+    crown: 'crown',
+    fitting: 'fitting',
   };
 
   if (standaloneDentalSubtypeMap[normalizedTitle]) {
@@ -759,9 +793,11 @@ const formatDisplayDate = (value: string | Date | null | undefined, allDay = fal
     return 'Not available';
   }
 
+  const normalizedDate = allDay ? getLocalDateFromUtcDay(date) : date;
+
   return allDay
-    ? date.toLocaleDateString()
-    : `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+    ? normalizedDate.toLocaleDateString()
+    : `${normalizedDate.toLocaleDateString()} ${normalizedDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
 };
 
 const formatDetailDateLabel = (value: string | Date | null | undefined, allDay = false) => {
@@ -900,6 +936,33 @@ const getNextAnnualOccurrenceDate = (source: Date, allDay: boolean) => {
   }
 
   return nextOccurrence;
+};
+
+const getDefaultReminderAnchorDate = (eventDate: Date, isAnnualEvent: boolean, allDay: boolean) => {
+  const baseDate = isAnnualEvent
+    ? getNextAnnualOccurrenceDate(new Date(eventDate), allDay)
+    : new Date(eventDate);
+
+  if (!isAnnualEvent) {
+    return baseDate;
+  }
+
+  const today = new Date();
+  const sameDateAsToday = (
+    baseDate.getFullYear() === today.getFullYear()
+    && baseDate.getMonth() === today.getMonth()
+    && baseDate.getDate() === today.getDate()
+  );
+
+  if (!sameDateAsToday) {
+    return baseDate;
+  }
+
+  const nextYearDate = withSafeYear(baseDate, baseDate.getFullYear() + 1);
+  if (allDay) {
+    nextYearDate.setHours(0, 0, 0, 0);
+  }
+  return nextYearDate;
 };
 
 const isEventExpired = (event: SpecialDateEvent) => {
@@ -1134,8 +1197,17 @@ const getUpcomingOccurrencesForEvent = (event: SpecialDateEvent, fromDate: Date,
     return occurrences;
   };
 
-  if (reminderMode === 'variable' || reminderMode === 'default') {
+  if (reminderMode === 'variable') {
     return variableOccurrences.slice(0, count);
+  }
+
+  if (reminderMode === 'default') {
+    if (variableOccurrences.length) {
+      return variableOccurrences.slice(0, count);
+    }
+
+    const fallbackOccurrence = getNextReminderOccurrenceForEvent(event, fromDate);
+    return fallbackOccurrence.getTime() > fromDate.getTime() ? [fallbackOccurrence] : [];
   }
 
   const staticOccurrences = getStaticOccurrences();
@@ -1198,6 +1270,15 @@ const getReminderModeValue = (event: SpecialDateEvent) => event.reminderMode ?? 
 
 const isFutureReminderDateTime = (value: string) => new Date(value).getTime() > Date.now();
 
+const hasMidnightTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return false;
+  }
+
+  return date.getHours() === 0 && date.getMinutes() === 0;
+};
+
 const dedupeDateOccurrences = (occurrences: Date[]) => {
   const seen = new Set<number>();
   return occurrences
@@ -1232,8 +1313,12 @@ const getReminderCandidates = (event: SpecialDateEvent) => {
     entryId: event.id,
   };
 
-  if (reminderMode === 'variable' || reminderMode === 'default') {
+  if (reminderMode === 'variable') {
     return variableCandidates;
+  }
+
+  if (reminderMode === 'default') {
+    return variableCandidates.length ? variableCandidates : [staticCandidate];
   }
 
   const candidatesByTime = new Map<number, typeof staticCandidate>();
@@ -1394,6 +1479,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const [savedRemindersPage, setSavedRemindersPage] = useState(0);
   const [isRefreshingSavedData, setIsRefreshingSavedData] = useState(false);
   const [isSavingEvent, setIsSavingEvent] = useState(false);
+  const [hoveredReminderMode, setHoveredReminderMode] = useState<ReminderModeValue | null>(null);
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const [apiStorageStatusMessage, setApiStorageStatusMessage] = useState<string | null>(null);
   const [reminderDeliveryDeviceEnabled, setReminderDeliveryDeviceEnabled] = useState(true);
@@ -1454,6 +1540,55 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const [eventLocationPredictions, setEventLocationPredictions] = useState<GoogleAddressPrediction[]>([]);
   const [eventLocationAutocompleteSessionToken] = useState(() => `event-addr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const skipNextEventLocationAutocompleteFetchRef = useRef(0);
+
+  const repairLegacyReminderTimes = useCallback((items: SpecialDateEvent[]) => {
+    let changed = false;
+
+    const repaired = items.map((event) => {
+      const reminderMode = getReminderModeValue(event);
+      if (reminderMode === 'none') {
+        return event;
+      }
+
+      const hasMidnightVariableReminder = (event.variableReminders || []).some((entry) => hasMidnightTime(entry.reminderDateTime));
+      const shouldRepairAllDayReminder = isAllDaySpecialDateEvent(event) && (
+        event.reminderAllDay
+        || hasMidnightTime(event.reminderDateTime)
+        || hasMidnightVariableReminder
+      );
+      if (!shouldRepairAllDayReminder) {
+        return event;
+      }
+
+      const reminderTimeZone = event.reminderTimeZone || effectiveReminderTimeZone;
+      const nextReminderDate = getLocalDateFromUtcDay(event.reminderDateTime);
+      nextReminderDate.setHours(defaultReminderTime.hour, defaultReminderTime.minute, 0, 0);
+      const nextReminderDateTime = convertWallDateInTimeZoneToUtcIso(nextReminderDate, reminderTimeZone);
+
+      const nextVariableReminders = (event.variableReminders || []).map((entry) => {
+        if (!hasMidnightTime(entry.reminderDateTime)) {
+          return entry;
+        }
+
+        const nextVariableDate = getLocalDateFromUtcDay(entry.reminderDateTime);
+        nextVariableDate.setHours(defaultReminderTime.hour, defaultReminderTime.minute, 0, 0);
+        return {
+          ...entry,
+          reminderDateTime: convertWallDateInTimeZoneToUtcIso(nextVariableDate, reminderTimeZone),
+        };
+      });
+
+      changed = true;
+      return {
+        ...event,
+        reminderDateTime: nextReminderDateTime,
+        reminderAllDay: false,
+        variableReminders: nextVariableReminders.length ? nextVariableReminders : event.variableReminders,
+      };
+    });
+
+    return { events: repaired, changed };
+  }, [defaultReminderTime.hour, defaultReminderTime.minute, effectiveReminderTimeZone]);
 
   useEffect(() => {
     setForm((current) => ({
@@ -1652,7 +1787,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     (async () => {
       try {
         const stored = await loadEvents(userId);
-        setEvents(stored);
+        const repaired = repairLegacyReminderTimes(stored);
+        setEvents(repaired.events);
+        if (repaired.changed) {
+          await saveEvents(repaired.events, userId);
+        }
       } catch (error) {
         console.warn('Initial event load failed', error);
         setEvents([]);
@@ -1691,7 +1830,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         console.warn('Notification permission request failed', error);
       }
     })();
-  }, [userId]);
+  }, [repairLegacyReminderTimes, userId]);
 
   useEffect(() => {
     const unsubscribe = subscribeApiStorageStatus((message) => {
@@ -1726,7 +1865,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setIsRefreshingSavedData(true);
     try {
       const reloaded = await loadEvents(userId);
-      setEvents(reloaded);
+      const repaired = repairLegacyReminderTimes(reloaded);
+      setEvents(repaired.events);
+      if (repaired.changed) {
+        await saveEvents(repaired.events, userId);
+      }
       if (!options?.silent) {
         setValidationMessage(null);
       }
@@ -1739,7 +1882,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       refreshInFlightRef.current = false;
       setIsRefreshingSavedData(false);
     }
-  }, [userId]);
+  }, [repairLegacyReminderTimes, userId]);
 
   const refreshPendingShareInvites = useCallback(async () => {
     if (!userId) {
@@ -1813,9 +1956,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
     const isAnnualEvent = isAnnualEventType(form.eventType, form.partySubtype);
     const isAllDay = isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay);
-    const defaultReminderEventDate = isAnnualEvent
-      ? getNextAnnualOccurrenceDate(new Date(form.eventDateTime), isAllDay)
-      : form.eventDateTime;
+    const defaultReminderEventDate = getDefaultReminderAnchorDate(form.eventDateTime, isAnnualEvent, isAllDay);
 
     const defaultReminders = buildDefaultReminderDrafts(
       defaultReminderEventDate,
@@ -1884,18 +2025,29 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         });
 
         setEvents(updatedEvents);
-        await saveEvents(updatedEvents, userId);
+        try {
+          await saveEvents(updatedEvents, userId);
+        } catch (error) {
+          console.warn('Unable to persist reminder trigger state before delivery.', error);
+          setApiStorageStatusMessage('Reminder delivery triggered, but saving reminder state failed. It may retry after refresh.');
+        }
 
         if (reminderDeliveryEmailEnabled) {
-          void sendReminderEmailNotification(userId, {
-            eventId: dueReminder.event.id,
-            eventTitle: dueReminder.event.title,
-            people: dueReminder.event.people,
-            eventDateTime: dueReminder.event.eventDateTime,
-            eventAllDay: dueReminder.event.eventAllDay,
-            reminderDateTime: dueReminder.reminderDateTime,
-            notes: dueReminder.entry?.notes || dueReminder.event.notes,
-          });
+          void (async () => {
+            const emailSent = await sendReminderEmailNotification(userId, {
+              eventId: dueReminder.event.id,
+              eventTitle: dueReminder.event.title,
+              people: dueReminder.event.people,
+              eventDateTime: dueReminder.event.eventDateTime,
+              eventAllDay: dueReminder.event.eventAllDay,
+              reminderDateTime: dueReminder.reminderDateTime,
+              notes: dueReminder.entry?.notes || dueReminder.event.notes,
+            });
+
+            if (!emailSent) {
+              setApiStorageStatusMessage('Reminder email was not sent. Check SMTP server settings and your email delivery toggle.');
+            }
+          })();
         }
 
         if (reminderDeliveryTextEnabled) {
@@ -2158,11 +2310,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         ? getNextAnnualOccurrenceDate(new Date(form.eventDateTime), isAllDay)
         : new Date(form.eventDateTime);
       const reminderDateValue = new Date(form.reminderDateTime);
-      const reminderDateTimeInUtc = convertWallDateInTimeZoneToUtcIso(reminderDateValue, form.reminderTimeZone);
       if (isAllDay) {
         eventDateValue.setHours(0, 0, 0, 0);
+      }
+
+      if (form.reminderAllDay) {
         reminderDateValue.setHours(0, 0, 0, 0);
       }
+      const reminderDateTimeInUtc = convertWallDateInTimeZoneToUtcIso(reminderDateValue, form.reminderTimeZone);
 
       const duplicateEvent = events.find((event) => isTrueDuplicateEvent(event, {
         title: resolvedEventType,
@@ -2178,7 +2333,17 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         return;
       }
 
-      const queuedReminderEntries: VariableReminderEntry[] = pendingVariableReminders.map((item) => ({
+      const effectivePendingVariableReminders = form.reminderMode === 'default' && !pendingVariableReminders.length
+        ? buildDefaultReminderDrafts(
+            getDefaultReminderAnchorDate(eventDateValue, isAnnualEvent, isAllDay),
+            notes,
+            peopleLabel,
+            resolvedEventType,
+            defaultReminderTime,
+          )
+        : pendingVariableReminders;
+
+      const queuedReminderEntries: VariableReminderEntry[] = effectivePendingVariableReminders.map((item) => ({
         id: item.id,
         reminderDateTime: form.reminderMode === 'static'
           ? convertWallDateInTimeZoneToUtcIso(new Date(item.reminderDateTime), form.reminderTimeZone)
@@ -2206,9 +2371,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         people: peopleLabel,
         ageAsOfToday: form.eventType === 'birthday' && parsedBirthdayAge !== null ? parsedBirthdayAge : undefined,
         eventDateTime: eventDateValue.toISOString(),
-        reminderDateTime: isAllDay ? reminderDateTimeInUtc : primaryReminderDateTime,
+        reminderDateTime: primaryReminderDateTime,
         eventAllDay: isAllDay,
-        reminderAllDay: isAllDay ? true : form.reminderAllDay,
+        reminderAllDay: form.reminderAllDay,
         reminderTimeZone: effectiveReminderTimeZone,
         frequency: reminderFrequency,
         reminderMode: isNoReminderMode(form.reminderMode) ? 'none' : form.reminderMode,
@@ -2242,8 +2407,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         const remindersToSchedule = variableReminderEntries;
 
         const schedulingResults = await Promise.allSettled(remindersToSchedule.map((item) => scheduleReminder(
-          `Reminder: ${newEvent.title}`,
-          `${newEvent.people} • ${newEvent.frequency}`,
+          'Calendar Reminder',
+          `${newEvent.title} for ${newEvent.people}`,
           new Date(item.reminderDateTime),
         )));
         const failedSchedules = schedulingResults.filter((result) => result.status === 'rejected');
@@ -2276,6 +2441,51 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setEvents(reloaded);
     setActiveReminder(null);
     restoreInterruptedModalContext();
+  };
+
+  const formatReminderLeadTime = (eventDateTime: string) => {
+    const deltaMs = new Date(eventDateTime).getTime() - Date.now();
+    if (deltaMs <= 0) {
+      return 'now';
+    }
+
+    const totalMinutes = Math.ceil(deltaMs / 60000);
+    if (totalMinutes < 60) {
+      return `${totalMinutes} min`;
+    }
+
+    const totalHours = Math.floor(totalMinutes / 60);
+    const remainingMinutes = totalMinutes % 60;
+    return remainingMinutes
+      ? `${totalHours} hr ${remainingMinutes} min`
+      : `${totalHours} hr`;
+  };
+
+  const formatActiveReminderWhen = (event: SpecialDateEvent) => {
+    const eventDate = new Date(event.eventDateTime);
+    if (isAllDaySpecialDateEvent(event)) {
+      return `On ${eventDate.toLocaleDateString()}`;
+    }
+
+    const timeLabel = eventDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return `@ ${timeLabel} (in ${formatReminderLeadTime(event.eventDateTime)})`;
+  };
+
+  const handleViewActiveReminder = () => {
+    if (!activeReminderEntry) {
+      setActiveReminder(null);
+      restoreInterruptedModalContext();
+      return;
+    }
+
+    setActiveReminder(null);
+    setInterruptedModalContext(null);
+    setRemindersForEventId(null);
+    setSelectedEventPopupDate(null);
+    setSelectedReminderPopup(null);
+    setSelectedReminderCalendarDate(null);
+    setCurrentView('landing');
+    setSelectedSummaryEventId(activeReminderEntry.event.id);
   };
 
   const deleteReminderEntry = async (eventId: string, reminderEntryId: string) => {
@@ -2428,13 +2638,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setForm({
       ...eventFormState,
       ageAsOfToday: eventFormState.eventType === 'birthday'
-        ? String(event.ageAsOfToday ?? getAgeAsOfToday(new Date(event.eventDateTime)) ?? '')
+        ? String(event.ageAsOfToday ?? getAgeAsOfToday(getLocalDateFromUtcDay(event.eventDateTime)) ?? '')
         : '',
       people: event.people,
       notes: event.notes || '',
       frequency: event.frequency,
       reminderMode: getReminderModeValue(event),
-      eventDateTime: new Date(event.eventDateTime),
+      eventDateTime: isAllDaySpecialDateEvent(event)
+        ? getLocalDateFromUtcDay(event.eventDateTime)
+        : new Date(event.eventDateTime),
       eventAllDay: isAllDaySpecialDateEvent(event),
       reminderDateTime: new Date(now),
       reminderAllDay: event.reminderAllDay,
@@ -2495,11 +2707,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         ? getNextAnnualOccurrenceDate(new Date(form.eventDateTime), isAllDay)
         : new Date(form.eventDateTime);
       const reminderDateValue = new Date(form.reminderDateTime);
-      const reminderDateTimeInUtc = convertWallDateInTimeZoneToUtcIso(reminderDateValue, form.reminderTimeZone);
       if (isAllDay) {
         eventDateValue.setHours(0, 0, 0, 0);
+      }
+
+      if (form.reminderAllDay) {
         reminderDateValue.setHours(0, 0, 0, 0);
       }
+      const reminderDateTimeInUtc = convertWallDateInTimeZoneToUtcIso(reminderDateValue, form.reminderTimeZone);
 
       const duplicateEvent = events.find((event) => event.id !== editingEvent.id && isTrueDuplicateEvent(event, {
         title: resolvedEventType,
@@ -2514,7 +2729,17 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         Alert.alert('Duplicate event', duplicateMessage);
         return;
       }
-      const queuedReminderEntries: VariableReminderEntry[] = sortVariableReminderDrafts(pendingVariableReminders).map((item) => ({
+      const effectivePendingVariableReminders = form.reminderMode === 'default' && !pendingVariableReminders.length
+        ? buildDefaultReminderDrafts(
+            getDefaultReminderAnchorDate(eventDateValue, isAnnualEvent, isAllDay),
+            notes,
+            peopleLabel,
+            resolvedEventType,
+            defaultReminderTime,
+          )
+        : sortVariableReminderDrafts(pendingVariableReminders);
+
+      const queuedReminderEntries: VariableReminderEntry[] = effectivePendingVariableReminders.map((item) => ({
         id: item.id,
         reminderDateTime: form.reminderMode === 'static'
           ? convertWallDateInTimeZoneToUtcIso(new Date(item.reminderDateTime), form.reminderTimeZone)
@@ -2544,9 +2769,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
               people: peopleLabel,
               ageAsOfToday: form.eventType === 'birthday' && parsedBirthdayAge !== null ? parsedBirthdayAge : undefined,
               eventDateTime: eventDateValue.toISOString(),
-              reminderDateTime: isAllDay ? reminderDateTimeInUtc : primaryReminderDateTime,
+              reminderDateTime: primaryReminderDateTime,
               eventAllDay: isAllDay,
-              reminderAllDay: isAllDay ? true : form.reminderAllDay,
+              reminderAllDay: form.reminderAllDay,
               reminderTimeZone: effectiveReminderTimeZone,
               frequency: reminderFrequency,
               reminderMode: isNoReminderMode(form.reminderMode) ? 'none' : form.reminderMode,
@@ -2653,7 +2878,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   };
 
   const formatEventSummary = (event: SpecialDateEvent) => {
-    const eventDate = new Date(event.eventDateTime);
+    const eventDate = isAllDaySpecialDateEvent(event)
+      ? getLocalDateFromUtcDay(event.eventDateTime)
+      : new Date(event.eventDateTime);
     const eventDateLabel = eventDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
     if (isAllDaySpecialDateEvent(event)) {
       return `Event: ${eventDateLabel} • All-day`;
@@ -2711,7 +2938,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   ) => {
     const acceptExplanation = 'As a registered user of the Special Date Reminder App clicking the Accept link will load the event into your Saved Events folder.';
     const normalizedCustomMessage = customMessage.trim().slice(0, 255);
-    const eventDate = new Date(event.eventDateTime);
+    const eventDate = isAllDaySpecialDateEvent(event)
+      ? getLocalDateFromUtcDay(event.eventDateTime)
+      : new Date(event.eventDateTime);
     const eventDateLabel = eventDate.toLocaleDateString();
     const eventTimeLabel = isAllDaySpecialDateEvent(event)
       ? 'All day'
@@ -2976,7 +3205,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     const field = pickerTarget === 'event' ? 'eventDateTime' : 'reminderDateTime';
     const nextDate = new Date(pickerMonth);
     nextDate.setDate(selectedDay);
-    const allDay = isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay);
+    const allDay = field === 'eventDateTime'
+      ? isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay)
+      : form.reminderAllDay;
     if (allDay) {
       nextDate.setHours(0, 0, 0, 0);
     } else {
@@ -3018,7 +3249,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const eventDatesByDay = useMemo(() => {
     const dates = new Set<string>();
     events.forEach((event) => {
-      const eventDate = new Date(event.eventDateTime);
+      const eventDate = isAllDaySpecialDateEvent(event)
+        ? getLocalDateFromUtcDay(event.eventDateTime)
+        : new Date(event.eventDateTime);
       dates.add(`${eventDate.getFullYear()}-${eventDate.getMonth()}-${eventDate.getDate()}`);
     });
     return dates;
@@ -3119,7 +3352,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     const entries: Array<{ kind: 'event'; event: SpecialDateEvent }> = [];
 
     savedEvents.forEach((event) => {
-      const eventDate = new Date(event.eventDateTime);
+      const eventDate = isAllDaySpecialDateEvent(event)
+        ? getLocalDateFromUtcDay(event.eventDateTime)
+        : new Date(event.eventDateTime);
       if (eventDate.getFullYear() === targetYear && eventDate.getMonth() === targetMonth && eventDate.getDate() === targetDay) {
         entries.push({ kind: 'event', event });
       }
@@ -3810,7 +4045,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   <Text style={styles.eventTitle}>{event.title}</Text>
                   <Text>{event.people}</Text>
                   <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventSummary(event)}</Text>
-                  <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(occurrence, isAllDaySpecialDateEvent(event))}</Text>
+                  <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(occurrence, event.reminderAllDay)}</Text>
                   {event.notes ? <Text style={styles.notesText}>{event.notes}</Text> : null}
                 </View>
                 <View style={styles.actionColumn}>
@@ -4028,7 +4263,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                           </TouchableOpacity>
                           {remindersForEvent.length ? remindersForEvent.map(({ occurrence }, index) => (
                             <Text key={`${entry.event.id}-saved-event-reminder-${occurrence.getTime()}-${index}`} style={styles.reminderListNotes}>
-                              Reminder {index + 1}: {formatDisplayDate(occurrence, isAllDaySpecialDateEvent(entry.event))}
+                              Reminder {index + 1}: {formatDisplayDate(occurrence, entry.event.reminderAllDay)}
                             </Text>
                           )) : null}
                         </View>
@@ -4148,6 +4383,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                     <View style={styles.reminderListRow}>
                       <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
                         <Text style={styles.reminderListDate}>{event.title} • {event.people}</Text>
+                        <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
+                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(occurrence, event.reminderAllDay)}</Text>
+                        </View>
                         <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
                           <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event date: {formatDetailDateLabel(event.eventDateTime, isAllDaySpecialDateEvent(event))}</Text>
                         </View>
@@ -4455,7 +4693,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                 const nextReminderDate = new Date(current.reminderDateTime);
                 if (nextIsAllDay) {
                   nextEventDate.setHours(0, 0, 0, 0);
-                  nextReminderDate.setHours(0, 0, 0, 0);
                 }
 
                 return {
@@ -4465,7 +4702,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                     ? (current.ageAsOfToday || getDefaultBirthdayAgeString(nextEventDate))
                     : '',
                   eventAllDay: nextIsAllDay,
-                  reminderAllDay: nextIsAllDay,
+                  reminderAllDay: nextIsAllDay ? current.reminderAllDay : false,
                   eventDateTime: nextEventDate,
                   reminderDateTime: nextReminderDate,
                 };
@@ -4586,7 +4823,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           </View>
         ) : null}
 
-        <Text style={styles.label}>Person, People, Group, Place or Description</Text>
+        <Text style={styles.label}>Who/What</Text>
         <TextInput
           style={styles.input}
           value={form.people}
@@ -4815,7 +5052,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           ]).map((option) => {
             const isSelected = form.reminderMode === option.value;
             return (
-              <TouchableOpacity
+              <Pressable
                 key={option.value}
                 style={[styles.frequencyOption, isSelected ? styles.frequencyOptionSelected : styles.frequencyOptionUnselected]}
                 onPress={() => {
@@ -4825,9 +5062,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   if (option.value === 'default') {
                     const isAnnualEvent = isAnnualEventType(form.eventType, form.partySubtype);
                     const isAllDay = isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay);
-                    const defaultReminderEventDate = isAnnualEvent
-                      ? getNextAnnualOccurrenceDate(new Date(form.eventDateTime), isAllDay)
-                      : form.eventDateTime;
+                    const defaultReminderEventDate = getDefaultReminderAnchorDate(form.eventDateTime, isAnnualEvent, isAllDay);
 
                     const defaultReminders = buildDefaultReminderDrafts(
                       defaultReminderEventDate,
@@ -4842,6 +5077,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
                   if (option.value !== 'static') {
                     setHasTouchedStaticReminderSchedule(false);
+                  }
+
+                  if (option.value !== 'default' && seededVariableDraftIds.length) {
+                    setPendingVariableReminders((current) => current.filter((item) => !seededVariableDraftIds.includes(item.id)));
+                    setSeededVariableDraftIds([]);
                   }
 
                   if (isFirstReminderModeSelection) {
@@ -4860,15 +5100,21 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
                   setForm({ ...form, reminderMode: option.value });
                 }}
+                onHoverIn={() => setHoveredReminderMode(option.value)}
+                onHoverOut={() => setHoveredReminderMode((current) => (current === option.value ? null : current))}
                 disabled={isSelected && option.value !== 'default'}
               >
                 <Text style={[styles.frequencyOptionText, isSelected ? styles.frequencyOptionTextSelected : styles.frequencyOptionTextUnselected]}>
                   {option.label}
                 </Text>
-              </TouchableOpacity>
+              </Pressable>
             );
           })}
         </View>
+
+        {hoveredReminderMode ? (
+          <Text style={styles.helperText}>{getReminderModeHoverMessage(hoveredReminderMode)}</Text>
+        ) : null}
 
         {isNoReminderMode(form.reminderMode) && (
           <Text style={styles.helperText}>You can add reminders later from the saved event details.</Text>
@@ -5286,32 +5532,27 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         restoreInterruptedModalContext();
       }}>
         <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Reminder</Text>
+          <View style={styles.activeReminderCard}>
+            <Text style={styles.activeReminderTitle}>Calendar Reminder</Text>
             {activeReminderEntry ? (
-              <View style={styles.reminderListItem}>
-                <View style={styles.reminderListRow}>
-                  <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
-                    <Text style={styles.reminderListDate}>{activeReminder?.title} • {activeReminder?.people}</Text>
-                    <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                      <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event: {formatDetailDateLabel(activeReminder?.eventDateTime, isAllDaySpecialDateEvent(activeReminderEntry.event))}</Text>
-                    </View>
-                    {activeReminder?.notes ? (
-                      <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                        <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Notes: {activeReminder.notes}</Text>
-                      </View>
-                    ) : null}
-                  </View>
-                </View>
-              </View>
+              <>
+                <Text style={styles.activeReminderEventTitle} numberOfLines={2}>{activeReminderEntry.event.title}</Text>
+                <Text style={styles.activeReminderEventDetails} numberOfLines={2}>{activeReminderEntry.event.people}</Text>
+                <Text style={styles.activeReminderEventDetails}>{formatActiveReminderWhen(activeReminderEntry.event)}</Text>
+              </>
             ) : (
-              <Text style={styles.reminderListNotes}>There are no active reminders for this event.</Text>
+              <Text style={styles.activeReminderEventDetails}>There are no active reminders for this event.</Text>
             )}
-            <View style={{ marginTop: 8 }}>
-              <Button title="Close" onPress={() => {
+            <View style={styles.activeReminderActions}>
+              <TouchableOpacity style={styles.activeReminderActionButton} onPress={handleViewActiveReminder}>
+                <Text style={styles.activeReminderActionText}>View</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.activeReminderActionButton} onPress={() => {
                 setActiveReminder(null);
                 restoreInterruptedModalContext();
-              }} />
+              }}>
+                <Text style={styles.activeReminderActionText}>Close</Text>
+              </TouchableOpacity>
             </View>
           </View>
         </View>
@@ -5818,6 +6059,52 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
     marginBottom: 8,
+  },
+  activeReminderCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#fff',
+    borderRadius: 0,
+    paddingTop: 14,
+    paddingBottom: 6,
+    overflow: 'hidden',
+  },
+  activeReminderTitle: {
+    fontSize: 28,
+    fontWeight: '700',
+    textAlign: 'center',
+    color: '#111827',
+    marginBottom: 8,
+  },
+  activeReminderEventTitle: {
+    fontSize: 22,
+    fontWeight: '500',
+    textAlign: 'center',
+    color: '#111827',
+    marginHorizontal: 16,
+  },
+  activeReminderEventDetails: {
+    fontSize: 16,
+    textAlign: 'center',
+    color: '#111827',
+    marginHorizontal: 16,
+    marginTop: 2,
+  },
+  activeReminderActions: {
+    marginTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  activeReminderActionButton: {
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+    alignItems: 'center',
+  },
+  activeReminderActionText: {
+    color: '#1d4ed8',
+    fontSize: 18,
+    fontWeight: '500',
   },
   modalBody: {
     fontSize: 15,

@@ -1745,6 +1745,8 @@ app.get('/google/places/autocomplete', async (req, res) => {
 
     const input = String(req.query.input || '').trim();
     const sessionToken = String(req.query.sessionToken || '').trim();
+    const normalizedRegionCode = String(req.query.regionCode || '').trim().toLowerCase();
+    const regionCode = /^[a-z]{2}$/.test(normalizedRegionCode) ? normalizedRegionCode : '';
     if (!input) {
       return res.status(400).json({ error: 'input is required' });
     }
@@ -1764,6 +1766,7 @@ app.get('/google/places/autocomplete', async (req, res) => {
       body: JSON.stringify({
         input,
         includedPrimaryTypes: ['street_address'],
+        ...(regionCode ? { includedRegionCodes: [regionCode] } : {}),
         ...(sessionToken ? { sessionToken } : {}),
       }),
     });

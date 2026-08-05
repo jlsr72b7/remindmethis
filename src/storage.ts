@@ -19,6 +19,57 @@ const EVENT_LOCATION_METADATA_PREFIX = '[SDR_EVENT_LOCATION]';
 let apiStorageStatusMessage: string | null = null;
 const apiStorageStatusListeners = new Set<(message: string | null) => void>();
 
+function resolveLocaleRegionCode(value: string): string | null {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    const IntlWithLocale = Intl as typeof Intl & { Locale?: new (tag: string) => { region?: string } };
+    if (typeof IntlWithLocale.Locale === 'function') {
+      const parsed = new IntlWithLocale.Locale(normalized);
+      const region = String(parsed.region || '').trim().toUpperCase();
+      if (/^[A-Z]{2}$/.test(region)) {
+        return region;
+      }
+    }
+  } catch {
+    // Fall through to regex parser below.
+  }
+
+  const fallbackMatch = normalized.match(/[-_]([A-Za-z]{2})(?:[-_]|$)/);
+  if (!fallbackMatch) {
+    return null;
+  }
+
+  const fallbackRegion = fallbackMatch[1].toUpperCase();
+  return /^[A-Z]{2}$/.test(fallbackRegion) ? fallbackRegion : null;
+}
+
+function resolveRuntimeRegionCode(): string | null {
+  const preferredRegion = typeof process !== 'undefined' && process.env
+    ? String(process.env.EXPO_PUBLIC_DEFAULT_REGION_CODE || '').trim().toUpperCase()
+    : '';
+  if (/^[A-Z]{2}$/.test(preferredRegion)) {
+    return preferredRegion;
+  }
+
+  const localeCandidates = [
+    typeof navigator !== 'undefined' ? String(navigator.language || '').trim() : '',
+    typeof Intl !== 'undefined' ? String(Intl.DateTimeFormat().resolvedOptions().locale || '').trim() : '',
+  ];
+
+  for (const candidate of localeCandidates) {
+    const region = resolveLocaleRegionCode(candidate);
+    if (region) {
+      return region;
+    }
+  }
+
+  return null;
+}
+
 export interface StoredUser {
   id: string;
   email: string;
@@ -1018,6 +1069,78 @@ export async function sendShareEmailNotification(payload: {
   }
 }
 
+export async function sendContactSupportMessage(payload: {
+  userId?: string;
+  userEmail?: string;
+  subject: string;
+  message: string;
+}) {
+  if (!USE_API_STORAGE) {
+    return { success: false, error: 'Support messaging requires API mode.' };
+  }
+
+  const supportEndpoints = ['/notifications/contact-support', '/notifications/support-email'];
+  const rawFallbackSupportEmail = String(
+    (typeof process !== 'undefined' && process.env && (process.env.EXPO_PUBLIC_SUPPORT_EMAIL || process.env.SUPPORT_EMAIL)) || '',
+  ).trim();
+  const fallbackSupportEmail = rawFallbackSupportEmail.replace(/^['\"]+|['\"]+$/g, '').trim();
+
+  try {
+    for (const endpoint of supportEndpoints) {
+      try {
+        await apiRequest<{ success: boolean }>(endpoint, {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        return { success: true };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : '';
+        if (errorMessage.includes('status 404')) {
+          continue;
+        }
+
+        return {
+          success: false,
+          error: errorMessage || 'Unable to send support message right now.',
+        };
+      }
+    }
+
+    if (fallbackSupportEmail) {
+      const textBody = [
+        'Special Date Reminder support request',
+        '',
+        `Subject: ${payload.subject}`,
+        `User email: ${payload.userEmail || 'not provided'}`,
+        `User ID: ${payload.userId || 'not provided'}`,
+        '',
+        payload.message,
+      ].join('\n');
+
+      await apiRequest<{ success: boolean }>('/notifications/share-email', {
+        method: 'POST',
+        body: JSON.stringify({
+          toEmail: fallbackSupportEmail,
+          subject: `Support request: ${payload.subject}`,
+          body: textBody,
+        }),
+      });
+
+      return { success: true };
+    }
+
+    return {
+      success: false,
+      error: 'Support email endpoint was not found on the server (404). Set EXPO_PUBLIC_SUPPORT_EMAIL to enable fallback delivery.',
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unable to send support message right now.',
+    };
+  }
+}
+
 export async function migrateLocalUsersAndEventsToApi() {
   if (!USE_API_STORAGE) {
     return { skipped: true, reason: 'api-storage-disabled' as const, usersMigrated: 0, eventsMigrated: 0 };
@@ -1391,6 +1514,10 @@ export async function findGoogleAddressPredictions(input: string, sessionToken?:
     const params = new URLSearchParams({ input: normalizedInput });
     if (sessionToken?.trim()) {
       params.set('sessionToken', sessionToken.trim());
+    }
+    const regionCode = resolveRuntimeRegionCode();
+    if (regionCode) {
+      params.set('regionCode', regionCode);
     }
 
     const response = await apiRequest<{ predictions: GoogleAddressPrediction[] }>(`/google/places/autocomplete?${params.toString()}`);
