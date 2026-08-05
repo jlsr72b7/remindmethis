@@ -528,7 +528,12 @@ const stripPayloadQueryParam = (value: string) => {
 };
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    services: {
+      googlePlacesConfigured: Boolean(googlePlacesApiKey),
+    },
+  });
 });
 
 app.get('/legal/user-agreement', (_req, res) => {
@@ -1735,7 +1740,7 @@ app.get('/users/find-by-phone', async (req, res) => {
 app.get('/google/places/autocomplete', async (req, res) => {
   try {
     if (!googlePlacesApiKey) {
-      return res.status(500).json({ error: 'Google Places API key is not configured' });
+      return res.status(500).json({ error: 'Google Places API key is not configured. Set GOOGLE_PLACES_API_KEY (or GOOGLE_MAPS_API_KEY).' });
     }
 
     const input = String(req.query.input || '').trim();
@@ -1788,7 +1793,7 @@ app.get('/google/places/autocomplete', async (req, res) => {
 app.get('/google/places/details', async (req, res) => {
   try {
     if (!googlePlacesApiKey) {
-      return res.status(500).json({ error: 'Google Places API key is not configured' });
+      return res.status(500).json({ error: 'Google Places API key is not configured. Set GOOGLE_PLACES_API_KEY (or GOOGLE_MAPS_API_KEY).' });
     }
 
     const placeId = String(req.query.placeId || '').trim();
@@ -2503,5 +2508,8 @@ app.listen(port, () => {
   console.log(`backend listening on port ${port}`);
   if (!smtpTransport) {
     console.warn('SMTP is not configured at startup. Set SMTP_HOST, SMTP_USER, and SMTP_PASS in environment variables.');
+  }
+  if (!googlePlacesApiKey) {
+    console.warn('Google Places is not configured at startup. Set GOOGLE_PLACES_API_KEY (or GOOGLE_MAPS_API_KEY).');
   }
 });

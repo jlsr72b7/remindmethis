@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
+  Alert,
   Animated,
+  Image,
   Linking,
   Platform,
   SafeAreaView,
@@ -47,6 +49,7 @@ import {
   saveReminderDeliverySettings,
   saveReminderSoundSettings,
   saveReminderTimeZoneSettings,
+  sendContactSupportMessage,
   resetPassword,
   signInUser,
   StoredUser,
@@ -60,6 +63,13 @@ import {
 import { getDeviceTimeZone, TIME_ZONE_OPTIONS } from './src/timeZones';
 
 type AuthMode = 'signin' | 'signup' | 'forgot';
+
+const API_PUBLIC_BASE_URL = (typeof process !== 'undefined' && process.env && process.env.EXPO_PUBLIC_API_BASE_URL
+  ? process.env.EXPO_PUBLIC_API_BASE_URL
+  : 'http://localhost:4000').replace(/\/$/, '');
+const USER_AGREEMENT_URL = (typeof process !== 'undefined' && process.env && process.env.EXPO_PUBLIC_USER_AGREEMENT_URL
+  ? process.env.EXPO_PUBLIC_USER_AGREEMENT_URL
+  : `${API_PUBLIC_BASE_URL}/legal/user-agreement`).trim();
 
 interface AppErrorBoundaryState {
   hasError: boolean;
@@ -279,8 +289,13 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
   const [city, setCity] = useState('');
   const [state, setState] = useState('');
   const [zipCode, setZipCode] = useState('');
+  const [signupAddressPredictions, setSignupAddressPredictions] = useState<GoogleAddressPrediction[]>([]);
+  const [isSignupAddressFocused, setIsSignupAddressFocused] = useState(false);
+  const [signupAddressAutocompleteSessionToken] = useState(() => `addr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const skipNextSignupAutocompleteFetchRef = useRef(0);
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [hasAcceptedUserAgreement, setHasAcceptedUserAgreement] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
@@ -297,14 +312,14 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
   const subtitle = mode === 'signin'
     ? 'Welcome back'
     : mode === 'signup'
-      ? 'Create a new account'
+      ? 'Enter email and use as login ID'
       : 'Enter your email to reset your password';
 
   const passwordRules = [
-    'At least 8 characters',
-    'At least 1 capital letter',
-    'At least 1 number',
-    'At least 1 special character',
+    { label: 'At least 8 characters', isMet: password.length >= 8 },
+    { label: 'At least 1 capital letter', isMet: /[A-Z]/.test(password) },
+    { label: 'At least 1 number', isMet: /\d/.test(password) },
+    { label: 'At least 1 special character', isMet: /[^A-Za-z0-9]/.test(password) },
   ];
 
   const formatPhoneNumber = (value: string) => {
@@ -361,6 +376,72 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
       Animated.timing(successAnim, { toValue: 0, duration: 220, delay: 900, useNativeDriver: true }),
     ]).start();
   }, [successMessage, successAnim]);
+
+  useEffect(() => {
+    if (mode !== 'signup') {
+      setHasAcceptedUserAgreement(false);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    let isActive = true;
+    const query = streetAddress.trim();
+
+    if (mode !== 'signup' || !isSignupAddressFocused) {
+      setSignupAddressPredictions([]);
+      return () => {
+        isActive = false;
+      };
+    }
+
+    if (query.length < 4) {
+      setSignupAddressPredictions([]);
+      return () => {
+        isActive = false;
+      };
+    }
+
+    if (skipNextSignupAutocompleteFetchRef.current > 0) {
+      skipNextSignupAutocompleteFetchRef.current -= 1;
+      setSignupAddressPredictions([]);
+      return () => {
+        isActive = false;
+      };
+    }
+
+    const timeoutId = setTimeout(() => {
+      void findGoogleAddressPredictions(query, signupAddressAutocompleteSessionToken).then((predictions) => {
+        if (isActive) {
+          setSignupAddressPredictions(predictions);
+        }
+      });
+    }, 250);
+
+    return () => {
+      isActive = false;
+      clearTimeout(timeoutId);
+    };
+  }, [isSignupAddressFocused, mode, signupAddressAutocompleteSessionToken, streetAddress]);
+
+  const applySignupAddressPrediction = useCallback(async (prediction: GoogleAddressPrediction) => {
+    skipNextSignupAutocompleteFetchRef.current = 2;
+    setSignupAddressPredictions([]);
+    setStreetAddress(prediction.mainText || prediction.description || '');
+
+    const resolved = await resolveGoogleAddressPrediction(prediction.placeId, signupAddressAutocompleteSessionToken);
+    const nextLine1 = resolved?.line1 || prediction.mainText || prediction.description;
+
+    setStreetAddress(nextLine1);
+    if (resolved) {
+      setCity(resolved.city || '');
+      setState(resolved.state || '');
+      setZipCode(resolved.zip || '');
+    }
+
+    if (message) {
+      setMessage(null);
+    }
+  }, [message, signupAddressAutocompleteSessionToken]);
 
   const handleSubmit = async () => {
     if (!email.trim()) {
@@ -454,6 +535,11 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
         return;
       }
 
+      if (!hasAcceptedUserAgreement) {
+        setMessage('Please confirm that you have read and agree to the user agreement.');
+        return;
+      }
+
       const fullName = [firstName.trim(), lastName.trim()].filter(Boolean).join(' ');
       const address = [streetAddress.trim(), addressLine2.trim(), `${city.trim()}, ${state} ${zipCode.trim()}`]
         .filter(Boolean)
@@ -479,6 +565,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
       setPassword('');
       setConfirmPassword('');
       setMobileNumber('');
+      setHasAcceptedUserAgreement(false);
       setSuccessMessage(
         result.message
           ? result.message
@@ -503,6 +590,28 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
     }
 
     onAuthenticated(signInResult.user.email, signInResult.user.id);
+  };
+
+  const handleOpenUserAgreement = async () => {
+    if (!USER_AGREEMENT_URL) {
+      setMessage('User agreement link is not configured yet. Set EXPO_PUBLIC_USER_AGREEMENT_URL.');
+      Alert.alert('User agreement unavailable', 'Set EXPO_PUBLIC_USER_AGREEMENT_URL in the frontend .env and restart Expo.');
+      return;
+    }
+
+    try {
+      const canOpen = await Linking.canOpenURL(USER_AGREEMENT_URL);
+      if (!canOpen) {
+        setMessage('Unable to open the user agreement on this device.');
+        Alert.alert('Unable to open link', 'This device could not open the user agreement link.');
+        return;
+      }
+
+      await Linking.openURL(USER_AGREEMENT_URL);
+    } catch {
+      setMessage('Unable to open the user agreement right now.');
+      Alert.alert('Unable to open link', 'The user agreement could not be opened right now.');
+    }
   };
 
   return (
@@ -534,20 +643,20 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
           ]}
         >
           <View style={styles.heroRow}>
-            <View style={styles.brandBadge}>
-              <Text style={styles.brandBadgeText}>✦</Text>
-            </View>
+            <Image source={require('./assets/icon.png')} style={styles.brandBadgeImage} resizeMode="cover" />
             <View style={styles.heroTextWrap}>
-              <Text style={styles.appName}>Special Dates</Text>
+              <Text style={styles.appName}>Remind Me This</Text>
               <Text style={styles.appTagline}>Stay on top of every important moment</Text>
             </View>
           </View>
 
-          <View style={[styles.modePill, mode === 'signup' ? styles.modePillActive : styles.modePillDefault]}>
-            <Text style={[styles.modePillText, mode === 'signup' ? styles.modePillTextActive : null]}>
-              {mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Reset password'}
-            </Text>
-          </View>
+          {mode === 'signup' ? null : (
+            <View style={[styles.modePill, mode === 'signup' ? styles.modePillActive : styles.modePillDefault]}>
+              <Text style={[styles.modePillText, mode === 'signup' ? styles.modePillTextActive : null]}>
+                {mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Reset password'}
+              </Text>
+            </View>
+          )}
 
           <Text style={styles.title}>{title}</Text>
           <Text style={styles.subtitle}>{subtitle}</Text>
@@ -555,38 +664,6 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
           {bootstrapNote ? <Text style={styles.bootstrapNote}>{bootstrapNote}</Text> : null}
 
           {message ? <Text style={styles.message}>{message}</Text> : null}
-
-          {mode === 'signup' ? (
-            <>
-              <Text style={styles.fieldLabel}>First name</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="First name"
-                value={firstName}
-                onChangeText={(value) => {
-                  setFirstName(value);
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-                autoCapitalize="words"
-              />
-
-              <Text style={styles.fieldLabel}>Last name</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Last name"
-                value={lastName}
-                onChangeText={(value) => {
-                  setLastName(value);
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-                autoCapitalize="words"
-              />
-            </>
-          ) : null}
 
           {successMessage ? (
             <Animated.View style={[styles.successToast, { opacity: successAnim }] }>
@@ -617,162 +694,223 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
 
           {mode === 'signup' ? (
             <>
-              <Text style={styles.fieldLabel}>Birth date</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="mm/dd/yyyy"
-                value={birthDate}
-                onChangeText={(value) => {
-                  setBirthDate(formatBirthDateInput(value));
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-                keyboardType="number-pad"
-                maxLength={10}
-              />
-            </>
-          ) : null}
+              <Text style={styles.signupPersonalDetailsTitle}>Personal details</Text>
 
-          {mode === 'signup' ? (
-            <>
-              <Text style={styles.fieldLabel}>Street address</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Street address"
-                value={streetAddress}
-                onChangeText={(value) => {
-                  setStreetAddress(value);
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-                autoCapitalize="words"
-              />
+              <View style={styles.accountNameRow}>
+                <View style={styles.accountInlineField}>
+                  <Text style={styles.fieldLabel}>First name</Text>
+                  <TextInput
+                    style={[styles.input, styles.accountCompactInput]}
+                    placeholder="First name"
+                    value={firstName}
+                    onChangeText={(value) => {
+                      setFirstName(value);
+                      if (message) {
+                        setMessage(null);
+                      }
+                    }}
+                    autoCapitalize="words"
+                  />
+                </View>
+                <View style={styles.accountInlineField}>
+                  <Text style={styles.fieldLabel}>Last name</Text>
+                  <TextInput
+                    style={[styles.input, styles.accountCompactInput]}
+                    placeholder="Last name"
+                    value={lastName}
+                    onChangeText={(value) => {
+                      setLastName(value);
+                      if (message) {
+                        setMessage(null);
+                      }
+                    }}
+                    autoCapitalize="words"
+                  />
+                </View>
+              </View>
 
-              <Text style={styles.fieldLabel}>Address line 2</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Apartment, unit, etc."
-                value={addressLine2}
-                onChangeText={(value) => {
-                  setAddressLine2(value);
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-                autoCapitalize="words"
-              />
-
-              <Text style={styles.fieldLabel}>City</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="City"
-                value={city}
-                onChangeText={(value) => {
-                  setCity(value);
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-                autoCapitalize="words"
-              />
-
-              <Text style={styles.fieldLabel}>State</Text>
-              <View style={styles.pickerWrap}>
-                <Picker
-                  selectedValue={state}
-                  onValueChange={(value) => {
-                    setState(value);
+              <View style={styles.accountAddressBlock}>
+                <Text style={styles.fieldLabel}>Address</Text>
+                <TextInput
+                  style={[styles.input, styles.accountCompactInput]}
+                  placeholder="Street address"
+                  value={streetAddress}
+                  onFocus={() => setIsSignupAddressFocused(true)}
+                  onBlur={() => {
+                    setIsSignupAddressFocused(false);
+                    setSignupAddressPredictions([]);
+                  }}
+                  onChangeText={(value) => {
+                    setStreetAddress(value);
                     if (message) {
                       setMessage(null);
                     }
                   }}
-                  style={styles.picker}
-                >
-                  <Picker.Item label="Select a state" value="" />
-                  <Picker.Item label="Alabama" value="AL" />
-                  <Picker.Item label="Alaska" value="AK" />
-                  <Picker.Item label="Arizona" value="AZ" />
-                  <Picker.Item label="Arkansas" value="AR" />
-                  <Picker.Item label="California" value="CA" />
-                  <Picker.Item label="Colorado" value="CO" />
-                  <Picker.Item label="Connecticut" value="CT" />
-                  <Picker.Item label="Delaware" value="DE" />
-                  <Picker.Item label="Florida" value="FL" />
-                  <Picker.Item label="Georgia" value="GA" />
-                  <Picker.Item label="Hawaii" value="HI" />
-                  <Picker.Item label="Idaho" value="ID" />
-                  <Picker.Item label="Illinois" value="IL" />
-                  <Picker.Item label="Indiana" value="IN" />
-                  <Picker.Item label="Iowa" value="IA" />
-                  <Picker.Item label="Kansas" value="KS" />
-                  <Picker.Item label="Kentucky" value="KY" />
-                  <Picker.Item label="Louisiana" value="LA" />
-                  <Picker.Item label="Maine" value="ME" />
-                  <Picker.Item label="Maryland" value="MD" />
-                  <Picker.Item label="Massachusetts" value="MA" />
-                  <Picker.Item label="Michigan" value="MI" />
-                  <Picker.Item label="Minnesota" value="MN" />
-                  <Picker.Item label="Mississippi" value="MS" />
-                  <Picker.Item label="Missouri" value="MO" />
-                  <Picker.Item label="Montana" value="MT" />
-                  <Picker.Item label="Nebraska" value="NE" />
-                  <Picker.Item label="Nevada" value="NV" />
-                  <Picker.Item label="New Hampshire" value="NH" />
-                  <Picker.Item label="New Jersey" value="NJ" />
-                  <Picker.Item label="New Mexico" value="NM" />
-                  <Picker.Item label="New York" value="NY" />
-                  <Picker.Item label="North Carolina" value="NC" />
-                  <Picker.Item label="North Dakota" value="ND" />
-                  <Picker.Item label="Ohio" value="OH" />
-                  <Picker.Item label="Oklahoma" value="OK" />
-                  <Picker.Item label="Oregon" value="OR" />
-                  <Picker.Item label="Pennsylvania" value="PA" />
-                  <Picker.Item label="Rhode Island" value="RI" />
-                  <Picker.Item label="South Carolina" value="SC" />
-                  <Picker.Item label="South Dakota" value="SD" />
-                  <Picker.Item label="Tennessee" value="TN" />
-                  <Picker.Item label="Texas" value="TX" />
-                  <Picker.Item label="Utah" value="UT" />
-                  <Picker.Item label="Vermont" value="VT" />
-                  <Picker.Item label="Virginia" value="VA" />
-                  <Picker.Item label="Washington" value="WA" />
-                  <Picker.Item label="West Virginia" value="WV" />
-                  <Picker.Item label="Wisconsin" value="WI" />
-                  <Picker.Item label="Wyoming" value="WY" />
-                </Picker>
+                  autoCapitalize="words"
+                />
+
+                {isSignupAddressFocused && signupAddressPredictions.length ? (
+                  <View style={styles.addressSuggestionsList}>
+                    {signupAddressPredictions.map((prediction) => (
+                      <TouchableOpacity
+                        key={prediction.placeId}
+                        style={styles.addressSuggestionItem}
+                        onPress={() => void applySignupAddressPrediction(prediction)}
+                      >
+                        <Text style={styles.addressSuggestionMainText} numberOfLines={1}>{prediction.mainText}</Text>
+                        {prediction.secondaryText ? <Text style={styles.addressSuggestionSecondaryText} numberOfLines={1}>{prediction.secondaryText}</Text> : null}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                ) : null}
+
+                <TextInput
+                  style={[styles.input, styles.accountCompactInput, !addressLine2.trim() && styles.optionalAddressLine2Input]}
+                  placeholder="Address line 2"
+                  placeholderTextColor="#94a3b8"
+                  value={addressLine2}
+                  onChangeText={(value) => {
+                    setAddressLine2(value);
+                    if (message) {
+                      setMessage(null);
+                    }
+                  }}
+                  autoCapitalize="words"
+                />
+
+                <TextInput
+                  style={[styles.input, styles.accountCompactInput]}
+                  placeholder="City"
+                  value={city}
+                  onChangeText={(value) => {
+                    setCity(value);
+                    if (message) {
+                      setMessage(null);
+                    }
+                  }}
+                  autoCapitalize="words"
+                />
+
+                <View style={styles.accountAddressCityStateZipRow}>
+                  <View style={[styles.accountInlineField, styles.accountStateField]}>
+                    <View style={[styles.pickerWrap, styles.accountCompactInput]}>
+                      <Picker
+                        selectedValue={state}
+                        onValueChange={(value) => {
+                          setState(value);
+                          if (message) {
+                            setMessage(null);
+                          }
+                        }}
+                        style={styles.picker}
+                      >
+                        <Picker.Item label="State" value="" />
+                        <Picker.Item label="Alabama" value="AL" />
+                        <Picker.Item label="Alaska" value="AK" />
+                        <Picker.Item label="Arizona" value="AZ" />
+                        <Picker.Item label="Arkansas" value="AR" />
+                        <Picker.Item label="California" value="CA" />
+                        <Picker.Item label="Colorado" value="CO" />
+                        <Picker.Item label="Connecticut" value="CT" />
+                        <Picker.Item label="Delaware" value="DE" />
+                        <Picker.Item label="Florida" value="FL" />
+                        <Picker.Item label="Georgia" value="GA" />
+                        <Picker.Item label="Hawaii" value="HI" />
+                        <Picker.Item label="Idaho" value="ID" />
+                        <Picker.Item label="Illinois" value="IL" />
+                        <Picker.Item label="Indiana" value="IN" />
+                        <Picker.Item label="Iowa" value="IA" />
+                        <Picker.Item label="Kansas" value="KS" />
+                        <Picker.Item label="Kentucky" value="KY" />
+                        <Picker.Item label="Louisiana" value="LA" />
+                        <Picker.Item label="Maine" value="ME" />
+                        <Picker.Item label="Maryland" value="MD" />
+                        <Picker.Item label="Massachusetts" value="MA" />
+                        <Picker.Item label="Michigan" value="MI" />
+                        <Picker.Item label="Minnesota" value="MN" />
+                        <Picker.Item label="Mississippi" value="MS" />
+                        <Picker.Item label="Missouri" value="MO" />
+                        <Picker.Item label="Montana" value="MT" />
+                        <Picker.Item label="Nebraska" value="NE" />
+                        <Picker.Item label="Nevada" value="NV" />
+                        <Picker.Item label="New Hampshire" value="NH" />
+                        <Picker.Item label="New Jersey" value="NJ" />
+                        <Picker.Item label="New Mexico" value="NM" />
+                        <Picker.Item label="New York" value="NY" />
+                        <Picker.Item label="North Carolina" value="NC" />
+                        <Picker.Item label="North Dakota" value="ND" />
+                        <Picker.Item label="Ohio" value="OH" />
+                        <Picker.Item label="Oklahoma" value="OK" />
+                        <Picker.Item label="Oregon" value="OR" />
+                        <Picker.Item label="Pennsylvania" value="PA" />
+                        <Picker.Item label="Rhode Island" value="RI" />
+                        <Picker.Item label="South Carolina" value="SC" />
+                        <Picker.Item label="South Dakota" value="SD" />
+                        <Picker.Item label="Tennessee" value="TN" />
+                        <Picker.Item label="Texas" value="TX" />
+                        <Picker.Item label="Utah" value="UT" />
+                        <Picker.Item label="Vermont" value="VT" />
+                        <Picker.Item label="Virginia" value="VA" />
+                        <Picker.Item label="Washington" value="WA" />
+                        <Picker.Item label="West Virginia" value="WV" />
+                        <Picker.Item label="Wisconsin" value="WI" />
+                        <Picker.Item label="Wyoming" value="WY" />
+                      </Picker>
+                    </View>
+                  </View>
+
+                  <View style={[styles.accountInlineField, styles.accountZipField]}>
+                    <TextInput
+                      style={[styles.input, styles.accountCompactInput]}
+                      placeholder="ZIP"
+                      value={zipCode}
+                      onChangeText={(value) => {
+                        setZipCode(value.replace(/\D/g, '').slice(0, 5));
+                        if (message) {
+                          setMessage(null);
+                        }
+                      }}
+                      keyboardType="number-pad"
+                      maxLength={5}
+                    />
+                  </View>
+                </View>
               </View>
 
-              <Text style={styles.fieldLabel}>ZIP code</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="ZIP code"
-                value={zipCode}
-                onChangeText={(value) => {
-                  setZipCode(value.replace(/\D/g, '').slice(0, 5));
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-                keyboardType="number-pad"
-                maxLength={5}
-              />
-
-              <Text style={styles.fieldLabel}>Mobile number</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="(555) 555-5555"
-                value={mobileNumber}
-                onChangeText={(value) => {
-                  setMobileNumber(formatPhoneNumber(value));
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-                keyboardType="phone-pad"
-                maxLength={14}
-              />
+              <View style={styles.accountMobileBirthRow}>
+                <View style={styles.accountInlineField}>
+                  <Text style={styles.fieldLabel}>Mobile phone</Text>
+                  <TextInput
+                    style={[styles.input, styles.accountCompactInput]}
+                    placeholder="(555) 555-5555"
+                    value={mobileNumber}
+                    onChangeText={(value) => {
+                      setMobileNumber(formatPhoneNumber(value));
+                      if (message) {
+                        setMessage(null);
+                      }
+                    }}
+                    keyboardType="phone-pad"
+                    maxLength={14}
+                  />
+                </View>
+                <View style={styles.accountInlineField}>
+                  <Text style={styles.fieldLabel}>Birth date</Text>
+                  <TextInput
+                    style={[styles.input, styles.accountCompactInput]}
+                    placeholder="mm/dd/yyyy"
+                    value={birthDate}
+                    onChangeText={(value) => {
+                      setBirthDate(formatBirthDateInput(value));
+                      if (message) {
+                        setMessage(null);
+                      }
+                    }}
+                    keyboardType="number-pad"
+                    maxLength={10}
+                  />
+                </View>
+              </View>
             </>
           ) : null}
 
@@ -831,8 +969,35 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
           {mode === 'signup' ? (
             <View style={styles.rulesBox}>
               {passwordRules.map((rule) => (
-                <Text key={rule} style={styles.ruleText}>{rule}</Text>
+                <Text key={rule.label} style={[styles.ruleText, rule.isMet ? styles.ruleTextMet : styles.ruleTextUnmet]}>{rule.label}</Text>
               ))}
+            </View>
+          ) : null}
+
+          {mode === 'signup' ? (
+            <View style={styles.authAgreementBlock}>
+              <TouchableOpacity
+                style={styles.authAgreementRow}
+                onPress={() => {
+                  setHasAcceptedUserAgreement((current) => !current);
+                  if (message) {
+                    setMessage(null);
+                  }
+                }}
+                activeOpacity={0.8}
+              >
+                <View style={styles.passwordCheckbox}>
+                  {hasAcceptedUserAgreement ? <View style={styles.passwordCheckboxChecked} /> : null}
+                </View>
+                <Text style={styles.authAgreementText}>I have read and agree to this user agreement.</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => void handleOpenUserAgreement()}
+                activeOpacity={0.8}
+                disabled={!USER_AGREEMENT_URL}
+              >
+                <Text style={[styles.authAgreementLink, !USER_AGREEMENT_URL && styles.authAgreementLinkDisabled]}>View user agreement</Text>
+              </TouchableOpacity>
             </View>
           ) : null}
 
@@ -914,6 +1079,7 @@ interface ContactsSnapshot {
 type ContactsView = 'contacts' | 'favorites' | 'deleted' | 'groups';
 type ContactsDisplayMode = 'detail' | 'summary';
 type GroupsDisplayMode = 'new' | 'summary' | 'detail';
+type AccountAction = 'profile' | 'settings' | 'calendar-sync';
 
 const createEmptyContactDraft = () => ({
   email: '',
@@ -1016,8 +1182,14 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [groupsDisplayMode, setGroupsDisplayMode] = useState<GroupsDisplayMode>('summary');
   const [activeSummaryGroupId, setActiveSummaryGroupId] = useState<string | null>(null);
   const [selectedContactIdToAdd, setSelectedContactIdToAdd] = useState('');
+  const [showContactSupportModal, setShowContactSupportModal] = useState(false);
+  const [contactSupportSubject, setContactSupportSubject] = useState('');
+  const [contactSupportMessage, setContactSupportMessage] = useState('');
+  const [contactSupportError, setContactSupportError] = useState<string | null>(null);
+  const [isSendingContactSupport, setIsSendingContactSupport] = useState(false);
   const [deliveryDevice, setDeliveryDevice] = useState(true);
   const [deliveryEmail, setDeliveryEmail] = useState(false);
+  const [activeAccountAction, setActiveAccountAction] = useState<AccountAction>('profile');
   const activeContacts = useMemo(() => contacts.filter((entry) => !entry.deletedAt), [contacts]);
   const favoriteContacts = useMemo(() => activeContacts.filter((entry) => entry.isFavorite), [activeContacts]);
   const deletedContacts = useMemo(() => contacts.filter((entry) => Boolean(entry.deletedAt)), [contacts]);
@@ -2252,6 +2424,51 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     onBack();
   };
 
+  const closeContactSupportModal = () => {
+    setShowContactSupportModal(false);
+    setContactSupportSubject('');
+    setContactSupportMessage('');
+    setContactSupportError(null);
+  };
+
+  const handleSendContactSupportMessage = async () => {
+    const normalizedSubject = contactSupportSubject.trim();
+    const normalizedMessage = contactSupportMessage.trim();
+
+    if (!normalizedSubject) {
+      setContactSupportError('Subject is required.');
+      return;
+    }
+
+    if (!normalizedMessage) {
+      setContactSupportError('Enter a message for Contact Us.');
+      return;
+    }
+
+    if (normalizedMessage.length > 255) {
+      setContactSupportError('Contact Us message can be up to 255 characters.');
+      return;
+    }
+
+    setContactSupportError(null);
+    setIsSendingContactSupport(true);
+    const result = await sendContactSupportMessage({
+      userId: user.id,
+      userEmail: user.email,
+      subject: normalizedSubject,
+      message: normalizedMessage,
+    });
+    setIsSendingContactSupport(false);
+
+    if (!result.success) {
+      setContactSupportError(result.error || 'Unable to send Contact Us message right now.');
+      return;
+    }
+
+    closeContactSupportModal();
+    setMessage('Your message was sent to support.');
+  };
+
   const handleChangePassword = async () => {
     if (!currentPassword || !newPassword || !confirmPassword) {
       setMessage('Please fill in the current password, new password, and confirmation.');
@@ -3027,7 +3244,6 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
               </>
             ) : calendarSyncProviderDraft === 'outlook' ? (
               <>
-                <Text style={styles.fieldLabel}>Outlook Email</Text>
                 <TextInput
                   style={styles.input}
                   value={outlookCalendarEmailDraft}
@@ -3037,7 +3253,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                   placeholder="name@example.com"
                 />
 
-                <Text style={styles.deleteHint}>Connect your Outlook account to enable calendar sync.</Text>
+                <Text style={styles.deleteHint}>Enter email and use as login ID</Text>
               </>
             ) : calendarSyncProviderDraft === 'apple' ? (
               <>
@@ -3126,9 +3342,12 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       {showContactsModal ? (
         <View style={styles.contactsStandalonePanel}>
           <View style={styles.accountHeaderRow}>
-            <View style={styles.accountHeaderTextWrap}>
-              <Text style={styles.accountTitle}>Contacts</Text>
-              <Text style={styles.accountSubtitle}>Manage your contacts, favorites, deleted, and groups.</Text>
+            <View style={styles.accountHeaderLeft}>
+              <Image source={require('./assets/icon.png')} style={styles.accountHeaderLogo} resizeMode="cover" />
+              <View style={styles.accountHeaderTextWrap}>
+                <Text style={styles.accountTitle}>Contacts</Text>
+                <Text style={styles.accountSubtitle}>Manage your contacts, favorites, deleted, and groups.</Text>
+              </View>
             </View>
             <TouchableOpacity style={styles.secondaryButton} onPress={() => setShowContactsModal(false)}>
               <Text style={styles.secondaryButtonText}>Back to Account</Text>
@@ -3162,6 +3381,15 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                 onPress={() => setActiveContactsView('groups')}
               >
                 <Text style={styles.contactsSidebarButtonText} numberOfLines={1}>Groups</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.contactsSidebarButton}
+                onPress={() => {
+                  setContactsMessage(null);
+                  setShowContactsModal(false);
+                }}
+              >
+                <Text style={styles.contactsSidebarButtonText} numberOfLines={1}>Close</Text>
               </TouchableOpacity>
             </View>
 
@@ -3691,258 +3919,332 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
               </View>
             </View>
           ) : null}
+
         </View>
       ) : null}
 
       {!showContactsModal ? (
       <View style={styles.accountCard}>
         <View style={styles.accountHeaderRow}>
-          <View style={styles.accountHeaderTextWrap}>
-            <Text style={styles.accountTitle}>Account</Text>
-            <Text style={styles.accountSubtitle}>{user.email}</Text>
+          <View style={styles.accountHeaderLeft}>
+            <Image source={require('./assets/icon.png')} style={styles.accountHeaderLogo} resizeMode="cover" />
+            <View style={styles.accountHeaderTextWrap}>
+              <Text style={styles.accountTitle}>Account</Text>
+              <Text style={styles.accountSubtitle}>{user.email}</Text>
+            </View>
           </View>
           <TouchableOpacity style={styles.secondaryButton} onPress={handleBack}>
             <Text style={styles.secondaryButtonText}>Back</Text>
           </TouchableOpacity>
         </View>
 
-        {message ? <Text style={styles.message}>{message}</Text> : null}
-
-        <Text style={styles.sectionTitle}>Personal details</Text>
-        <View style={styles.accountDetailsColumns}>
-          <View style={styles.accountDetailsPrimaryColumn}>
-            <Text style={styles.fieldLabel}>First name</Text>
-            <TextInput
-              style={[styles.input, styles.accountCompactInput]}
-              placeholder="First name"
-              value={firstName}
-              onChangeText={(value) => {
-                setFirstName(value);
-                if (message) {
-                  setMessage(null);
-                }
+        <View style={styles.accountShell}>
+          <View style={styles.accountNav}>
+            <TouchableOpacity
+              style={[styles.accountNavButton, activeAccountAction === 'profile' && styles.accountNavButtonActive]}
+              onPress={() => setActiveAccountAction('profile')}
+            >
+              <Text style={[styles.accountNavButtonText, activeAccountAction === 'profile' && styles.accountNavButtonTextActive]}>Profile</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.accountNavButton}
+              onPress={() => {
+                void handleOpenContacts();
               }}
-            />
+            >
+              <Text style={styles.accountNavButtonText}>Contacts</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.accountNavButton, activeAccountAction === 'settings' && styles.accountNavButtonActive]}
+              onPress={() => setActiveAccountAction('settings')}
+            >
+              <Text style={[styles.accountNavButtonText, activeAccountAction === 'settings' && styles.accountNavButtonTextActive]}>Settings</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.accountNavButton, activeAccountAction === 'calendar-sync' && styles.accountNavButtonActive]}
+              onPress={() => setActiveAccountAction('calendar-sync')}
+            >
+              <Text style={[styles.accountNavButtonText, activeAccountAction === 'calendar-sync' && styles.accountNavButtonTextActive]}>Calendar Sync</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.accountNavButton}
+              onPress={() => {
+                setMessage(null);
+                setContactSupportError(null);
+                setShowContactSupportModal(true);
+              }}
+            >
+              <Text style={styles.accountNavButtonText}>Contact Us</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.accountNavButton} onPress={handleBack}>
+              <Text style={styles.accountNavButtonText}>Close</Text>
+            </TouchableOpacity>
+          </View>
 
-            <View style={styles.accountAddressBlock}>
-              <Text style={styles.fieldLabel}>Address</Text>
+          <View style={styles.accountMainPane}>
+            {message ? <Text style={styles.message}>{message}</Text> : null}
 
-              <TextInput
-                style={[styles.input, styles.accountCompactInput]}
-                placeholder="Address line 1"
-                value={addressLine1}
-                onFocus={() => setIsAccountAddressLine1Focused(true)}
-                onBlur={() => {
-                  setIsAccountAddressLine1Focused(false);
-                  setAddressPredictions([]);
-                }}
-                onChangeText={(value) => {
-                  setAddressLine1(value);
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-              />
+            {activeAccountAction === 'profile' ? (
+              <>
+                <Text style={styles.sectionTitle}>Personal details</Text>
+                <View style={styles.accountDetailsColumns}>
+                  <View style={styles.accountDetailsPrimaryColumn}>
+                    <View style={styles.accountNameRow}>
+                      <View style={styles.accountInlineField}>
+                        <Text style={styles.fieldLabel}>First name</Text>
+                        <TextInput
+                          style={[styles.input, styles.accountCompactInput]}
+                          placeholder="First name"
+                          value={firstName}
+                          onChangeText={(value) => {
+                            setFirstName(value);
+                            if (message) {
+                              setMessage(null);
+                            }
+                          }}
+                        />
+                      </View>
 
-              {isAccountAddressLine1Focused && addressPredictions.length ? (
-                <View style={styles.addressSuggestionsList}>
-                  {addressPredictions.map((prediction) => (
-                    <TouchableOpacity
-                      key={prediction.placeId}
-                      style={styles.addressSuggestionItem}
-                      onPress={() => void applyAccountAddressPrediction(prediction)}
-                    >
-                      <Text style={styles.addressSuggestionMainText} numberOfLines={1}>{prediction.mainText}</Text>
-                      {prediction.secondaryText ? <Text style={styles.addressSuggestionSecondaryText} numberOfLines={1}>{prediction.secondaryText}</Text> : null}
+                      <View style={styles.accountInlineField}>
+                        <Text style={styles.fieldLabel}>Last name</Text>
+                        <TextInput
+                          style={[styles.input, styles.accountCompactInput]}
+                          placeholder="Last name"
+                          value={lastName}
+                          onChangeText={(value) => {
+                            setLastName(value);
+                            if (message) {
+                              setMessage(null);
+                            }
+                          }}
+                        />
+                      </View>
+                    </View>
+
+                    <View style={styles.accountAddressBlock}>
+                      <Text style={styles.fieldLabel}>Address</Text>
+
+                      <TextInput
+                        style={[styles.input, styles.accountCompactInput]}
+                        placeholder="Address line 1"
+                        value={addressLine1}
+                        onFocus={() => setIsAccountAddressLine1Focused(true)}
+                        onBlur={() => {
+                          setIsAccountAddressLine1Focused(false);
+                          setAddressPredictions([]);
+                        }}
+                        onChangeText={(value) => {
+                          setAddressLine1(value);
+                          if (message) {
+                            setMessage(null);
+                          }
+                        }}
+                      />
+
+                      {isAccountAddressLine1Focused && addressPredictions.length ? (
+                        <View style={styles.addressSuggestionsList}>
+                          {addressPredictions.map((prediction) => (
+                            <TouchableOpacity
+                              key={prediction.placeId}
+                              style={styles.addressSuggestionItem}
+                              onPress={() => void applyAccountAddressPrediction(prediction)}
+                            >
+                              <Text style={styles.addressSuggestionMainText} numberOfLines={1}>{prediction.mainText}</Text>
+                              {prediction.secondaryText ? <Text style={styles.addressSuggestionSecondaryText} numberOfLines={1}>{prediction.secondaryText}</Text> : null}
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      ) : null}
+
+                      <TextInput
+                        style={[styles.input, styles.accountCompactInput, !addressLine2.trim() && styles.optionalAddressLine2Input]}
+                        placeholder="Address line 2"
+                        placeholderTextColor="#94a3b8"
+                        value={addressLine2}
+                        onChangeText={(value) => {
+                          setAddressLine2(value);
+                          if (message) {
+                            setMessage(null);
+                          }
+                        }}
+                      />
+
+                      <TextInput
+                        style={[styles.input, styles.accountCompactInput]}
+                        placeholder="City"
+                        value={addressCity}
+                        onChangeText={(value) => {
+                          setAddressCity(value);
+                          if (message) {
+                            setMessage(null);
+                          }
+                        }}
+                      />
+
+                      <View style={styles.accountAddressCityStateZipRow}>
+                        <View style={[styles.accountInlineField, styles.accountStateField]}>
+                          <TextInput
+                            style={[styles.input, styles.accountCompactInput]}
+                            placeholder="State"
+                            value={addressState}
+                            onChangeText={(value) => {
+                              setAddressState(value.replace(/[^a-zA-Z]/g, '').toUpperCase().slice(0, 2));
+                              if (message) {
+                                setMessage(null);
+                              }
+                            }}
+                            autoCapitalize="characters"
+                            maxLength={2}
+                          />
+                        </View>
+
+                        <View style={[styles.accountInlineField, styles.accountZipField]}>
+                          <TextInput
+                            style={[styles.input, styles.accountCompactInput]}
+                            placeholder="ZIP"
+                            value={addressZip}
+                            onChangeText={(value) => {
+                              setAddressZip(value.replace(/\D/g, '').slice(0, 5));
+                              if (message) {
+                                setMessage(null);
+                              }
+                            }}
+                            keyboardType="number-pad"
+                            maxLength={5}
+                          />
+                        </View>
+                      </View>
+                    </View>
+
+                    <View style={styles.accountMobileBirthRow}>
+                      <View style={styles.accountInlineField}>
+                        <Text style={styles.fieldLabel}>Mobile phone</Text>
+                        <TextInput
+                          style={[styles.input, styles.accountCompactInput]}
+                          placeholder="(000) 000-0000"
+                          value={mobileNumber}
+                          onChangeText={(value) => {
+                            setMobileNumber(formatPhoneNumberInput(value));
+                            if (message) {
+                              setMessage(null);
+                            }
+                          }}
+                          keyboardType="phone-pad"
+                        />
+                      </View>
+
+                      <View style={styles.accountInlineField}>
+                        <Text style={styles.fieldLabel}>Birth date</Text>
+                        <TextInput
+                          style={[styles.input, styles.accountCompactInput]}
+                          placeholder="mm/dd/yyyy"
+                          value={birthDate}
+                          onChangeText={(value) => {
+                            setBirthDate(formatBirthDateInput(value));
+                            if (message) {
+                              setMessage(null);
+                            }
+                          }}
+                          keyboardType="number-pad"
+                          maxLength={10}
+                        />
+                      </View>
+                    </View>
+                  </View>
+                </View>
+
+                <View style={styles.passwordSection}>
+                  <View style={styles.accountActionButtonsRow}>
+                    <TouchableOpacity style={[styles.passwordToggleRow, styles.accountActionButton]} onPress={() => setShowPasswordModal(true)} activeOpacity={0.8}>
+                      <Text style={styles.passwordToggleText}>Change Password</Text>
                     </TouchableOpacity>
-                  ))}
+                    <TouchableOpacity style={[styles.deleteButton, styles.accountActionButton]} onPress={() => void handleDelete()} disabled={isSaving}>
+                      <Text style={styles.deleteButtonText}>Delete account</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
-              ) : null}
+              </>
+            ) : null}
 
-              <TextInput
-                style={[styles.input, styles.accountCompactInput, !addressLine2.trim() && styles.optionalAddressLine2Input]}
-                placeholder="Address line 2"
-                placeholderTextColor="#94a3b8"
-                value={addressLine2}
-                onChangeText={(value) => {
-                  setAddressLine2(value);
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-              />
+            {activeAccountAction === 'settings' ? (
+              <View style={styles.passwordSection}>
+                <Text style={styles.sectionTitle}>Reminder notifications</Text>
 
-              <TextInput
-                style={[styles.input, styles.accountCompactInput]}
-                placeholder="City"
-                value={addressCity}
-                onChangeText={(value) => {
-                  setAddressCity(value);
-                  if (message) {
-                    setMessage(null);
-                  }
-                }}
-              />
+                <Text style={styles.preferenceSubheading}>Delivery type</Text>
+                <View style={styles.deliveryOptionsRow}>
+                  <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption]} onPress={() => void handleDeliveryToggle('device')} activeOpacity={0.8}>
+                    <View style={styles.passwordCheckbox}>
+                      {deliveryDevice ? <View style={styles.passwordCheckboxChecked} /> : null}
+                    </View>
+                    <Text style={styles.preferenceToggleText}>Device</Text>
+                  </TouchableOpacity>
 
-              <View style={styles.accountAddressCityStateZipRow}>
-                <View style={[styles.accountInlineField, styles.accountStateField]}>
-                  <TextInput
-                    style={[styles.input, styles.accountCompactInput]}
-                    placeholder="State"
-                    value={addressState}
-                    onChangeText={(value) => {
-                      setAddressState(value.replace(/[^a-zA-Z]/g, '').toUpperCase().slice(0, 2));
-                      if (message) {
-                        setMessage(null);
-                      }
-                    }}
-                    autoCapitalize="characters"
-                    maxLength={2}
-                  />
+                  <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption]} onPress={() => void handleDeliveryToggle('email')} activeOpacity={0.8}>
+                    <View style={styles.passwordCheckbox}>
+                      {deliveryEmail ? <View style={styles.passwordCheckboxChecked} /> : null}
+                    </View>
+                    <Text style={styles.preferenceToggleText}>Email</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption, styles.preferenceToggleDisabled]} disabled activeOpacity={1}>
+                    <View style={[styles.passwordCheckbox, styles.passwordCheckboxDisabled]} />
+                    <Text style={styles.preferenceToggleDisabledText}>Text</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption, styles.preferenceToggleDisabled]} disabled activeOpacity={1}>
+                    <View style={[styles.passwordCheckbox, styles.passwordCheckboxDisabled]} />
+                    <Text style={styles.preferenceToggleDisabledText}>Voice</Text>
+                  </TouchableOpacity>
                 </View>
 
-                <View style={[styles.accountInlineField, styles.accountZipField]}>
-                  <TextInput
-                    style={[styles.input, styles.accountCompactInput]}
-                    placeholder="ZIP"
-                    value={addressZip}
-                    onChangeText={(value) => {
-                      setAddressZip(value.replace(/\D/g, '').slice(0, 5));
-                      if (message) {
-                        setMessage(null);
-                      }
-                    }}
-                    keyboardType="number-pad"
-                    maxLength={5}
-                  />
+                <TouchableOpacity style={styles.preferenceToggleRow} onPress={handleReminderSoundOffToggle} activeOpacity={0.8}>
+                  <View style={styles.passwordCheckbox}>
+                    {reminderSoundOff ? <View style={styles.passwordCheckboxChecked} /> : null}
+                  </View>
+                  <Text style={styles.preferenceToggleText}>Reminder notification sound off?</Text>
+                </TouchableOpacity>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.sectionTitle}>Time defaults</Text>
+                  <View style={styles.defaultReminderTimeRow}>
+                    <Text style={styles.preferenceSubheading}>Reminder time</Text>
+                    <Text style={styles.preferenceHelperText}>{formatReminderTimeLabel(defaultReminderHour, defaultReminderMinute)}</Text>
+                    <TouchableOpacity
+                      style={styles.defaultReminderTimeChangeButton}
+                      onPress={() => {
+                        setDefaultReminderDraftHour(defaultReminderHour);
+                        setDefaultReminderDraftMinute(defaultReminderMinute);
+                        setShowDefaultReminderTimeEditor(true);
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.passwordToggleText}>Change</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={[styles.defaultReminderTimeRow, { marginTop: 8 }]}>
+                    <Text style={styles.preferenceSubheading}>Time zone</Text>
+                    <Text style={styles.preferenceHelperText}>{defaultReminderTimeZone}</Text>
+                    <TouchableOpacity
+                      style={styles.defaultReminderTimeChangeButton}
+                      onPress={() => {
+                        setDefaultReminderTimeZoneDraft(defaultReminderTimeZone);
+                        setShowReminderTimeZoneEditor(true);
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.passwordToggleText}>Change</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
               </View>
-            </View>
-          </View>
+            ) : null}
 
-          <View style={styles.accountDetailsSecondaryColumn}>
-            <Text style={styles.fieldLabel}>Last name</Text>
-            <TextInput
-              style={[styles.input, styles.accountCompactInput]}
-              placeholder="Last name"
-              value={lastName}
-              onChangeText={(value) => {
-                setLastName(value);
-                if (message) {
-                  setMessage(null);
-                }
-              }}
-            />
-
-            <Text style={styles.fieldLabel}>Mobile phone</Text>
-            <TextInput
-              style={[styles.input, styles.accountCompactInput]}
-              placeholder="(000) 000-0000"
-              value={mobileNumber}
-              onChangeText={(value) => {
-                setMobileNumber(formatPhoneNumberInput(value));
-                if (message) {
-                  setMessage(null);
-                }
-              }}
-              keyboardType="phone-pad"
-            />
-
-            <Text style={styles.fieldLabel}>Birth date</Text>
-            <TextInput
-              style={[styles.input, styles.accountCompactInput]}
-              placeholder="mm/dd/yyyy"
-              value={birthDate}
-              onChangeText={(value) => {
-                setBirthDate(formatBirthDateInput(value));
-                if (message) {
-                  setMessage(null);
-                }
-              }}
-              keyboardType="number-pad"
-              maxLength={10}
-            />
-          </View>
-        </View>
-
-        <View style={styles.passwordSection}>
-          <TouchableOpacity style={styles.secondaryButton} onPress={() => void handleOpenContacts()} activeOpacity={0.8}>
-            <Text style={styles.secondaryButtonText}>Contacts</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.passwordSection}>
-          <Text style={styles.sectionTitle}>Reminder notifications</Text>
-
-          <Text style={styles.preferenceSubheading}>Delivery type</Text>
-          <View style={styles.deliveryOptionsRow}>
-            <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption]} onPress={() => void handleDeliveryToggle('device')} activeOpacity={0.8}>
-              <View style={styles.passwordCheckbox}>
-                {deliveryDevice ? <View style={styles.passwordCheckboxChecked} /> : null}
-              </View>
-              <Text style={styles.preferenceToggleText}>Device</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption]} onPress={() => void handleDeliveryToggle('email')} activeOpacity={0.8}>
-              <View style={styles.passwordCheckbox}>
-                {deliveryEmail ? <View style={styles.passwordCheckboxChecked} /> : null}
-              </View>
-              <Text style={styles.preferenceToggleText}>Email</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption, styles.preferenceToggleDisabled]} disabled activeOpacity={1}>
-              <View style={[styles.passwordCheckbox, styles.passwordCheckboxDisabled]} />
-              <Text style={styles.preferenceToggleDisabledText}>Text</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption, styles.preferenceToggleDisabled]} disabled activeOpacity={1}>
-              <View style={[styles.passwordCheckbox, styles.passwordCheckboxDisabled]} />
-              <Text style={styles.preferenceToggleDisabledText}>Phone call</Text>
-            </TouchableOpacity>
-          </View>
-
-          <TouchableOpacity style={styles.preferenceToggleRow} onPress={handleReminderSoundOffToggle} activeOpacity={0.8}>
-            <View style={styles.passwordCheckbox}>
-              {reminderSoundOff ? <View style={styles.passwordCheckboxChecked} /> : null}
-            </View>
-            <Text style={styles.preferenceToggleText}>Reminder notification sound off?</Text>
-          </TouchableOpacity>
-
-          <View style={{ marginTop: 12 }}>
-            <View style={styles.defaultReminderTimeRow}>
-              <Text style={styles.preferenceSubheading}>Default reminder time</Text>
-              <Text style={styles.preferenceHelperText}>{formatReminderTimeLabel(defaultReminderHour, defaultReminderMinute)}</Text>
-              <TouchableOpacity
-                style={styles.defaultReminderTimeChangeButton}
-                onPress={() => {
-                  setDefaultReminderDraftHour(defaultReminderHour);
-                  setDefaultReminderDraftMinute(defaultReminderMinute);
-                  setShowDefaultReminderTimeEditor(true);
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.passwordToggleText}>Change</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.defaultReminderTimeRow}>
-              <Text style={styles.preferenceSubheading}>Default reminder time zone</Text>
-              <Text style={styles.preferenceHelperText}>{defaultReminderTimeZone}</Text>
-              <TouchableOpacity
-                style={styles.defaultReminderTimeChangeButton}
-                onPress={() => {
-                  setDefaultReminderTimeZoneDraft(defaultReminderTimeZone);
-                  setShowReminderTimeZoneEditor(true);
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.passwordToggleText}>Change</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={{ marginTop: 8 }}>
-              <Text style={styles.preferenceSubheading}>Sync with Calendar</Text>
-              <View style={styles.calendarSyncRowsWrap}>
+            {activeAccountAction === 'calendar-sync' ? (
+              <View style={styles.passwordSection}>
+                <Text style={styles.sectionTitle}>Calendar sync</Text>
+                <View style={{ marginTop: 8 }}>
+                  <View style={styles.calendarSyncRowsWrap}>
                 <View style={styles.calendarSyncRow}>
                   <View style={styles.calendarSyncProviderColumn}>
                     <Text style={styles.calendarSyncProviderLabel}>Google</Text>
@@ -4178,24 +4480,77 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                 </TouchableOpacity>
               ) : null}
             </View>
-          </View>
-        </View>
+              </View>
+            ) : null}
 
-        <TouchableOpacity style={styles.primaryButton} onPress={handleSaveProfile} disabled={isSaving}>
-          <Text style={styles.primaryButtonText}>{isSaving ? 'Saving…' : 'Save Details'}</Text>
-        </TouchableOpacity>
-
-        <View style={styles.passwordSection}>
-          <View style={styles.accountActionButtonsRow}>
-            <TouchableOpacity style={[styles.passwordToggleRow, styles.accountActionButton]} onPress={() => setShowPasswordModal(true)} activeOpacity={0.8}>
-              <Text style={styles.passwordToggleText}>Change Password</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.deleteButton, styles.accountActionButton]} onPress={() => void handleDelete()} disabled={isSaving}>
-              <Text style={styles.deleteButtonText}>Delete account</Text>
+            <TouchableOpacity style={styles.primaryButton} onPress={handleSaveProfile} disabled={isSaving}>
+              <Text style={styles.primaryButtonText}>{isSaving ? 'Saving…' : 'Save Details'}</Text>
             </TouchableOpacity>
           </View>
         </View>
       </View>
+      ) : null}
+
+      {showContactSupportModal ? (
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, styles.contactSupportModalCard]}>
+            <Text style={styles.modalTitle}>Contact Us</Text>
+            <Text style={styles.deleteHint}>Send a message to support.</Text>
+
+            <Text style={styles.fieldLabel}>Subject</Text>
+            <TextInput
+              style={styles.input}
+              value={contactSupportSubject}
+              onChangeText={(value) => {
+                setContactSupportSubject(value);
+                if (contactSupportError) {
+                  setContactSupportError(null);
+                }
+              }}
+              placeholder="Subject"
+              maxLength={120}
+            />
+
+            <Text style={styles.fieldLabel}>Message</Text>
+            <TextInput
+              style={[styles.input, styles.contactSupportMessageInput]}
+              value={contactSupportMessage}
+              onChangeText={(value) => {
+                setContactSupportMessage(value.slice(0, 255));
+                if (contactSupportError) {
+                  setContactSupportError(null);
+                }
+              }}
+              placeholder="How can we help?"
+              multiline
+              maxLength={255}
+              textAlignVertical="top"
+            />
+            <Text style={styles.contactsEmptySubtext}>{`${contactSupportMessage.length}/255`}</Text>
+            {contactSupportError ? <Text style={styles.contactSupportErrorText}>{contactSupportError}</Text> : null}
+
+            <View style={styles.modalActionsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.primaryButton,
+                  styles.modalActionButton,
+                  (!contactSupportSubject.trim() || !contactSupportMessage.trim() || isSendingContactSupport) && styles.primaryButtonDisabled,
+                ]}
+                onPress={() => void handleSendContactSupportMessage()}
+                disabled={isSendingContactSupport || !contactSupportSubject.trim() || !contactSupportMessage.trim()}
+              >
+                <Text style={styles.primaryButtonText}>{isSendingContactSupport ? 'Sending...' : 'Send'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.secondaryButton, styles.modalActionButton]}
+                onPress={closeContactSupportModal}
+                disabled={isSendingContactSupport}
+              >
+                <Text style={styles.secondaryButtonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
       ) : null}
     </ScrollView>
   );
@@ -4425,7 +4780,12 @@ export default function App() {
     content = (
       <View style={styles.appShell}>
         <View style={styles.headerRow}>
-          <View style={styles.headerSpacer} />
+          <View style={styles.headerBrand}>
+            <Image source={require('./assets/icon.png')} style={styles.headerBrandImage} resizeMode="cover" />
+            <View style={styles.headerBrandTextWrap}>
+              <Text style={styles.headerBrandTitle}>Remind Me This</Text>
+            </View>
+          </View>
           <View style={styles.headerActions}>
             <TouchableOpacity style={styles.secondaryButton} onPress={() => setShowAccount(true)}>
               <Text style={styles.secondaryButtonText}>Account</Text>
@@ -4528,6 +4888,12 @@ const styles = StyleSheet.create({
   brandBadgeText: {
     color: '#fff',
     fontSize: 22,
+  },
+  brandBadgeImage: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    marginRight: 12,
   },
   heroTextWrap: {
     flex: 1,
@@ -4691,9 +5057,21 @@ const styles = StyleSheet.create({
     borderColor: '#e2e8f0',
   },
   ruleText: {
-    color: '#475569',
     fontSize: 12,
     marginBottom: 2,
+  },
+  ruleTextUnmet: {
+    color: '#475569',
+  },
+  ruleTextMet: {
+    color: '#15803d',
+    fontWeight: '700',
+  },
+  signupPersonalDetailsTitle: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 10,
   },
   linkRow: {
     marginTop: 14,
@@ -4714,13 +5092,29 @@ const styles = StyleSheet.create({
   },
   headerRow: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
+    justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 16,
     paddingTop: 8,
   },
-  headerSpacer: {
+  headerBrand: {
     flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  headerBrandImage: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    marginRight: 10,
+  },
+  headerBrandTextWrap: {
+    flexShrink: 1,
+  },
+  headerBrandTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#0f172a',
   },
   headerActions: {
     flexDirection: 'row',
@@ -4791,8 +5185,60 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 16,
   },
+  accountHeaderLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  accountHeaderLogo: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    marginRight: 12,
+  },
   accountHeaderTextWrap: {
     flex: 1,
+  },
+  accountShell: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  accountNav: {
+    width: 96,
+    borderWidth: 1,
+    borderColor: '#d9e2f0',
+    borderRadius: 12,
+    padding: 6,
+    backgroundColor: '#f8fafc',
+  },
+  accountNavButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    marginBottom: 5,
+    backgroundColor: '#e2e8f0',
+  },
+  accountNavButtonActive: {
+    backgroundColor: '#bfdbfe',
+  },
+  accountNavButtonText: {
+    color: '#0f172a',
+    fontWeight: '700',
+    fontSize: 10,
+    textAlign: 'left',
+  },
+  accountNavButtonTextActive: {
+    color: '#1d4ed8',
+  },
+  accountMainPane: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#d9e2f0',
+    borderRadius: 12,
+    padding: 12,
+    backgroundColor: '#ffffff',
   },
   accountDetailsColumns: {
     flexDirection: 'row',
@@ -4823,6 +5269,19 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: 8,
     flexWrap: 'wrap',
+  },
+  accountNameRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  accountMobileBirthRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    flexWrap: 'wrap',
+    marginTop: 2,
   },
   accountInlineField: {
     flex: 1,
@@ -4892,6 +5351,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 4,
     marginBottom: 8,
+  },
+  primaryButtonDisabled: {
+    backgroundColor: '#93c5fd',
   },
   modalActionsRow: {
     flexDirection: 'row',
@@ -5043,6 +5505,16 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textAlign: 'center',
     fontSize: 11,
+  },
+  contactSupportModalCard: {
+    maxWidth: 620,
+  },
+  contactSupportMessageInput: {
+    minHeight: 150,
+  },
+  contactSupportErrorText: {
+    color: '#b91c1c',
+    marginTop: 6,
   },
   contactsSummaryDetailsCard: {
     borderWidth: 1,
@@ -5217,6 +5689,31 @@ const styles = StyleSheet.create({
     margin: 2,
     borderRadius: 2,
     backgroundColor: '#0f172a',
+  },
+  authAgreementBlock: {
+    marginBottom: 14,
+  },
+  authAgreementRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 6,
+  },
+  authAgreementText: {
+    flex: 1,
+    color: '#0f172a',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  authAgreementLink: {
+    color: '#2563eb',
+    fontSize: 13,
+    fontWeight: '600',
+    marginLeft: 24,
+    textDecorationLine: 'underline',
+  },
+  authAgreementLinkDisabled: {
+    color: '#94a3b8',
+    textDecorationLine: 'none',
   },
   radioOuter: {
     width: 16,

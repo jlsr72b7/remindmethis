@@ -98,6 +98,28 @@ Required `.env` fields for Twilio:
 
 When Twilio is not configured, SMS requests are handled by the no-op provider so your reminder flow does not crash.
 
+## Google Places address autocomplete setup
+
+Address autofill endpoints require a server-side Google API key.
+
+Set one of these `.env` fields:
+
+- `GOOGLE_PLACES_API_KEY` (preferred)
+- `GOOGLE_MAPS_API_KEY` (legacy fallback)
+
+Required Google API enablement:
+
+- Places API (New)
+
+Related endpoints:
+
+- `GET /google/places/autocomplete?input=...`
+- `GET /google/places/details?placeId=...`
+
+If the key is missing, the backend returns HTTP 500 with:
+
+- `{"error":"Google Places API key is not configured. Set GOOGLE_PLACES_API_KEY (or GOOGLE_MAPS_API_KEY)."}`
+
 ## API endpoints
 
 - `POST /auth/signup`
