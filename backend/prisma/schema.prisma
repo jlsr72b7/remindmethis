@@ -49,6 +49,7 @@ model Event {
   people                String
   ageAsOfToday          Int?
   eventDateTime         DateTime
+  eventEndDateTime      DateTime?
   reminderDateTime      DateTime
   reminderTimeZone      String?
   eventAllDay           Boolean

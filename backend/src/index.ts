@@ -1914,6 +1914,7 @@ const findSharedEventDuplicateForRecipient = async (
     people: string;
     ageAsOfToday: number | null;
     eventDateTime: Date;
+    eventEndDateTime: Date | null;
     reminderDateTime: Date;
     reminderTimeZone: string | null;
     eventAllDay: boolean;
@@ -1968,6 +1969,12 @@ const findSharedEventDuplicateForRecipient = async (
       return false;
     }
 
+    const candidateEndTime = candidate.eventEndDateTime ? candidate.eventEndDateTime.getTime() : null;
+    const sourceEndTime = sourceEvent.eventEndDateTime ? sourceEvent.eventEndDateTime.getTime() : null;
+    if (candidateEndTime !== sourceEndTime) {
+      return false;
+    }
+
     if (candidate.reminderDateTime.getTime() !== sourceEvent.reminderDateTime.getTime()) {
       return false;
     }
@@ -2016,6 +2023,7 @@ const acceptSharedEventForRecipient = async (
     people: string;
     ageAsOfToday: number | null;
     eventDateTime: Date;
+    eventEndDateTime: Date | null;
     reminderDateTime: Date;
     reminderTimeZone: string | null;
     eventAllDay: boolean;
@@ -2043,6 +2051,7 @@ const acceptSharedEventForRecipient = async (
       people: sourceEvent.people,
       ageAsOfToday: sourceEvent.ageAsOfToday,
       eventDateTime: sourceEvent.eventDateTime,
+      eventEndDateTime: sourceEvent.eventEndDateTime,
       reminderDateTime: sourceEvent.reminderDateTime,
       reminderTimeZone: sourceEvent.reminderTimeZone,
       eventAllDay: sourceEvent.eventAllDay,
@@ -2162,6 +2171,7 @@ app.get('/shares/pending', async (req, res) => {
             people: true,
             ageAsOfToday: true,
             eventDateTime: true,
+            eventEndDateTime: true,
             eventAllDay: true,
             reminderDateTime: true,
             reminderAllDay: true,
@@ -2235,6 +2245,7 @@ app.post('/shares/respond', async (req, res) => {
         people: invite.sourceEvent.people,
         ageAsOfToday: invite.sourceEvent.ageAsOfToday,
         eventDateTime: invite.sourceEvent.eventDateTime,
+        eventEndDateTime: invite.sourceEvent.eventEndDateTime,
         reminderDateTime: invite.sourceEvent.reminderDateTime,
         reminderTimeZone: invite.sourceEvent.reminderTimeZone,
         eventAllDay: invite.sourceEvent.eventAllDay,
@@ -2299,6 +2310,7 @@ app.get('/shares/accept', async (req, res) => {
         people: sourceEvent.people,
         ageAsOfToday: sourceEvent.ageAsOfToday,
         eventDateTime: sourceEvent.eventDateTime,
+        eventEndDateTime: sourceEvent.eventEndDateTime,
         reminderDateTime: sourceEvent.reminderDateTime,
         reminderTimeZone: sourceEvent.reminderTimeZone,
         eventAllDay: sourceEvent.eventAllDay,
@@ -2521,6 +2533,7 @@ app.put('/users/:userId/events', async (req, res) => {
               ? null
               : Number.parseInt(String(event.ageAsOfToday), 10),
             eventDateTime: normalizedEventDateTime,
+            eventEndDateTime: event.eventEndDateTime ? new Date(event.eventEndDateTime) : null,
             reminderDateTime: new Date(event.reminderDateTime),
             reminderTimeZone: event.reminderTimeZone ? String(event.reminderTimeZone) : null,
             eventAllDay: normalizedEventAllDay,
@@ -2538,6 +2551,7 @@ app.put('/users/:userId/events', async (req, res) => {
               ? null
               : Number.parseInt(String(event.ageAsOfToday), 10),
             eventDateTime: normalizedEventDateTime,
+            eventEndDateTime: event.eventEndDateTime ? new Date(event.eventEndDateTime) : null,
             reminderDateTime: new Date(event.reminderDateTime),
             reminderTimeZone: event.reminderTimeZone ? String(event.reminderTimeZone) : null,
             eventAllDay: normalizedEventAllDay,
