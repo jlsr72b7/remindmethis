@@ -697,13 +697,13 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
             </View>
           </View>
 
-          {mode === 'signup' ? null : (
+          {mode === 'forgot' ? (
             <View style={[styles.modePill, mode === 'signup' ? styles.modePillActive : styles.modePillDefault]}>
               <Text style={[styles.modePillText, mode === 'signup' ? styles.modePillTextActive : null]}>
                 {mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Reset password'}
               </Text>
             </View>
-          )}
+          ) : null}
 
           <Text style={styles.title}>{title}</Text>
           <Text style={styles.subtitle}>{subtitle}</Text>
@@ -1210,6 +1210,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [googleCalendarId, setGoogleCalendarId] = useState('');
   const [isGoogleConnected, setIsGoogleConnected] = useState(false);
   const [isGoogleSyncPaused, setIsGoogleSyncPaused] = useState(false);
+  const [isGoogleAutoSyncEnabled, setIsGoogleAutoSyncEnabled] = useState(true);
   const [googleCalendarIdDraft, setGoogleCalendarIdDraft] = useState('');
   const [outlookCalendarEmail, setOutlookCalendarEmail] = useState('');
   const [outlookCalendarEmailDraft, setOutlookCalendarEmailDraft] = useState('');
@@ -1588,6 +1589,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         setGoogleCalendarId(calendarSyncSettings.google.calendarId || '');
         setGoogleCalendarIdDraft(calendarSyncSettings.google.calendarId || '');
         setIsGoogleSyncPaused(calendarSyncSettings.google.syncPaused === true);
+        setIsGoogleAutoSyncEnabled(calendarSyncSettings.google.autoSyncEnabled !== false);
         setOutlookCalendarEmail(calendarSyncSettings.outlook.email || '');
         setOutlookCalendarEmailDraft(calendarSyncSettings.outlook.email || '');
         setIsOutlookSyncPaused(calendarSyncSettings.outlook.syncPaused === true);
@@ -1599,6 +1601,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         console.warn('Unable to load account calendar sync settings', error);
         setCalendarSyncProviderDraft('none');
         setIsGoogleSyncPaused(false);
+        setIsGoogleAutoSyncEnabled(true);
         setOutlookCalendarEmail('');
         setOutlookCalendarEmailDraft('');
         setIsOutlookSyncPaused(false);
@@ -1633,7 +1636,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   };
 
   const buildCalendarSyncSettings = (overrides?: {
-    google?: Partial<{ calendarId: string; permission: CalendarSyncPermission; syncPaused: boolean }>;
+    google?: Partial<{ calendarId: string; permission: CalendarSyncPermission; syncPaused: boolean; autoSyncEnabled: boolean }>;
     outlook?: Partial<{ email: string; syncPaused: boolean }>;
     apple?: Partial<{ appleId: string; calendarName: string; syncPaused: boolean }>;
   }) => ({
@@ -1642,6 +1645,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       calendarId: overrides?.google?.calendarId ?? googleCalendarId,
       permission: overrides?.google?.permission ?? 'write',
       syncPaused: overrides?.google?.syncPaused ?? isGoogleSyncPaused,
+      autoSyncEnabled: overrides?.google?.autoSyncEnabled ?? isGoogleAutoSyncEnabled,
     },
     outlook: {
       email: overrides?.outlook?.email ?? outlookCalendarEmail,
@@ -1671,7 +1675,28 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     setGoogleCalendarIdDraft('');
     setIsGoogleConnected(false);
     setIsGoogleSyncPaused(false);
+    setIsGoogleAutoSyncEnabled(true);
   }, [buildCalendarSyncSettings, user.id]);
+
+  const handleToggleGoogleAutoSync = async () => {
+    if (!isGoogleConnected) {
+      setMessage('Connect Google first to manage auto-sync.');
+      return;
+    }
+
+    const nextAutoSyncEnabled = !isGoogleAutoSyncEnabled;
+    try {
+      await saveCalendarSyncSettings(buildCalendarSyncSettings({
+        google: {
+          autoSyncEnabled: nextAutoSyncEnabled,
+        },
+      }), user.id);
+      setIsGoogleAutoSyncEnabled(nextAutoSyncEnabled);
+    } catch (error) {
+      console.warn('Unable to update Google auto-sync preference', error);
+      setMessage('Unable to update Google auto-sync preference right now.');
+    }
+  };
 
   const clearOutlookCalendarAssociation = useCallback(async () => {
     try {
@@ -4338,7 +4363,26 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
             {activeAccountAction === 'calendar-sync' ? (
               <View style={styles.passwordSection}>
-                <Text style={styles.sectionTitle}>Calendar sync</Text>
+                <View style={styles.calendarSyncHeaderInline}>
+                  <Text style={styles.sectionTitle}>Calendar sync</Text>
+                  <TouchableOpacity
+                    style={[
+                      styles.calendarSyncAutoToggle,
+                      isGoogleAutoSyncEnabled ? styles.calendarSyncAutoToggleEnabled : styles.calendarSyncAutoToggleDisabled,
+                    ]}
+                    onPress={() => void handleToggleGoogleAutoSync()}
+                    activeOpacity={0.8}
+                  >
+                    <Text
+                      style={[
+                        styles.calendarSyncAutoToggleText,
+                        isGoogleAutoSyncEnabled ? styles.calendarSyncAutoToggleTextEnabled : styles.calendarSyncAutoToggleTextDisabled,
+                      ]}
+                    >
+                      {isGoogleAutoSyncEnabled ? 'Auto-sync enabled' : 'Auto-sync disabled'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
                 <View style={{ marginTop: 8 }}>
                   <View style={styles.calendarSyncRowsWrap}>
                 <View style={styles.calendarSyncRow}>
@@ -4353,7 +4397,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                         onPress={() => void handlePushGoogleCalendar()}
                         disabled={isPushingGoogleCalendar}
                       >
-                        <Text style={styles.primaryButtonText}>{isPushingGoogleCalendar ? 'Syncing…' : 'Google Sync'}</Text>
+                        <Text style={[styles.primaryButtonText, styles.calendarSyncPrimaryButtonText]}>{isPushingGoogleCalendar ? 'Syncing…' : 'Manual Sync'}</Text>
                       </TouchableOpacity>
                     ) : null}
                   </View>
@@ -4421,76 +4465,6 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                 </View>
 
                 <View style={styles.calendarSyncRow}>
-                  <View style={styles.calendarSyncProviderColumn}>
-                    <Text style={styles.calendarSyncProviderLabel}>Outlook</Text>
-                    <Text style={styles.calendarSyncProviderSubtext}>
-                      {isOutlookConfigured ? `Outlook Email: ${outlookCalendarEmail}` : 'Outlook Email: Not configured'}
-                    </Text>
-                  </View>
-                  <View style={styles.calendarSyncDetailsColumn}>
-                    <Text style={styles.calendarSyncStatusColumn}>
-                      Connect Status:{' '}
-                      <Text style={
-                        outlookSyncStatus === 'synched'
-                          ? styles.calendarSyncStatusConnectedText
-                          : outlookSyncStatus === 'paused'
-                            ? styles.calendarSyncStatusPausedText
-                            : styles.calendarSyncStatusNotConnectedText
-                      }>{outlookSyncStatus === 'synched' ? 'Connected' : outlookSyncStatus === 'paused' ? 'Paused' : 'Disconnected'}</Text>
-                    </Text>
-                    <View style={styles.calendarSyncRowActions}>
-                      {outlookSyncStatus === 'not-synched' || outlookSyncStatus === 'disconnected' ? (
-                        <TouchableOpacity
-                          style={styles.calendarSyncActionTextButton}
-                          onPress={() => void handleConnectOutlookFromSection()}
-                          disabled={isConnectingOutlook || isUpdatingOutlookConnection}
-                        >
-                          <Text style={styles.calendarSyncActionText}>{isConnectingOutlook ? 'Opening…' : 'Connect'}</Text>
-                        </TouchableOpacity>
-                      ) : null}
-
-                      {outlookSyncStatus === 'synched' ? (
-                        <>
-                          <TouchableOpacity
-                            style={styles.calendarSyncActionTextButton}
-                            onPress={() => void handlePauseOutlook()}
-                            disabled={isUpdatingOutlookConnection}
-                          >
-                            <Text style={styles.calendarSyncActionText}>{isUpdatingOutlookConnection ? 'Working…' : 'Pause'}</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={styles.calendarSyncActionTextButton}
-                            onPress={() => void handleRemoveOutlookConnection()}
-                            disabled={isUpdatingOutlookConnection}
-                          >
-                            <Text style={styles.calendarSyncActionText}>{isUpdatingOutlookConnection ? 'Working…' : 'Remove'}</Text>
-                          </TouchableOpacity>
-                        </>
-                      ) : null}
-
-                      {outlookSyncStatus === 'paused' ? (
-                        <>
-                          <TouchableOpacity
-                            style={styles.calendarSyncActionTextButton}
-                            onPress={() => void handleConnectOutlookFromSection()}
-                            disabled={isConnectingOutlook || isUpdatingOutlookConnection}
-                          >
-                            <Text style={styles.calendarSyncActionText}>{isConnectingOutlook ? 'Opening…' : 'Connect'}</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={styles.calendarSyncActionTextButton}
-                            onPress={() => void handleRemoveOutlookConnection()}
-                            disabled={isUpdatingOutlookConnection}
-                          >
-                            <Text style={styles.calendarSyncActionText}>{isUpdatingOutlookConnection ? 'Working…' : 'Remove'}</Text>
-                          </TouchableOpacity>
-                        </>
-                      ) : null}
-                    </View>
-                  </View>
-                </View>
-
-                <View style={[styles.calendarSyncRow, styles.calendarSyncRowLast]}>
                   <View style={styles.calendarSyncProviderColumn}>
                     <Text style={styles.calendarSyncProviderLabel}>Apple</Text>
                     <Text style={styles.calendarSyncProviderSubtext}>
@@ -4564,6 +4538,74 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                     </View>
                   </View>
                 </View>
+
+                <View style={[styles.calendarSyncRow, styles.calendarSyncRowLast]}>
+                  <View style={styles.calendarSyncProviderColumn}>
+                    <Text style={styles.calendarSyncProviderLabel}>Outlook</Text>
+                    <Text style={styles.calendarSyncProviderSubtext}>
+                      {isOutlookConfigured ? `Outlook Email: ${outlookCalendarEmail}` : 'Outlook Email: Not configured'}
+                    </Text>
+                  </View>
+                  <View style={styles.calendarSyncDetailsColumn}>
+                    <Text style={styles.calendarSyncStatusColumn}>
+                      Connect Status:{' '}
+                      <Text style={
+                        outlookSyncStatus === 'synched'
+                          ? styles.calendarSyncStatusConnectedText
+                          : outlookSyncStatus === 'paused'
+                            ? styles.calendarSyncStatusPausedText
+                            : styles.calendarSyncStatusNotConnectedText
+                      }>{outlookSyncStatus === 'synched' ? 'Connected' : outlookSyncStatus === 'paused' ? 'Paused' : 'Disconnected'}</Text>
+                    </Text>
+                    <View style={styles.calendarSyncRowActions}>
+                      {outlookSyncStatus === 'not-synched' || outlookSyncStatus === 'disconnected' ? (
+                        <TouchableOpacity
+                          style={styles.calendarSyncActionTextButton}
+                          onPress={() => {}}
+                        >
+                          <Text style={styles.calendarSyncActionText}>Disabled</Text>
+                        </TouchableOpacity>
+                      ) : null}
+
+                      {outlookSyncStatus === 'synched' ? (
+                        <>
+                          <TouchableOpacity
+                            style={styles.calendarSyncActionTextButton}
+                            onPress={() => void handlePauseOutlook()}
+                            disabled={isUpdatingOutlookConnection}
+                          >
+                            <Text style={styles.calendarSyncActionText}>{isUpdatingOutlookConnection ? 'Working…' : 'Pause'}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.calendarSyncActionTextButton}
+                            onPress={() => void handleRemoveOutlookConnection()}
+                            disabled={isUpdatingOutlookConnection}
+                          >
+                            <Text style={styles.calendarSyncActionText}>{isUpdatingOutlookConnection ? 'Working…' : 'Remove'}</Text>
+                          </TouchableOpacity>
+                        </>
+                      ) : null}
+
+                      {outlookSyncStatus === 'paused' ? (
+                        <>
+                          <TouchableOpacity
+                            style={styles.calendarSyncActionTextButton}
+                            onPress={() => {}}
+                          >
+                            <Text style={styles.calendarSyncActionText}>Disabled</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.calendarSyncActionTextButton}
+                            onPress={() => void handleRemoveOutlookConnection()}
+                            disabled={isUpdatingOutlookConnection}
+                          >
+                            <Text style={styles.calendarSyncActionText}>{isUpdatingOutlookConnection ? 'Working…' : 'Remove'}</Text>
+                          </TouchableOpacity>
+                        </>
+                      ) : null}
+                    </View>
+                  </View>
+                </View>
               </View>
 
               {isAppleConfigured ? (
@@ -4572,7 +4614,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                   onPress={() => void handlePushAppleCalendar()}
                   disabled={isPushingAppleCalendar}
                 >
-                  <Text style={styles.primaryButtonText}>{isPushingAppleCalendar ? 'Syncing…' : 'Sync to Apple Calendar'}</Text>
+                  <Text style={[styles.primaryButtonText, styles.calendarSyncPrimaryButtonText]}>{isPushingAppleCalendar ? 'Syncing…' : 'Sync to Apple Calendar'}</Text>
                 </TouchableOpacity>
               ) : null}
             </View>
@@ -5880,7 +5922,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   calendarSyncRowsWrap: {
-    marginTop: 6,
+    marginTop: 4,
     borderWidth: 1,
     borderColor: '#d9e2f0',
     borderRadius: 10,
@@ -5890,25 +5932,53 @@ const styles = StyleSheet.create({
   calendarSyncRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
   },
   calendarSyncRowLast: {
     borderBottomWidth: 0,
   },
+  calendarSyncHeaderInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  calendarSyncAutoToggle: {
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    marginTop: 3,
+  },
+  calendarSyncAutoToggleEnabled: {
+    backgroundColor: '#dcfce7',
+  },
+  calendarSyncAutoToggleDisabled: {
+    backgroundColor: '#fee2e2',
+  },
+  calendarSyncAutoToggleText: {
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  calendarSyncAutoToggleTextEnabled: {
+    color: '#15803d',
+  },
+  calendarSyncAutoToggleTextDisabled: {
+    color: '#b91c1c',
+  },
   calendarSyncProviderColumn: {
-    width: 220,
-    minWidth: 160,
+    width: 190,
+    minWidth: 130,
   },
   calendarSyncProviderLabel: {
     color: '#0f172a',
     fontWeight: '600',
+    fontSize: 13,
   },
   calendarSyncProviderSubtext: {
     color: '#64748b',
-    fontSize: 12,
+    fontSize: 11,
     marginTop: 2,
   },
   calendarSyncDetailsColumn: {
@@ -5918,7 +5988,8 @@ const styles = StyleSheet.create({
   calendarSyncStatusColumn: {
     color: '#334155',
     fontWeight: '500',
-    marginBottom: 6,
+    fontSize: 12,
+    marginBottom: 4,
   },
   calendarSyncStatusConnectedText: {
     color: '#15803d',
@@ -5933,17 +6004,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     flexWrap: 'wrap',
-    gap: 14,
+    gap: 8,
   },
   calendarSyncActionTextButton: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 7,
     backgroundColor: '#e2e8f0',
   },
   calendarSyncActionText: {
     color: '#0f172a',
     fontWeight: '600',
+    fontSize: 12,
   },
   calendarSyncActionRow: {
     flexDirection: 'row',
@@ -5958,17 +6030,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   syncPushButton: {
-    marginTop: 10,
-    marginBottom: 0,
-    alignSelf: 'flex-start',
-    paddingHorizontal: 14,
-  },
-  googleSyncInlineButton: {
     marginTop: 8,
     marginBottom: 0,
     alignSelf: 'flex-start',
     paddingHorizontal: 12,
     paddingVertical: 8,
+  },
+  googleSyncInlineButton: {
+    marginTop: 6,
+    marginBottom: 0,
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  calendarSyncPrimaryButtonText: {
+    fontSize: 12,
   },
   modalOverlay: {
     ...StyleSheet.absoluteFillObject,

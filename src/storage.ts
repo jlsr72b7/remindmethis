@@ -15,6 +15,7 @@ const API_BASE_URL = (typeof process !== 'undefined' && process.env && process.e
   : 'http://localhost:4000').replace(/\/$/, '');
 const USE_API_STORAGE = typeof process !== 'undefined' && process.env && process.env.EXPO_PUBLIC_USE_API_STORAGE === 'true';
 const API_REQUEST_TIMEOUT_MS = 8000;
+const GOOGLE_CALENDAR_PUSH_TIMEOUT_MS = 120000;
 const EVENT_LOCATION_METADATA_PREFIX = '[SDR_EVENT_LOCATION]';
 let apiStorageStatusMessage: string | null = null;
 const apiStorageStatusListeners = new Set<(message: string | null) => void>();
@@ -129,6 +130,7 @@ export interface GoogleCalendarSyncConfig {
   calendarId: string;
   permission: CalendarSyncPermission;
   syncPaused?: boolean;
+  autoSyncEnabled?: boolean;
 }
 
 export interface OutlookCalendarSyncConfig {
@@ -243,6 +245,7 @@ const defaultCalendarSyncSettings: CalendarSyncSettings = {
     calendarId: '',
     permission: 'write',
     syncPaused: false,
+    autoSyncEnabled: true,
   },
   outlook: {
     email: '',
@@ -372,6 +375,7 @@ function parseCalendarSyncSettings(raw: string | null): CalendarSyncSettings {
           ? parsed.google.permission
           : 'write',
         syncPaused: parsed.google?.syncPaused === true,
+        autoSyncEnabled: parsed.google?.autoSyncEnabled !== false,
       },
       outlook: {
         email: typeof parsed.outlook?.email === 'string' ? parsed.outlook.email.trim() : '',
@@ -437,9 +441,10 @@ async function readStoredEvents(storageKey: string): Promise<SpecialDateEvent[]>
   }
 }
 
-async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+async function apiRequest<T>(path: string, init?: RequestInit, options?: { timeoutMs?: number }): Promise<T> {
+  const timeoutMs = Number(options?.timeoutMs) > 0 ? Number(options?.timeoutMs) : API_REQUEST_TIMEOUT_MS;
   const timeoutController = new AbortController();
-  const timeoutHandle = setTimeout(() => timeoutController.abort(), API_REQUEST_TIMEOUT_MS);
+  const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
 
   if (init?.signal) {
     init.signal.addEventListener('abort', () => timeoutController.abort(), { once: true });
@@ -457,7 +462,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     });
   } catch (error) {
     if ((error as { name?: string })?.name === 'AbortError') {
-      throw new Error(`Request timed out after ${API_REQUEST_TIMEOUT_MS}ms`);
+      throw new Error(`Request timed out after ${timeoutMs}ms`);
     }
     throw error;
   } finally {
@@ -989,6 +994,8 @@ export async function pushGoogleCalendarEvents(userId: string): Promise<GoogleCa
         calendarId: googleConfig.calendarId || undefined,
         events,
       }),
+    }, {
+      timeoutMs: GOOGLE_CALENDAR_PUSH_TIMEOUT_MS,
     });
     return response;
   } catch (error) {
