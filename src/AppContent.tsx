@@ -21,10 +21,12 @@ import {
   findUserByPhone,
   findGoogleAddressPredictions,
   GoogleAddressPrediction,
+  loadCalendarSyncSettings,
   loadUser,
   loadEvents,
   loadPendingShareInvites,
   PendingShareInvite,
+  pushGoogleCalendarEvents,
   resolveGoogleAddressPrediction,
   respondToShareInvite,
   loadReminderDefaultTimeSettings,
@@ -197,36 +199,46 @@ const getDefaultDate = () => {
   return nextDate;
 };
 
+const getDefaultEndDate = (startDate: Date) => {
+  const nextEndDate = new Date(startDate);
+  nextEndDate.setHours(nextEndDate.getHours() + 1);
+  return nextEndDate;
+};
+
 const createEventId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-const createDefaultForm = (reminderTimeZone: string) => ({
-  eventType: 'birthday' as EventTypeValue,
-  partySubtype: 'birthday' as PartySubtypeValue,
-  medicalSubtype: 'appointment' as MedicalSubtypeValue,
-  dentalSubtype: 'cleaning' as DentalSubtypeValue,
-  workSubtype: 'meeting' as WorkSubtypeValue,
-  schoolSubtype: 'quiz' as SchoolSubtypeValue,
-  shareAfterSave: false,
-  eventLocationEnabled: false,
-  eventLocationPlaceId: '',
-  eventLocationFormattedAddress: '',
-  eventLocationLine1: '',
-  eventLocationCity: '',
-  eventLocationState: '',
-  eventLocationZip: '',
-  eventLocationPhone: '',
-  customType: '',
-  ageAsOfToday: '',
-  people: '',
-  notes: '',
-  frequency: 'monthly' as ReminderFrequency,
-  reminderMode: 'none' as ReminderModeValue,
-  eventDateTime: getDefaultDate(),
-  eventAllDay: false,
-  reminderDateTime: getDefaultDate(),
-  reminderAllDay: false,
-  reminderTimeZone,
-});
+const createDefaultForm = (reminderTimeZone: string) => {
+  const defaultEventDateTime = getDefaultDate();
+  return {
+    eventType: 'birthday' as EventTypeValue,
+    partySubtype: 'birthday' as PartySubtypeValue,
+    medicalSubtype: 'appointment' as MedicalSubtypeValue,
+    dentalSubtype: 'cleaning' as DentalSubtypeValue,
+    workSubtype: 'meeting' as WorkSubtypeValue,
+    schoolSubtype: 'quiz' as SchoolSubtypeValue,
+    shareAfterSave: false,
+    eventLocationEnabled: false,
+    eventLocationPlaceId: '',
+    eventLocationFormattedAddress: '',
+    eventLocationLine1: '',
+    eventLocationCity: '',
+    eventLocationState: '',
+    eventLocationZip: '',
+    eventLocationPhone: '',
+    customType: '',
+    ageAsOfToday: '',
+    people: '',
+    notes: '',
+    frequency: 'monthly' as ReminderFrequency,
+    reminderMode: 'none' as ReminderModeValue,
+    eventDateTime: defaultEventDateTime,
+    eventEndDateTime: getDefaultEndDate(defaultEventDateTime),
+    eventAllDay: false,
+    reminderDateTime: new Date(defaultEventDateTime),
+    reminderAllDay: false,
+    reminderTimeZone,
+  };
+};
 
 const getResetFormState = (reminderTimeZone: string) => {
   const now = new Date();
@@ -234,6 +246,7 @@ const getResetFormState = (reminderTimeZone: string) => {
   return {
     ...createDefaultForm(reminderTimeZone),
     eventDateTime: new Date(now),
+    eventEndDateTime: getDefaultEndDate(new Date(now)),
     reminderDateTime: new Date(now),
   };
 };
@@ -876,6 +889,22 @@ const isAllDayEvent = (eventType: EventTypeValue, partySubtype: PartySubtypeValu
   }
 
   return eventAllDay;
+};
+
+const supportsEventEndTime = (eventType: EventTypeValue, partySubtype: PartySubtypeValue, eventAllDay: boolean) => {
+  if (isAnnualEventType(eventType, partySubtype)) {
+    return false;
+  }
+
+  return !isAllDayEvent(eventType, partySubtype, eventAllDay);
+};
+
+const resolveEventEndDateTime = (eventStartDateTime: Date, eventEndDateTime?: Date | null) => {
+  if (eventEndDateTime instanceof Date && Number.isFinite(eventEndDateTime.getTime())) {
+    return eventEndDateTime;
+  }
+
+  return getDefaultEndDate(eventStartDateTime);
 };
 
 const isAnnualEventType = (eventType: EventTypeValue, partySubtype: PartySubtypeValue) => (
@@ -1597,6 +1626,30 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     }));
   }, [effectiveReminderTimeZone]);
 
+  const autoPushGoogleCalendarIfConfigured = useCallback(async () => {
+    if (!userId) {
+      return;
+    }
+
+    try {
+      const syncSettings = await loadCalendarSyncSettings(userId);
+      const googleConfig = syncSettings.google;
+
+      if (!googleConfig.calendarId || googleConfig.syncPaused || googleConfig.permission !== 'write' || googleConfig.autoSyncEnabled === false) {
+        return;
+      }
+
+      const result = await pushGoogleCalendarEvents(userId);
+      if (!result.success || result.failed > 0) {
+        const summary = result.errors?.[0] || 'Use Google Sync in Calendar Sync settings to retry.';
+        setApiStorageStatusMessage(`Google Calendar auto-sync had issues: ${summary}`);
+      }
+    } catch (error) {
+      console.warn('Google Calendar auto-sync failed', error);
+      setApiStorageStatusMessage('Google Calendar auto-sync failed. Use Google Sync in Calendar Sync settings to retry.');
+    }
+  }, [userId]);
+
   useEffect(() => {
     if (currentView !== 'share' || !userId) {
       return;
@@ -2306,12 +2359,27 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         ? 'once' as ReminderFrequency
         : form.frequency;
       const isAllDay = isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay);
+      const canUseEventEndTime = supportsEventEndTime(form.eventType, form.partySubtype, form.eventAllDay);
       const eventDateValue = isAnnualEventType(form.eventType, form.partySubtype)
         ? getNextAnnualOccurrenceDate(new Date(form.eventDateTime), isAllDay)
         : new Date(form.eventDateTime);
+      const eventEndDateValue = resolveEventEndDateTime(eventDateValue, form.eventEndDateTime);
       const reminderDateValue = new Date(form.reminderDateTime);
       if (isAllDay) {
         eventDateValue.setHours(0, 0, 0, 0);
+      }
+
+      if (canUseEventEndTime) {
+        eventEndDateValue.setFullYear(
+          eventDateValue.getFullYear(),
+          eventDateValue.getMonth(),
+          eventDateValue.getDate(),
+        );
+
+        if (eventEndDateValue.getTime() < eventDateValue.getTime()) {
+          setValidationMessage('Event End time cannot be before Event Start time.');
+          return;
+        }
       }
 
       if (form.reminderAllDay) {
@@ -2371,6 +2439,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         people: peopleLabel,
         ageAsOfToday: form.eventType === 'birthday' && parsedBirthdayAge !== null ? parsedBirthdayAge : undefined,
         eventDateTime: eventDateValue.toISOString(),
+        ...(canUseEventEndTime ? { eventEndDateTime: eventEndDateValue.toISOString() } : {}),
         reminderDateTime: primaryReminderDateTime,
         eventAllDay: isAllDay,
         reminderAllDay: form.reminderAllDay,
@@ -2402,6 +2471,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       await saveEvents(updated, userId);
       const reloaded = await loadEvents(userId);
       setEvents(reloaded);
+      await autoPushGoogleCalendarIfConfigured();
 
       if (form.reminderMode !== 'none') {
         const remindersToSchedule = variableReminderEntries;
@@ -2647,6 +2717,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       eventDateTime: isAllDaySpecialDateEvent(event)
         ? getLocalDateFromUtcDay(event.eventDateTime)
         : new Date(event.eventDateTime),
+      eventEndDateTime: event.eventEndDateTime
+        ? new Date(event.eventEndDateTime)
+        : getDefaultEndDate(isAllDaySpecialDateEvent(event)
+          ? getLocalDateFromUtcDay(event.eventDateTime)
+          : new Date(event.eventDateTime)),
       eventAllDay: isAllDaySpecialDateEvent(event),
       reminderDateTime: new Date(now),
       reminderAllDay: event.reminderAllDay,
@@ -2703,12 +2778,27 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         ? 'once' as ReminderFrequency
         : form.frequency;
       const isAllDay = isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay);
+      const canUseEventEndTime = supportsEventEndTime(form.eventType, form.partySubtype, form.eventAllDay);
       const eventDateValue = isAnnualEventType(form.eventType, form.partySubtype)
         ? getNextAnnualOccurrenceDate(new Date(form.eventDateTime), isAllDay)
         : new Date(form.eventDateTime);
+      const eventEndDateValue = resolveEventEndDateTime(eventDateValue, form.eventEndDateTime);
       const reminderDateValue = new Date(form.reminderDateTime);
       if (isAllDay) {
         eventDateValue.setHours(0, 0, 0, 0);
+      }
+
+      if (canUseEventEndTime) {
+        eventEndDateValue.setFullYear(
+          eventDateValue.getFullYear(),
+          eventDateValue.getMonth(),
+          eventDateValue.getDate(),
+        );
+
+        if (eventEndDateValue.getTime() < eventDateValue.getTime()) {
+          setValidationMessage('Event End time cannot be before Event Start time.');
+          return;
+        }
       }
 
       if (form.reminderAllDay) {
@@ -2769,6 +2859,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
               people: peopleLabel,
               ageAsOfToday: form.eventType === 'birthday' && parsedBirthdayAge !== null ? parsedBirthdayAge : undefined,
               eventDateTime: eventDateValue.toISOString(),
+              eventEndDateTime: canUseEventEndTime ? eventEndDateValue.toISOString() : undefined,
               reminderDateTime: primaryReminderDateTime,
               eventAllDay: isAllDay,
               reminderAllDay: form.reminderAllDay,
@@ -2801,6 +2892,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       await saveEvents(updatedEvents, userId);
       const reloaded = await loadEvents(userId);
       setEvents(reloaded);
+      await autoPushGoogleCalendarIfConfigured();
 
       if (shouldShareAfterSave && updatedEvent) {
         startShareForEvent(updatedEvent);
@@ -2816,7 +2908,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   };
 
   const ensureSelectableDateTime = (
-    field: 'eventDateTime' | 'reminderDateTime',
+    field: 'eventDateTime' | 'eventEndDateTime' | 'reminderDateTime',
     value: Date,
     allDay = false,
   ) => {
@@ -2836,18 +2928,41 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     return value;
   };
 
-  const updateFieldDateTime = (field: 'eventDateTime' | 'reminderDateTime', nextDate: Date, allDay = false) => {
+  const updateFieldDateTime = (field: 'eventDateTime' | 'eventEndDateTime' | 'reminderDateTime', nextDate: Date, allDay = false) => {
     setForm((current) => {
       const isAnnualEvent = field === 'eventDateTime' && isAnnualEventType(current.eventType, current.partySubtype);
       const normalizedDate = isAnnualEvent
         ? getNextAnnualOccurrenceDate(new Date(nextDate), isAllDayEvent(current.eventType, current.partySubtype, current.eventAllDay))
         : nextDate;
 
-      return { ...current, [field]: ensureSelectableDateTime(field, normalizedDate, allDay) };
+      const nextValue = ensureSelectableDateTime(field, normalizedDate, allDay);
+      if (field !== 'eventDateTime') {
+        return { ...current, [field]: nextValue };
+      }
+
+      const nextForm = { ...current, eventDateTime: nextValue };
+      if (!supportsEventEndTime(current.eventType, current.partySubtype, current.eventAllDay)) {
+        return nextForm;
+      }
+
+      const nextEventEndDateTime = new Date(resolveEventEndDateTime(nextValue, current.eventEndDateTime));
+      nextEventEndDateTime.setFullYear(
+        nextValue.getFullYear(),
+        nextValue.getMonth(),
+        nextValue.getDate(),
+      );
+      if (nextEventEndDateTime.getTime() < nextValue.getTime()) {
+        nextEventEndDateTime.setTime(nextValue.getTime());
+      }
+
+      return {
+        ...nextForm,
+        eventEndDateTime: nextEventEndDateTime,
+      };
     });
   };
 
-  const updateFieldTime = (field: 'eventDateTime' | 'reminderDateTime', hours: number, minutes: number) => {
+  const updateFieldTime = (field: 'eventDateTime' | 'eventEndDateTime' | 'reminderDateTime', hours: number, minutes: number) => {
     setForm((current) => {
       const nextDate = new Date(current[field]);
       nextDate.setHours(hours, minutes, 0, 0);
@@ -2859,7 +2974,30 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         return { ...current, [field]: ensureSelectableDateTime(field, normalizedDate) };
       }
 
-      return { ...current, [field]: ensureSelectableDateTime(field, nextDate) };
+      const nextValue = ensureSelectableDateTime(field, nextDate);
+      if (field !== 'eventDateTime') {
+        return { ...current, [field]: nextValue };
+      }
+
+      const nextForm = { ...current, eventDateTime: nextValue };
+      if (!supportsEventEndTime(current.eventType, current.partySubtype, current.eventAllDay)) {
+        return nextForm;
+      }
+
+      const nextEventEndDateTime = new Date(resolveEventEndDateTime(nextValue, current.eventEndDateTime));
+      nextEventEndDateTime.setFullYear(
+        nextValue.getFullYear(),
+        nextValue.getMonth(),
+        nextValue.getDate(),
+      );
+      if (nextEventEndDateTime.getTime() < nextValue.getTime()) {
+        nextEventEndDateTime.setTime(nextValue.getTime());
+      }
+
+      return {
+        ...nextForm,
+        eventEndDateTime: nextEventEndDateTime,
+      };
     });
   };
 
@@ -4670,7 +4808,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     </ScrollView>
   );
 
-  const renderCreateView = () => (
+  const renderCreateView = () => {
+    const effectiveEventEndDateTime = resolveEventEndDateTime(form.eventDateTime, form.eventEndDateTime);
+
+    return (
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <Text style={styles.title}>Create reminder</Text>
       <Text style={styles.subtitle}>Set up a new event and reminder schedule.</Text>
@@ -4949,7 +5090,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           </>
         ) : null}
 
-        <Text style={styles.label}>Event date</Text>
+        <Text style={styles.label}>Event start date</Text>
         <Button title={formatDateTimeLabel(form.eventDateTime, isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay))} onPress={() => openDatePicker('event')} />
 
         {form.eventType !== 'birthday' && form.eventType !== 'anniversary' && (
@@ -4972,7 +5113,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
         {!form.eventAllDay && form.eventType !== 'birthday' && form.eventType !== 'anniversary' && (
           <>
-            <Text style={styles.label}>Event time</Text>
+            <Text style={styles.label}>Event start time</Text>
             <View style={styles.timeRow}>
               <View style={styles.pickerWrapper}>
                 <Picker
@@ -5017,6 +5158,56 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                 </Picker>
               </View>
             </View>
+
+            {supportsEventEndTime(form.eventType, form.partySubtype, form.eventAllDay) ? (
+              <>
+                <Text style={styles.label}>Event end time</Text>
+                <View style={styles.timeRow}>
+                  <View style={styles.pickerWrapper}>
+                    <Picker
+                      selectedValue={effectiveEventEndDateTime.getHours() % 12 || 12}
+                      onValueChange={(value) => {
+                        const hourValue = Number(value);
+                        const currentHours = effectiveEventEndDateTime.getHours();
+                        const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
+                        updateFieldTime('eventEndDateTime', adjustedHours, effectiveEventEndDateTime.getMinutes());
+                      }}
+                      style={styles.picker}
+                    >
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
+                        <Picker.Item key={`end-hour-${hour}`} label={hour.toString()} value={hour} />
+                      ))}
+                    </Picker>
+                  </View>
+                  <View style={styles.pickerWrapper}>
+                    <Picker
+                      selectedValue={effectiveEventEndDateTime.getMinutes()}
+                      onValueChange={(value) => updateFieldTime('eventEndDateTime', effectiveEventEndDateTime.getHours(), Number(value))}
+                      style={styles.picker}
+                    >
+                      {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
+                        <Picker.Item key={`end-minute-${minute}`} label={minute.toString().padStart(2, '0')} value={minute} />
+                      ))}
+                    </Picker>
+                  </View>
+                  <View style={styles.pickerWrapper}>
+                    <Picker
+                      selectedValue={effectiveEventEndDateTime.getHours() >= 12 ? 'PM' : 'AM'}
+                      onValueChange={(value) => {
+                        const currentHours = effectiveEventEndDateTime.getHours();
+                        const isPm = value === 'PM';
+                        const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
+                        updateFieldTime('eventEndDateTime', adjustedHours, effectiveEventEndDateTime.getMinutes());
+                      }}
+                      style={styles.picker}
+                    >
+                      <Picker.Item label="AM" value="AM" />
+                      <Picker.Item label="PM" value="PM" />
+                    </Picker>
+                  </View>
+                </View>
+              </>
+            ) : null}
           </>
         )}
 
@@ -5522,7 +5713,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       </Modal>
 
     </ScrollView>
-  );
+    );
+  };
 
   return (
     <>

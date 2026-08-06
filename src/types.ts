@@ -22,6 +22,7 @@ export interface SpecialDateEvent {
   people: string;
   ageAsOfToday?: number;
   eventDateTime: string;
+  eventEndDateTime?: string;
   reminderDateTime: string;
   reminderTimeZone?: string;
   eventAllDay: boolean;
