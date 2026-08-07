@@ -1,11 +1,18 @@
 import { PrismaClient } from '@prisma/client';
 
+const isPrismaVerboseLoggingEnabled = String(process.env.PRISMA_VERBOSE_LOGS || '').trim().toLowerCase() === 'true';
+
 export const prisma = new PrismaClient({
-	log: [
-		{ emit: 'event', level: 'query' },
-		{ emit: 'event', level: 'error' },
-		{ emit: 'event', level: 'warn' },
-	],
+	log: isPrismaVerboseLoggingEnabled
+		? [
+			{ emit: 'event', level: 'query' },
+			{ emit: 'event', level: 'error' },
+			{ emit: 'event', level: 'warn' },
+		]
+		: [
+			{ emit: 'event', level: 'error' },
+			{ emit: 'event', level: 'warn' },
+		],
 });
 
 const sanitizeForLog = (value: unknown, depth = 0): unknown => {
@@ -34,15 +41,17 @@ const sanitizeForLog = (value: unknown, depth = 0): unknown => {
 	return value;
 };
 
-prisma.$on('query', (event) => {
-	console.log('[prisma:query]', {
-		timestamp: new Date().toISOString(),
-		durationMs: event.duration,
-		query: event.query,
-		params: event.params,
-		target: event.target,
+if (isPrismaVerboseLoggingEnabled) {
+	prisma.$on('query', (event) => {
+		console.log('[prisma:query]', {
+			timestamp: new Date().toISOString(),
+			durationMs: event.duration,
+			query: event.query,
+			params: event.params,
+			target: event.target,
+		});
 	});
-});
+}
 
 prisma.$on('error', (event) => {
 	console.error('[prisma:error]', {
@@ -60,33 +69,35 @@ prisma.$on('warn', (event) => {
 	});
 });
 
-prisma.$use(async (params, next) => {
-	const startedAt = Date.now();
-	console.log('[prisma:request]', {
-		timestamp: new Date().toISOString(),
-		model: params.model,
-		action: params.action,
-		args: sanitizeForLog(params.args),
-	});
+if (isPrismaVerboseLoggingEnabled) {
+	prisma.$use(async (params, next) => {
+		const startedAt = Date.now();
+		console.log('[prisma:request]', {
+			timestamp: new Date().toISOString(),
+			model: params.model,
+			action: params.action,
+			args: sanitizeForLog(params.args),
+		});
 
-	try {
-		const result = await next(params);
-		console.log('[prisma:response]', {
-			timestamp: new Date().toISOString(),
-			model: params.model,
-			action: params.action,
-			durationMs: Date.now() - startedAt,
-			result: sanitizeForLog(result),
-		});
-		return result;
-	} catch (error) {
-		console.error('[prisma:response:error]', {
-			timestamp: new Date().toISOString(),
-			model: params.model,
-			action: params.action,
-			durationMs: Date.now() - startedAt,
-			error: error instanceof Error ? error.message : String(error),
-		});
-		throw error;
-	}
-});
+		try {
+			const result = await next(params);
+			console.log('[prisma:response]', {
+				timestamp: new Date().toISOString(),
+				model: params.model,
+				action: params.action,
+				durationMs: Date.now() - startedAt,
+				result: sanitizeForLog(result),
+			});
+			return result;
+		} catch (error) {
+			console.error('[prisma:response:error]', {
+				timestamp: new Date().toISOString(),
+				model: params.model,
+				action: params.action,
+				durationMs: Date.now() - startedAt,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	});
+}

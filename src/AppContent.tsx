@@ -1993,14 +1993,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   }, [userId]);
 
   useEffect(() => {
-    const intervalId = setInterval(() => {
-      void refreshSavedData({ silent: true });
-    }, 30000);
-
-    return () => clearInterval(intervalId);
-  }, [refreshSavedData]);
-
-  useEffect(() => {
     void refreshPendingShareInvites();
 
     const intervalId = setInterval(() => {
@@ -2496,7 +2488,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       await saveEvents(updated, userId);
       const reloaded = await loadEvents(userId);
       setEvents(reloaded);
-      await autoPushGoogleCalendarIfConfigured();
+      void autoPushGoogleCalendarIfConfigured();
 
       if (form.reminderMode !== 'none') {
         const remindersToSchedule = variableReminderEntries;
@@ -2956,7 +2948,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       await saveEvents(updatedEvents, userId);
       const reloaded = await loadEvents(userId);
       setEvents(reloaded);
-      await autoPushGoogleCalendarIfConfigured();
+      void autoPushGoogleCalendarIfConfigured();
 
       if (shouldShareAfterSave && updatedEvent) {
         startShareForEvent(updatedEvent);
