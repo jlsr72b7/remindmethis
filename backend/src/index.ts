@@ -2529,6 +2529,19 @@ app.put('/users/:userId/events', async (req, res) => {
           ? parsedEventEndDateTime
           : null;
         const shouldUpdateEventEndDateTime = hasEventEndDateTimeField || hasLegacyEventEndDateTimeField || hasLegacyEventEndTimeField;
+
+        if (String(process.env.LOG_EVENT_END_DEBUG || '').trim().toLowerCase() === 'true') {
+          console.log('event end-time save debug', {
+            eventId: String(event.id || ''),
+            title: normalizedTitle,
+            eventAllDay: normalizedEventAllDay,
+            incomingEventEndDateTime: hasEventEndDateTimeField ? event.eventEndDateTime : undefined,
+            incomingLegacyEndDateTime: hasLegacyEventEndDateTimeField ? event.endDateTime : undefined,
+            incomingLegacyEventEndTime: hasLegacyEventEndTimeField ? event.eventEndTime : undefined,
+            resolvedEventEndDateTime: normalizedEventEndDateTime ? normalizedEventEndDateTime.toISOString() : null,
+            shouldUpdateEventEndDateTime,
+          });
+        }
         const requestedEventId = String(event.id);
         const eventWithSameId = await tx.event.findUnique({
           where: { id: requestedEventId },
