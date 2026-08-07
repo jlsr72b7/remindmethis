@@ -553,6 +553,7 @@ function mapApiEventToLocal(event: any): SpecialDateEvent {
       ? undefined
       : Number(event.ageAsOfToday),
     eventDateTime: new Date(event.eventDateTime).toISOString(),
+    eventEndDateTime: event.eventEndDateTime ? new Date(event.eventEndDateTime).toISOString() : undefined,
     reminderDateTime: new Date(event.reminderDateTime).toISOString(),
     reminderTimeZone: event.reminderTimeZone ? String(event.reminderTimeZone) : undefined,
     eventAllDay: Boolean(event.eventAllDay),
