@@ -1148,8 +1148,15 @@ app.post('/calendar-sync/google/push', async (req, res) => {
 
     let created = 0;
     let updated = 0;
+    let deleted = 0;
     let failed = 0;
     const errors: string[] = [];
+    const normalizedUserId = String(userId);
+    const activeEventIds = new Set<string>(
+      events
+        .map((entry: any) => String(entry?.id || '').trim())
+        .filter(Boolean),
+    );
 
     for (const event of events) {
       try {
@@ -1201,7 +1208,7 @@ app.post('/calendar-sync/google/push', async (req, res) => {
         const existingResponse = await calendar.events.list({
           calendarId,
           maxResults: 1,
-          privateExtendedProperty: [`sdrEventId=${eventId}`, `sdrUserId=${String(userId)}`],
+          privateExtendedProperty: [`sdrEventId=${eventId}`, `sdrUserId=${normalizedUserId}`],
           singleEvents: false,
           showDeleted: false,
         });
@@ -1220,7 +1227,7 @@ app.post('/calendar-sync/google/push', async (req, res) => {
               extendedProperties: {
                 private: {
                   sdrEventId: eventId,
-                  sdrUserId: String(userId),
+                  sdrUserId: normalizedUserId,
                 },
               },
             },
@@ -1237,7 +1244,7 @@ app.post('/calendar-sync/google/push', async (req, res) => {
               extendedProperties: {
                 private: {
                   sdrEventId: eventId,
-                  sdrUserId: String(userId),
+                  sdrUserId: normalizedUserId,
                 },
               },
             },
@@ -1250,10 +1257,50 @@ app.post('/calendar-sync/google/push', async (req, res) => {
       }
     }
 
+    // Delete previously synced Google events that no longer exist in the local event list.
+    let pageToken: string | undefined;
+    do {
+      const syncedPage = await calendar.events.list({
+        calendarId,
+        maxResults: 250,
+        privateExtendedProperty: [`sdrUserId=${normalizedUserId}`],
+        singleEvents: false,
+        showDeleted: false,
+        pageToken,
+      });
+
+      const syncedItems = syncedPage.data.items || [];
+      for (const syncedItem of syncedItems) {
+        const googleEventId = String(syncedItem.id || '').trim();
+        const syncedSourceEventId = String(syncedItem.extendedProperties?.private?.sdrEventId || '').trim();
+        if (!googleEventId || !syncedSourceEventId) {
+          continue;
+        }
+
+        if (activeEventIds.has(syncedSourceEventId)) {
+          continue;
+        }
+
+        try {
+          await calendar.events.delete({
+            calendarId,
+            eventId: googleEventId,
+          });
+          deleted += 1;
+        } catch (deleteError) {
+          failed += 1;
+          errors.push(deleteError instanceof Error ? deleteError.message : 'Unknown orphan delete error');
+        }
+      }
+
+      pageToken = syncedPage.data.nextPageToken || undefined;
+    } while (pageToken);
+
     return res.json({
       success: failed === 0,
       created,
       updated,
+      deleted,
       failed,
       errors,
     });
