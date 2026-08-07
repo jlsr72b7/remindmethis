@@ -2512,6 +2512,21 @@ app.put('/users/:userId/events', async (req, res) => {
           new Date(event.eventDateTime),
           normalizedEventAllDay,
         );
+        const hasEventEndDateTimeField = Object.prototype.hasOwnProperty.call(event, 'eventEndDateTime');
+        const hasLegacyEventEndDateTimeField = Object.prototype.hasOwnProperty.call(event, 'endDateTime');
+        const hasLegacyEventEndTimeField = Object.prototype.hasOwnProperty.call(event, 'eventEndTime');
+        const rawEventEndDateTime = hasEventEndDateTimeField
+          ? event.eventEndDateTime
+          : hasLegacyEventEndDateTimeField
+            ? event.endDateTime
+            : hasLegacyEventEndTimeField
+              ? event.eventEndTime
+              : undefined;
+        const parsedEventEndDateTime = rawEventEndDateTime ? new Date(rawEventEndDateTime) : null;
+        const normalizedEventEndDateTime = parsedEventEndDateTime && Number.isFinite(parsedEventEndDateTime.getTime())
+          ? parsedEventEndDateTime
+          : null;
+        const shouldUpdateEventEndDateTime = hasEventEndDateTimeField || hasLegacyEventEndDateTimeField || hasLegacyEventEndTimeField;
         const requestedEventId = String(event.id);
         const eventWithSameId = await tx.event.findUnique({
           where: { id: requestedEventId },
@@ -2533,7 +2548,7 @@ app.put('/users/:userId/events', async (req, res) => {
               ? null
               : Number.parseInt(String(event.ageAsOfToday), 10),
             eventDateTime: normalizedEventDateTime,
-            eventEndDateTime: event.eventEndDateTime ? new Date(event.eventEndDateTime) : null,
+            eventEndDateTime: normalizedEventEndDateTime,
             reminderDateTime: new Date(event.reminderDateTime),
             reminderTimeZone: event.reminderTimeZone ? String(event.reminderTimeZone) : null,
             eventAllDay: normalizedEventAllDay,
@@ -2551,7 +2566,7 @@ app.put('/users/:userId/events', async (req, res) => {
               ? null
               : Number.parseInt(String(event.ageAsOfToday), 10),
             eventDateTime: normalizedEventDateTime,
-            eventEndDateTime: event.eventEndDateTime ? new Date(event.eventEndDateTime) : null,
+            ...(shouldUpdateEventEndDateTime ? { eventEndDateTime: normalizedEventEndDateTime } : {}),
             reminderDateTime: new Date(event.reminderDateTime),
             reminderTimeZone: event.reminderTimeZone ? String(event.reminderTimeZone) : null,
             eventAllDay: normalizedEventAllDay,
