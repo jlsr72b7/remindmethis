@@ -2506,7 +2506,9 @@ app.put('/users/:userId/events', async (req, res) => {
 
       for (const event of incomingEvents) {
         const normalizedTitle = String(event.title);
-        const normalizedEventAllDay = Boolean(event.eventAllDay);
+        const normalizedTitleLower = normalizedTitle.trim().toLowerCase();
+        const isPartyTitle = normalizedTitleLower.endsWith(' party');
+        const normalizedEventAllDay = isPartyTitle ? false : Boolean(event.eventAllDay);
         const normalizedEventDateTime = moveAnnualEventDateToNextOccurrence(
           normalizedTitle,
           new Date(event.eventDateTime),

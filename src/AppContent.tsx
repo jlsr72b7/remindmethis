@@ -588,7 +588,7 @@ const buildDefaultReminderDrafts = (
 };
 
 const getEventFormState = (event: SpecialDateEvent) => {
-  const normalizedTitle = event.title.toLowerCase();
+  const normalizedTitle = event.title.toLowerCase().trim();
   const eventLocation = event.eventLocation;
   const hasEventLocation = Boolean(
     eventLocation
@@ -818,6 +818,27 @@ const formatDetailDateLabel = (value: string | Date | null | undefined, allDay =
   return allDay ? `${base} • All day` : base;
 };
 
+const formatEventDateAndTimeLabel = (event: SpecialDateEvent) => {
+  const isAllDay = isAllDaySpecialDateEvent(event);
+  const startDate = isAllDay
+    ? getLocalDateFromUtcDay(event.eventDateTime)
+    : new Date(event.eventDateTime);
+
+  const dateLabel = startDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  if (isAllDay) {
+    return `Event Date: ${dateLabel} • All day`;
+  }
+
+  const startTimeLabel = startDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const endDateTime = event.eventEndDateTime ? new Date(event.eventEndDateTime) : null;
+  if (endDateTime && Number.isFinite(endDateTime.getTime())) {
+    const endTimeLabel = endDateTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return `Event Date: ${dateLabel} • ${startTimeLabel} - ${endTimeLabel}`;
+  }
+
+  return `Event Date: ${dateLabel} • ${startTimeLabel}`;
+};
+
 const getEventLocationDisplayLines = (eventLocation?: EventLocationAddress) => {
   if (!eventLocation) {
     return [] as string[];
@@ -844,21 +865,25 @@ const getEventLocationDisplayLines = (eventLocation?: EventLocationAddress) => {
 };
 
 const isBirthdayEvent = (event: SpecialDateEvent) => {
-  const normalizedTitle = event.title.toLowerCase();
+  const normalizedTitle = event.title.toLowerCase().trim();
   return normalizedTitle === 'birthday' || normalizedTitle === 'birthday party' || normalizedTitle.endsWith('birthday party');
 };
 
 const isAllDaySpecialDateEvent = (event: SpecialDateEvent) => {
+  const normalizedTitle = event.title.toLowerCase().trim();
+  if (normalizedTitle.endsWith(' party')) {
+    return false;
+  }
+
   if (event.eventAllDay) {
     return true;
   }
 
-  const normalizedTitle = event.title.toLowerCase();
   return normalizedTitle === 'birthday' || normalizedTitle === 'anniversary';
 };
 
 const shouldKeepAfterEventTimePasses = (event: SpecialDateEvent) => {
-  const normalizedTitle = event.title.toLowerCase();
+  const normalizedTitle = event.title.toLowerCase().trim();
   if (normalizedTitle.includes('birthday') || normalizedTitle.includes('anniversary')) {
     return true;
   }
@@ -884,15 +909,15 @@ const isAllDayEvent = (eventType: EventTypeValue, partySubtype: PartySubtypeValu
     return true;
   }
 
-  if (eventType === 'party' && partySubtype === 'retirement') {
-    return eventAllDay;
+  if (eventType === 'party') {
+    return false;
   }
 
   return eventAllDay;
 };
 
 const supportsEventEndTime = (eventType: EventTypeValue, partySubtype: PartySubtypeValue, eventAllDay: boolean) => {
-  if (isAnnualEventType(eventType, partySubtype)) {
+  if (eventType === 'birthday' || eventType === 'anniversary') {
     return false;
   }
 
@@ -2676,6 +2701,44 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     Alert.alert('Deleted', 'The event and all associated reminders have been removed.');
   };
 
+  const formatEventSummary = (event: SpecialDateEvent) => {
+    const eventDateLabel = formatEventDateOnly(event);
+    if (isAllDaySpecialDateEvent(event)) {
+      return `Event: ${eventDateLabel} • All-day`;
+    }
+
+    return `Event: ${eventDateLabel} • ${formatEventTimeOnlyLabel(event)}`;
+  };
+
+  const formatEventDateOnly = (event: SpecialDateEvent) => {
+    const isAllDay = isAllDaySpecialDateEvent(event);
+    const startDate = isAllDay
+      ? getLocalDateFromUtcDay(event.eventDateTime)
+      : new Date(event.eventDateTime);
+
+    return startDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  };
+
+  const formatEventDateLabel = (event: SpecialDateEvent) => {
+    return `Event Date: ${formatEventDateOnly(event)}`;
+  };
+
+  const formatEventTimeOnlyLabel = (event: SpecialDateEvent) => {
+    if (isAllDaySpecialDateEvent(event)) {
+      return 'All day';
+    }
+
+    const startDate = new Date(event.eventDateTime);
+    const startTimeLabel = startDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+    const endDateTime = event.eventEndDateTime ? new Date(event.eventEndDateTime) : null;
+    if (endDateTime && Number.isFinite(endDateTime.getTime())) {
+      return `${startTimeLabel} - ${endDateTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+    }
+
+    return startTimeLabel;
+  };
+
   const startEditingEvent = (event: SpecialDateEvent) => {
     const now = getDefaultDate();
     setHasInitializedReminderScheduleView(false);
@@ -2819,6 +2882,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         Alert.alert('Duplicate event', duplicateMessage);
         return;
       }
+
       const effectivePendingVariableReminders = form.reminderMode === 'default' && !pendingVariableReminders.length
         ? buildDefaultReminderDrafts(
             getDefaultReminderAnchorDate(eventDateValue, isAnnualEvent, isAllDay),
@@ -3015,18 +3079,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     return `${dateLabel} • ${formatTimeLabel(value)}`;
   };
 
-  const formatEventSummary = (event: SpecialDateEvent) => {
-    const eventDate = isAllDaySpecialDateEvent(event)
-      ? getLocalDateFromUtcDay(event.eventDateTime)
-      : new Date(event.eventDateTime);
-    const eventDateLabel = eventDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-    if (isAllDaySpecialDateEvent(event)) {
-      return `Event: ${eventDateLabel} • All-day`;
-    }
-
-    return `Event: ${eventDateLabel} • ${formatTimeLabel(eventDate)}`;
-  };
-
   const getReminderCount = (event: SpecialDateEvent) => {
     return getUpcomingOccurrencesForEvent(event, new Date(), 730).length;
   };
@@ -3080,9 +3132,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       ? getLocalDateFromUtcDay(event.eventDateTime)
       : new Date(event.eventDateTime);
     const eventDateLabel = eventDate.toLocaleDateString();
-    const eventTimeLabel = isAllDaySpecialDateEvent(event)
-      ? 'All day'
-      : eventDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const eventTimeLabel = formatEventTimeOnlyLabel(event);
     const textLines = [
       `An event has been shared with you by ${senderName}.`,
     ];
@@ -3980,21 +4030,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   <View style={styles.eventDetails}>
                     <Text style={styles.eventTitle}>{event.title}</Text>
                     <Text>{event.people}</Text>
-                    <Text numberOfLines={1} ellipsizeMode="tail">{formatEventSummary(event)}</Text>
+                    <Text numberOfLines={1} ellipsizeMode="tail">{formatEventDateLabel(event)}</Text>
+                    <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventTimeOnlyLabel(event)}</Text>
                     {event.notes ? <Text style={styles.notesText}>{event.notes}</Text> : null}
-                    <TouchableOpacity
-                      onPress={() => openRemindersForEvent(event)}
-                      disabled={!getReminderSummaryState(event).isActive}
-                    >
-                      <Text
-                        style={[
-                          styles.reminderCountLink,
-                          !getReminderSummaryState(event).isActive && styles.reminderCountLinkDisabled,
-                        ]}
-                      >
-                        {getReminderSummaryState(event).label}
-                      </Text>
-                    </TouchableOpacity>
                   </View>
                   <View style={styles.actionColumn}>
                     <View style={styles.viewControlsRow}>
@@ -4014,22 +4052,36 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                         </TouchableOpacity>
                       </View>
                     </View>
-                    {(() => {
-                      const addressLines = getEventLocationDisplayLines(event.eventLocation);
-                      if (!addressLines.length) {
-                        return null;
-                      }
-
-                      return (
-                        <View style={styles.savedEventAddressBlock}>
-                          {addressLines.map((line, index) => (
-                            <Text key={`${event.id}-detail-address-${index}`} style={styles.savedEventAddressLine}>{line}</Text>
-                          ))}
-                        </View>
-                      );
-                    })()}
+                    <TouchableOpacity
+                      style={{ marginTop: 8 }}
+                      onPress={() => openRemindersForEvent(event)}
+                      disabled={!getReminderSummaryState(event).isActive}
+                    >
+                      <Text
+                        style={[
+                          styles.reminderCountLink,
+                          !getReminderSummaryState(event).isActive && styles.reminderCountLinkDisabled,
+                        ]}
+                      >
+                        {getReminderSummaryState(event).label}
+                      </Text>
+                    </TouchableOpacity>
                   </View>
                 </View>
+                {(() => {
+                  const addressLines = getEventLocationDisplayLines(event.eventLocation);
+                  if (!addressLines.length) {
+                    return null;
+                  }
+
+                  return (
+                    <View style={styles.savedEventAddressBlock}>
+                      {addressLines.map((line, index) => (
+                        <Text key={`${event.id}-detail-address-${index}`} style={styles.savedEventAddressLine}>{line}</Text>
+                      ))}
+                    </View>
+                  );
+                })()}
               </View>
             ))}
             {savedEventsPages.length > 1 ? (
@@ -4286,7 +4338,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                         <View style={{ flex: 1, minWidth: 0 }}>
                           <Text style={styles.reminderListDate}>{selectedEvent.title} • {selectedEvent.people}</Text>
                           <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(entry.reminderDateTime)}</Text>
-                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event date: {formatDetailDateLabel(selectedEvent.eventDateTime, isAllDaySpecialDateEvent(selectedEvent))}</Text>
+                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event date: {formatEventDateOnly(selectedEvent)} • {formatEventTimeOnlyLabel(selectedEvent)}</Text>
                           {selectedEvent.notes ? <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Notes: {selectedEvent.notes}</Text> : null}
                         </View>
                         <TouchableOpacity
@@ -4375,13 +4427,18 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                         <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
                           <Text style={styles.reminderListDate}>{entry.event.title} • {entry.event.people}</Text>
                           <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                            <Text numberOfLines={1} ellipsizeMode="tail">{formatEventSummary(entry.event)}</Text>
+                            <Text numberOfLines={1} ellipsizeMode="tail">{formatEventDateLabel(entry.event)}</Text>
+                          </View>
+                          <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
+                            <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventTimeOnlyLabel(entry.event)}</Text>
                           </View>
                           {entry.event.notes ? (
                             <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
                               <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Notes: {entry.event.notes}</Text>
                             </View>
                           ) : null}
+                        </View>
+                        <View style={styles.actionColumn}>
                           <TouchableOpacity
                             onPress={() => {
                               setSelectedEventPopupDate(null);
@@ -4399,13 +4456,13 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                               {getReminderSummaryState(entry.event).label}
                             </Text>
                           </TouchableOpacity>
-                          {remindersForEvent.length ? remindersForEvent.map(({ occurrence }, index) => (
-                            <Text key={`${entry.event.id}-saved-event-reminder-${occurrence.getTime()}-${index}`} style={styles.reminderListNotes}>
-                              Reminder {index + 1}: {formatDisplayDate(occurrence, entry.event.reminderAllDay)}
-                            </Text>
-                          )) : null}
                         </View>
                       </View>
+                      {remindersForEvent.length ? remindersForEvent.map(({ occurrence }, index) => (
+                        <Text key={`${entry.event.id}-saved-event-reminder-${occurrence.getTime()}-${index}`} style={styles.reminderListNotes}>
+                          Reminder {index + 1}: {formatDisplayDate(occurrence, entry.event.reminderAllDay)}
+                        </Text>
+                      )) : null}
                     </View>
                   );
                 }) : (
@@ -4430,24 +4487,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   <View style={styles.eventDetails}>
                     <Text style={styles.eventTitle}>{selectedSummaryEvent.title}</Text>
                     <Text>{selectedSummaryEvent.people}</Text>
-                    <Text numberOfLines={1} ellipsizeMode="tail">{formatEventSummary(selectedSummaryEvent)}</Text>
+                    <Text numberOfLines={1} ellipsizeMode="tail">{formatEventDateLabel(selectedSummaryEvent)}</Text>
+                    <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventTimeOnlyLabel(selectedSummaryEvent)}</Text>
                     {selectedSummaryEvent.notes ? <Text style={styles.notesText}>{selectedSummaryEvent.notes}</Text> : null}
-                    <TouchableOpacity
-                      onPress={() => {
-                        setSelectedSummaryEventId(null);
-                        openRemindersForEvent(selectedSummaryEvent);
-                      }}
-                      disabled={!getReminderSummaryState(selectedSummaryEvent).isActive}
-                    >
-                      <Text
-                        style={[
-                          styles.reminderCountLink,
-                          !getReminderSummaryState(selectedSummaryEvent).isActive && styles.reminderCountLinkDisabled,
-                        ]}
-                      >
-                        {getReminderSummaryState(selectedSummaryEvent).label}
-                      </Text>
-                    </TouchableOpacity>
                   </View>
                   <View style={styles.actionColumn}>
                     <View style={styles.viewControlsRow}>
@@ -4525,7 +4567,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                           <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(occurrence, event.reminderAllDay)}</Text>
                         </View>
                         <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event date: {formatDetailDateLabel(event.eventDateTime, isAllDaySpecialDateEvent(event))}</Text>
+                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event date: {formatEventDateOnly(event)} • {formatEventTimeOnlyLabel(event)}</Text>
                         </View>
                         {event.notes ? (
                           <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
@@ -4634,7 +4676,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   {`${activeShareInvite.sender.fullName || activeShareInvite.sender.email} shared an event with you.`}
                 </Text>
                 <Text style={[styles.reminderListDate, styles.shareInviteDetailText]}>{`${activeShareInvite.sourceEvent.title} • ${activeShareInvite.sourceEvent.people}`}</Text>
-                <Text style={[styles.reminderListNotes, styles.shareInviteDetailText]}>{`Event: ${formatDetailDateLabel(activeShareInvite.sourceEvent.eventDateTime, isAllDaySpecialDateEvent(activeShareInvite.sourceEvent))}`}</Text>
+                <Text style={[styles.reminderListNotes, styles.shareInviteDetailText]}>{`Event: ${formatEventDateOnly(activeShareInvite.sourceEvent)} • ${formatEventTimeOnlyLabel(activeShareInvite.sourceEvent)}`}</Text>
                 {activeShareInvite.message ? (
                   <Text style={[styles.reminderListNotes, styles.shareInviteDetailText]}>{`Message: ${activeShareInvite.message}`}</Text>
                 ) : null}
@@ -5093,7 +5135,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         <Text style={styles.label}>Event start date</Text>
         <Button title={formatDateTimeLabel(form.eventDateTime, isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay))} onPress={() => openDatePicker('event')} />
 
-        {form.eventType !== 'birthday' && form.eventType !== 'anniversary' && (
+        {form.eventType !== 'birthday' && form.eventType !== 'anniversary' && form.eventType !== 'party' && (
           <View style={styles.checkboxRow}>
             <TouchableOpacity
               style={styles.checkbox}
@@ -5113,91 +5155,143 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
         {!form.eventAllDay && form.eventType !== 'birthday' && form.eventType !== 'anniversary' && (
           <>
-            <Text style={styles.label}>Event start time</Text>
-            <View style={styles.timeRow}>
-              <View style={styles.pickerWrapper}>
-                <Picker
-                  selectedValue={form.eventDateTime.getHours() % 12 || 12}
-                  onValueChange={(value) => {
-                    const hourValue = Number(value);
-                    const currentHours = form.eventDateTime.getHours();
-                    const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
-                    updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
-                  }}
-                  style={styles.picker}
-                >
-                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
-                    <Picker.Item key={hour} label={hour.toString()} value={hour} />
-                  ))}
-                </Picker>
-              </View>
-              <View style={styles.pickerWrapper}>
-                <Picker
-                  selectedValue={form.eventDateTime.getMinutes()}
-                  onValueChange={(value) => updateFieldTime('eventDateTime', form.eventDateTime.getHours(), Number(value))}
-                  style={styles.picker}
-                >
-                  {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
-                    <Picker.Item key={minute} label={minute.toString().padStart(2, '0')} value={minute} />
-                  ))}
-                </Picker>
-              </View>
-              <View style={styles.pickerWrapper}>
-                <Picker
-                  selectedValue={form.eventDateTime.getHours() >= 12 ? 'PM' : 'AM'}
-                  onValueChange={(value) => {
-                    const currentHours = form.eventDateTime.getHours();
-                    const isPm = value === 'PM';
-                    const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
-                    updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
-                  }}
-                  style={styles.picker}
-                >
-                  <Picker.Item label="AM" value="AM" />
-                  <Picker.Item label="PM" value="PM" />
-                </Picker>
-              </View>
-            </View>
-
             {supportsEventEndTime(form.eventType, form.partySubtype, form.eventAllDay) ? (
+              <View style={styles.eventTimeGroupsRow}>
+                <View style={styles.eventTimeGroup}>
+                  <Text style={styles.label}>Event start time</Text>
+                  <View style={styles.timeRow}>
+                    <View style={styles.pickerWrapper}>
+                      <Picker
+                        selectedValue={form.eventDateTime.getHours() % 12 || 12}
+                        onValueChange={(value) => {
+                          const hourValue = Number(value);
+                          const currentHours = form.eventDateTime.getHours();
+                          const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
+                          updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
+                        }}
+                        style={styles.picker}
+                      >
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
+                          <Picker.Item key={hour} label={hour.toString()} value={hour} />
+                        ))}
+                      </Picker>
+                    </View>
+                    <View style={styles.pickerWrapper}>
+                      <Picker
+                        selectedValue={form.eventDateTime.getMinutes()}
+                        onValueChange={(value) => updateFieldTime('eventDateTime', form.eventDateTime.getHours(), Number(value))}
+                        style={styles.picker}
+                      >
+                        {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
+                          <Picker.Item key={minute} label={minute.toString().padStart(2, '0')} value={minute} />
+                        ))}
+                      </Picker>
+                    </View>
+                    <View style={styles.pickerWrapper}>
+                      <Picker
+                        selectedValue={form.eventDateTime.getHours() >= 12 ? 'PM' : 'AM'}
+                        onValueChange={(value) => {
+                          const currentHours = form.eventDateTime.getHours();
+                          const isPm = value === 'PM';
+                          const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
+                          updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
+                        }}
+                        style={styles.picker}
+                      >
+                        <Picker.Item label="AM" value="AM" />
+                        <Picker.Item label="PM" value="PM" />
+                      </Picker>
+                    </View>
+                  </View>
+                </View>
+
+                <View style={styles.eventTimeGroup}>
+                  <Text style={styles.label}>Event end time</Text>
+                  <View style={styles.timeRow}>
+                    <View style={styles.pickerWrapper}>
+                      <Picker
+                        selectedValue={effectiveEventEndDateTime.getHours() % 12 || 12}
+                        onValueChange={(value) => {
+                          const hourValue = Number(value);
+                          const currentHours = effectiveEventEndDateTime.getHours();
+                          const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
+                          updateFieldTime('eventEndDateTime', adjustedHours, effectiveEventEndDateTime.getMinutes());
+                        }}
+                        style={styles.picker}
+                      >
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
+                          <Picker.Item key={`end-hour-${hour}`} label={hour.toString()} value={hour} />
+                        ))}
+                      </Picker>
+                    </View>
+                    <View style={styles.pickerWrapper}>
+                      <Picker
+                        selectedValue={effectiveEventEndDateTime.getMinutes()}
+                        onValueChange={(value) => updateFieldTime('eventEndDateTime', effectiveEventEndDateTime.getHours(), Number(value))}
+                        style={styles.picker}
+                      >
+                        {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
+                          <Picker.Item key={`end-minute-${minute}`} label={minute.toString().padStart(2, '0')} value={minute} />
+                        ))}
+                      </Picker>
+                    </View>
+                    <View style={styles.pickerWrapper}>
+                      <Picker
+                        selectedValue={effectiveEventEndDateTime.getHours() >= 12 ? 'PM' : 'AM'}
+                        onValueChange={(value) => {
+                          const currentHours = effectiveEventEndDateTime.getHours();
+                          const isPm = value === 'PM';
+                          const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
+                          updateFieldTime('eventEndDateTime', adjustedHours, effectiveEventEndDateTime.getMinutes());
+                        }}
+                        style={styles.picker}
+                      >
+                        <Picker.Item label="AM" value="AM" />
+                        <Picker.Item label="PM" value="PM" />
+                      </Picker>
+                    </View>
+                  </View>
+                </View>
+              </View>
+            ) : (
               <>
-                <Text style={styles.label}>Event end time</Text>
+                <Text style={styles.label}>Event start time</Text>
                 <View style={styles.timeRow}>
                   <View style={styles.pickerWrapper}>
                     <Picker
-                      selectedValue={effectiveEventEndDateTime.getHours() % 12 || 12}
+                      selectedValue={form.eventDateTime.getHours() % 12 || 12}
                       onValueChange={(value) => {
                         const hourValue = Number(value);
-                        const currentHours = effectiveEventEndDateTime.getHours();
+                        const currentHours = form.eventDateTime.getHours();
                         const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
-                        updateFieldTime('eventEndDateTime', adjustedHours, effectiveEventEndDateTime.getMinutes());
+                        updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
                       }}
                       style={styles.picker}
                     >
                       {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
-                        <Picker.Item key={`end-hour-${hour}`} label={hour.toString()} value={hour} />
+                        <Picker.Item key={hour} label={hour.toString()} value={hour} />
                       ))}
                     </Picker>
                   </View>
                   <View style={styles.pickerWrapper}>
                     <Picker
-                      selectedValue={effectiveEventEndDateTime.getMinutes()}
-                      onValueChange={(value) => updateFieldTime('eventEndDateTime', effectiveEventEndDateTime.getHours(), Number(value))}
+                      selectedValue={form.eventDateTime.getMinutes()}
+                      onValueChange={(value) => updateFieldTime('eventDateTime', form.eventDateTime.getHours(), Number(value))}
                       style={styles.picker}
                     >
                       {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
-                        <Picker.Item key={`end-minute-${minute}`} label={minute.toString().padStart(2, '0')} value={minute} />
+                        <Picker.Item key={minute} label={minute.toString().padStart(2, '0')} value={minute} />
                       ))}
                     </Picker>
                   </View>
                   <View style={styles.pickerWrapper}>
                     <Picker
-                      selectedValue={effectiveEventEndDateTime.getHours() >= 12 ? 'PM' : 'AM'}
+                      selectedValue={form.eventDateTime.getHours() >= 12 ? 'PM' : 'AM'}
                       onValueChange={(value) => {
-                        const currentHours = effectiveEventEndDateTime.getHours();
+                        const currentHours = form.eventDateTime.getHours();
                         const isPm = value === 'PM';
                         const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
-                        updateFieldTime('eventEndDateTime', adjustedHours, effectiveEventEndDateTime.getMinutes());
+                        updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
                       }}
                       style={styles.picker}
                     >
@@ -5207,7 +5301,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   </View>
                 </View>
               </>
-            ) : null}
+            )}
           </>
         )}
 
@@ -5959,10 +6053,9 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 8,
     backgroundColor: '#f8fafc',
-    alignSelf: 'flex-end',
+    alignSelf: 'stretch',
     alignItems: 'stretch',
-    width: 220,
-    maxWidth: '100%',
+    width: '100%',
   },
   savedEventAddressLine: {
     color: '#0f172a',
@@ -6113,6 +6206,17 @@ const styles = StyleSheet.create({
     gap: 8,
     alignItems: 'center',
     marginBottom: 8,
+  },
+  eventTimeGroupsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    flexWrap: 'nowrap',
+    alignItems: 'flex-start',
+    marginBottom: 8,
+  },
+  eventTimeGroup: {
+    flex: 1,
+    minWidth: 0,
   },
   variableReminderLayout: {
     flexDirection: 'row',
