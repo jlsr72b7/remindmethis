@@ -1164,9 +1164,21 @@ app.post('/calendar-sync/google/push', async (req, res) => {
           throw new Error('Event is missing required id or eventDateTime');
         }
 
+        const eventStartDate = new Date(event.eventDateTime);
+        const eventEndDateCandidate = event?.eventEndDateTime ? new Date(event.eventEndDateTime) : null;
+        const hasValidEndDate = eventEndDateCandidate && Number.isFinite(eventEndDateCandidate.getTime())
+          && eventEndDateCandidate.getTime() >= eventStartDate.getTime();
+        const eventEndDate = hasValidEndDate
+          ? eventEndDateCandidate
+          : (() => {
+              const fallbackEndDate = new Date(eventStartDate);
+              fallbackEndDate.setHours(fallbackEndDate.getHours() + 1);
+              return fallbackEndDate;
+            })();
+
         const start = isAllDay
           ? { date: formatGoogleAllDayDate(event.eventDateTime) }
-          : { dateTime: new Date(event.eventDateTime).toISOString(), timeZone: reminderTimeZone };
+          : { dateTime: eventStartDate.toISOString(), timeZone: reminderTimeZone };
 
         const end = isAllDay
           ? (() => {
@@ -1175,7 +1187,7 @@ app.post('/calendar-sync/google/push', async (req, res) => {
               endDate.setUTCDate(endDate.getUTCDate() + 1);
               return { date: formatGoogleAllDayDate(endDate) };
             })()
-          : { dateTime: new Date(event.eventDateTime).toISOString(), timeZone: reminderTimeZone };
+          : { dateTime: eventEndDate.toISOString(), timeZone: reminderTimeZone };
 
         const descriptionParts = [
           people ? `Person/Group/Place: ${people}` : null,
