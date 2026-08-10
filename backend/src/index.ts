@@ -351,13 +351,13 @@ type ReminderEmailCandidate = {
     frequency: string;
     reminderMode: string | null;
     notes: string | null;
-    notified: boolean;
+    notified: boolean | null;
     lastReminderTriggeredAt: Date | null;
     reminders: Array<{
       id: string;
       reminderDateTime: Date;
       notes: string | null;
-      notified: boolean;
+      notified: boolean | null;
       lastTriggeredAt: Date | null;
     }>;
     user: {
@@ -368,7 +368,7 @@ type ReminderEmailCandidate = {
     id: string;
     reminderDateTime: Date;
     notes: string | null;
-    notified: boolean;
+    notified: boolean | null;
     lastTriggeredAt: Date | null;
   };
   reminderDateTime: Date;
@@ -378,7 +378,7 @@ type ReminderEmailCandidate = {
 const reminderEmailPollIntervalMs = Math.max(30_000, Number(process.env.REMINDER_EMAIL_POLL_INTERVAL_MS || 60_000));
 let reminderEmailPollInFlight = false;
 
-const getReminderModeValue = (event: { reminderMode: string | null; reminders?: Array<{ id: string; reminderDateTime: Date; notes: string | null; notified: boolean; lastTriggeredAt: Date | null; }> }) => (
+const getReminderModeValue = (event: { reminderMode: string | null; reminders?: Array<{ id: string; reminderDateTime: Date; notes: string | null; notified: boolean | null; lastTriggeredAt: Date | null; }> }) => (
   event.reminderMode ?? (event.reminders?.length ? 'variable' : 'static')
 );
 
