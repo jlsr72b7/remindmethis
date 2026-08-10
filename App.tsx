@@ -6,6 +6,7 @@ import {
   Animated,
   Image,
   Linking,
+  Modal,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -16,8 +17,9 @@ import {
   View,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
-import * as Calendar from 'expo-calendar';
+import * as Calendar from 'expo-calendar/legacy';
 import AppContent from './src/AppContent';
+import TimePickerModal from './src/TimePickerModal';
 import {
   CalendarSyncPermission,
   CalendarSyncProvider,
@@ -155,12 +157,32 @@ const formatPhoneNumberInput = (value: string) => {
   return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
 };
 
+const generateUUID = () => {
+  const timestamp = Date.now().toString(36);
+  const random1 = Math.random().toString(36).slice(2, 10);
+  const random2 = Math.random().toString(36).slice(2, 10);
+  return `${timestamp}-${random1}-${random2}`;
+};
+
 const formatReminderTimeLabel = (hour: number, minute: number) => {
   const normalizedHour = Math.max(0, Math.min(23, Math.trunc(hour)));
   const normalizedMinute = Math.max(0, Math.min(59, Math.trunc(minute)));
   const period = normalizedHour >= 12 ? 'PM' : 'AM';
   const displayHour = normalizedHour % 12 || 12;
   return `${displayHour}:${String(normalizedMinute).padStart(2, '0')} ${period}`;
+};
+
+const normalizeClockIntervalMinutes = (value: number): 1 | 5 | 15 => {
+  if (value === 1 || value === 5 || value === 15) {
+    return value;
+  }
+
+  return 5;
+};
+
+const alignMinuteToClockInterval = (minute: number, interval: 1 | 5 | 15): number => {
+  const normalizedMinute = Math.max(0, Math.min(59, Math.trunc(minute)));
+  return normalizedMinute - (normalizedMinute % interval);
 };
 
 const splitNameParts = (fullName: string) => {
@@ -317,7 +339,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
   const subtitle = mode === 'signin'
     ? 'Welcome back'
     : mode === 'signup'
-      ? 'Enter email and use as login ID'
+      ? 'Enter email and use as login ID *'
       : 'Enter your email to reset your password';
 
   const passwordRules = [
@@ -352,17 +374,19 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
       useNativeDriver: true,
     }).start();
 
-    Animated.loop(
+    const glowLoop = Animated.loop(
       Animated.sequence([
         Animated.timing(glowAnim, { toValue: 1, duration: 1800, useNativeDriver: true }),
         Animated.timing(glowAnim, { toValue: 0, duration: 1800, useNativeDriver: true }),
       ]),
       { iterations: -1 },
-    ).start();
+    );
+    glowLoop.start();
 
     Animated.timing(cardTranslateX, { toValue: 0, duration: 1, useNativeDriver: true }).start();
 
     return () => {
+      glowLoop.stop();
       fadeAnim.setValue(1);
       glowAnim.setValue(0);
       cardTranslateY.setValue(0);
@@ -507,32 +531,6 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
         return;
       }
 
-      if (!streetAddress.trim()) {
-        setMessage('Please enter your street address.');
-        return;
-      }
-
-      if (!city.trim()) {
-        setMessage('Please enter your city.');
-        return;
-      }
-
-      if (!state) {
-        setMessage('Please select your state.');
-        return;
-      }
-
-      if (!zipCode.trim()) {
-        setMessage('Please enter your ZIP code.');
-        return;
-      }
-
-      const birthDateError = validateBirthDate(birthDate);
-      if (birthDateError) {
-        setMessage(birthDateError);
-        return;
-      }
-
       if (!mobileNumber.trim()) {
         setMessage('Please enter your mobile phone number.');
         return;
@@ -542,6 +540,14 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
       if (phoneError) {
         setMessage(phoneError);
         return;
+      }
+
+      if (birthDate.trim()) {
+        const birthDateError = validateBirthDate(birthDate);
+        if (birthDateError) {
+          setMessage(birthDateError);
+          return;
+        }
       }
 
       if (password !== confirmPassword) {
@@ -561,9 +567,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
       }
 
       const fullName = [firstName.trim(), lastName.trim()].filter(Boolean).join(' ');
-      const address = [streetAddress.trim(), addressLine2.trim(), `${city.trim()}, ${state} ${zipCode.trim()}`]
-        .filter(Boolean)
-        .join('\n');
+      const address = '';
 
       setIsSubmitting(true);
       const result = await createUser(email.trim().toLowerCase(), password, mobileNumber.trim(), fullName, address, birthDate.trim());
@@ -706,6 +710,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
           ) : null}
 
           <Text style={styles.title}>{title}</Text>
+          {mode === 'signup' ? <Text style={styles.userAgreementCaption}>* mandatory fields</Text> : null}
           <Text style={styles.subtitle}>{subtitle}</Text>
 
           {bootstrapNote ? <Text style={styles.bootstrapNote}>{bootstrapNote}</Text> : null}
@@ -760,7 +765,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
 
               <View style={styles.accountNameRow}>
                 <View style={styles.accountInlineField}>
-                  <Text style={styles.fieldLabel}>First name</Text>
+                  <Text style={styles.fieldLabel}>First name *</Text>
                   <TextInput
                     style={[styles.input, styles.accountCompactInput]}
                     placeholder="First name"
@@ -775,7 +780,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
                   />
                 </View>
                 <View style={styles.accountInlineField}>
-                  <Text style={styles.fieldLabel}>Last name</Text>
+                  <Text style={styles.fieldLabel}>Last name *</Text>
                   <TextInput
                     style={[styles.input, styles.accountCompactInput]}
                     placeholder="Last name"
@@ -791,169 +796,9 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
                 </View>
               </View>
 
-              <View style={styles.accountAddressBlock}>
-                <Text style={styles.fieldLabel}>Address</Text>
-                <TextInput
-                  style={[styles.input, styles.accountCompactInput]}
-                  placeholder="Street address"
-                  value={streetAddress}
-                  onFocus={() => setIsSignupAddressFocused(true)}
-                  onBlur={() => {
-                    signupAddressBlurTimeoutRef.current = setTimeout(() => {
-                      if (isSelectingSignupAddressPredictionRef.current) {
-                        isSelectingSignupAddressPredictionRef.current = false;
-                        return;
-                      }
-                      setIsSignupAddressFocused(false);
-                      setSignupAddressPredictions([]);
-                    }, 120);
-                  }}
-                  onChangeText={(value) => {
-                    setStreetAddress(value);
-                    if (message) {
-                      setMessage(null);
-                    }
-                  }}
-                  autoCapitalize="words"
-                />
-
-                {isSignupAddressFocused && signupAddressPredictions.length ? (
-                  <View style={styles.addressSuggestionsList}>
-                    {signupAddressPredictions.map((prediction) => (
-                      <TouchableOpacity
-                        key={prediction.placeId}
-                        style={styles.addressSuggestionItem}
-                        onPressIn={() => {
-                          isSelectingSignupAddressPredictionRef.current = true;
-                          if (signupAddressBlurTimeoutRef.current) {
-                            clearTimeout(signupAddressBlurTimeoutRef.current);
-                          }
-                        }}
-                        onPress={() => void applySignupAddressPrediction(prediction)}
-                      >
-                        <Text style={styles.addressSuggestionMainText} numberOfLines={1}>{prediction.mainText}</Text>
-                        {prediction.secondaryText ? <Text style={styles.addressSuggestionSecondaryText} numberOfLines={1}>{prediction.secondaryText}</Text> : null}
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                ) : null}
-
-                <TextInput
-                  style={[styles.input, styles.accountCompactInput, !addressLine2.trim() && styles.optionalAddressLine2Input]}
-                  placeholder="Address line 2"
-                  placeholderTextColor="#94a3b8"
-                  value={addressLine2}
-                  onChangeText={(value) => {
-                    setAddressLine2(value);
-                    if (message) {
-                      setMessage(null);
-                    }
-                  }}
-                  autoCapitalize="words"
-                />
-
-                <TextInput
-                  style={[styles.input, styles.accountCompactInput]}
-                  placeholder="City"
-                  value={city}
-                  onChangeText={(value) => {
-                    setCity(value);
-                    if (message) {
-                      setMessage(null);
-                    }
-                  }}
-                  autoCapitalize="words"
-                />
-
-                <View style={styles.accountAddressCityStateZipRow}>
-                  <View style={[styles.accountInlineField, styles.accountStateField]}>
-                    <View style={[styles.pickerWrap, styles.accountCompactInput]}>
-                      <Picker
-                        selectedValue={state}
-                        onValueChange={(value) => {
-                          setState(value);
-                          if (message) {
-                            setMessage(null);
-                          }
-                        }}
-                        style={styles.picker}
-                      >
-                        <Picker.Item label="State" value="" />
-                        <Picker.Item label="Alabama" value="AL" />
-                        <Picker.Item label="Alaska" value="AK" />
-                        <Picker.Item label="Arizona" value="AZ" />
-                        <Picker.Item label="Arkansas" value="AR" />
-                        <Picker.Item label="California" value="CA" />
-                        <Picker.Item label="Colorado" value="CO" />
-                        <Picker.Item label="Connecticut" value="CT" />
-                        <Picker.Item label="Delaware" value="DE" />
-                        <Picker.Item label="Florida" value="FL" />
-                        <Picker.Item label="Georgia" value="GA" />
-                        <Picker.Item label="Hawaii" value="HI" />
-                        <Picker.Item label="Idaho" value="ID" />
-                        <Picker.Item label="Illinois" value="IL" />
-                        <Picker.Item label="Indiana" value="IN" />
-                        <Picker.Item label="Iowa" value="IA" />
-                        <Picker.Item label="Kansas" value="KS" />
-                        <Picker.Item label="Kentucky" value="KY" />
-                        <Picker.Item label="Louisiana" value="LA" />
-                        <Picker.Item label="Maine" value="ME" />
-                        <Picker.Item label="Maryland" value="MD" />
-                        <Picker.Item label="Massachusetts" value="MA" />
-                        <Picker.Item label="Michigan" value="MI" />
-                        <Picker.Item label="Minnesota" value="MN" />
-                        <Picker.Item label="Mississippi" value="MS" />
-                        <Picker.Item label="Missouri" value="MO" />
-                        <Picker.Item label="Montana" value="MT" />
-                        <Picker.Item label="Nebraska" value="NE" />
-                        <Picker.Item label="Nevada" value="NV" />
-                        <Picker.Item label="New Hampshire" value="NH" />
-                        <Picker.Item label="New Jersey" value="NJ" />
-                        <Picker.Item label="New Mexico" value="NM" />
-                        <Picker.Item label="New York" value="NY" />
-                        <Picker.Item label="North Carolina" value="NC" />
-                        <Picker.Item label="North Dakota" value="ND" />
-                        <Picker.Item label="Ohio" value="OH" />
-                        <Picker.Item label="Oklahoma" value="OK" />
-                        <Picker.Item label="Oregon" value="OR" />
-                        <Picker.Item label="Pennsylvania" value="PA" />
-                        <Picker.Item label="Rhode Island" value="RI" />
-                        <Picker.Item label="South Carolina" value="SC" />
-                        <Picker.Item label="South Dakota" value="SD" />
-                        <Picker.Item label="Tennessee" value="TN" />
-                        <Picker.Item label="Texas" value="TX" />
-                        <Picker.Item label="Utah" value="UT" />
-                        <Picker.Item label="Vermont" value="VT" />
-                        <Picker.Item label="Virginia" value="VA" />
-                        <Picker.Item label="Washington" value="WA" />
-                        <Picker.Item label="West Virginia" value="WV" />
-                        <Picker.Item label="Wisconsin" value="WI" />
-                        <Picker.Item label="Wyoming" value="WY" />
-                      </Picker>
-                    </View>
-                  </View>
-
-                  <View style={[styles.accountInlineField, styles.accountZipField]}>
-                    <TextInput
-                      style={[styles.input, styles.accountCompactInput]}
-                      placeholder="ZIP"
-                      value={zipCode}
-                      onChangeText={(value) => {
-                        setZipCode(value.replace(/\D/g, '').slice(0, 5));
-                        if (message) {
-                          setMessage(null);
-                        }
-                      }}
-                      keyboardType="number-pad"
-                      maxLength={5}
-                    />
-                  </View>
-                </View>
-              </View>
-
               <View style={styles.accountMobileBirthRow}>
                 <View style={styles.accountInlineField}>
-                  <Text style={styles.fieldLabel}>Mobile phone</Text>
+                  <Text style={styles.fieldLabel}>Mobile phone *</Text>
                   <TextInput
                     style={[styles.input, styles.accountCompactInput]}
                     placeholder="(555) 555-5555"
@@ -1197,10 +1042,13 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [reminderSoundOff, setReminderSoundOff] = useState(false);
   const [showDefaultReminderTimeEditor, setShowDefaultReminderTimeEditor] = useState(false);
   const [showReminderTimeZoneEditor, setShowReminderTimeZoneEditor] = useState(false);
+  const [showDeviceNotificationInstructions, setShowDeviceNotificationInstructions] = useState(false);
   const [defaultReminderHour, setDefaultReminderHour] = useState(9);
   const [defaultReminderMinute, setDefaultReminderMinute] = useState(0);
   const [defaultReminderDraftHour, setDefaultReminderDraftHour] = useState(9);
   const [defaultReminderDraftMinute, setDefaultReminderDraftMinute] = useState(0);
+  const [defaultReminderClockInterval, setDefaultReminderClockInterval] = useState<1 | 5 | 15>(5);
+  const [defaultReminderDraftClockInterval, setDefaultReminderDraftClockInterval] = useState<1 | 5 | 15>(5);
   const [isSavingDefaultReminderTime, setIsSavingDefaultReminderTime] = useState(false);
   const [defaultReminderTimeZone, setDefaultReminderTimeZone] = useState(getDeviceTimeZone());
   const [defaultReminderTimeZoneDraft, setDefaultReminderTimeZoneDraft] = useState(getDeviceTimeZone());
@@ -1218,7 +1066,9 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [isOutlookSyncPaused, setIsOutlookSyncPaused] = useState(false);
   const [appleCalendarId, setAppleCalendarId] = useState('');
   const [appleCalendarName, setAppleCalendarName] = useState('');
+  const [appleCalendarIdDraft, setAppleCalendarIdDraft] = useState('');
   const [appleCalendarNameDraft, setAppleCalendarNameDraft] = useState('');
+  const [appleAvailableCalendars, setAppleAvailableCalendars] = useState<Array<{ id: string; title: string }>>([]);
   const [isAppleConnected, setIsAppleConnected] = useState(false);
   const [isAppleSyncPaused, setIsAppleSyncPaused] = useState(false);
   const [isConnectingOutlook, setIsConnectingOutlook] = useState(false);
@@ -1500,6 +1350,39 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     }
   }, [isOutlookConfigured, user.id]);
 
+  const loadAppleWritableCalendars = useCallback(async (requestPermission: boolean) => {
+    if (!isAppleLocalSyncSupported) {
+      setAppleAvailableCalendars([]);
+      return [] as Array<{ id: string; title: string }>;
+    }
+
+    const permission = requestPermission
+      ? await Calendar.requestCalendarPermissionsAsync()
+      : await Calendar.getCalendarPermissionsAsync();
+
+    if (permission.status !== 'granted') {
+      setAppleAvailableCalendars([]);
+      return [] as Array<{ id: string; title: string }>;
+    }
+
+    const writableCalendars = (await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT))
+      .filter((entry) => entry.allowsModifications !== false)
+      .map((entry) => ({ id: entry.id, title: entry.title || 'Untitled calendar' }));
+
+    setAppleAvailableCalendars(writableCalendars);
+
+    const matchingDraft = writableCalendars.find((entry) => entry.id === appleCalendarIdDraft);
+    const matchingConfigured = writableCalendars.find((entry) => entry.id === appleCalendarId);
+    const seededCalendar = matchingDraft || matchingConfigured || null;
+
+    if (seededCalendar) {
+      setAppleCalendarIdDraft(seededCalendar.id);
+      setAppleCalendarNameDraft(seededCalendar.title);
+    }
+
+    return writableCalendars;
+  }, [appleCalendarId, appleCalendarIdDraft, isAppleLocalSyncSupported]);
+
   const refreshAppleConnectionStatus = useCallback(async () => {
     if (!isAppleConfigured) {
       setIsAppleConnected(false);
@@ -1518,7 +1401,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         return;
       }
 
-      const selectedCalendar = await Calendar.getCalendarAsync(appleCalendarId);
+      const selectedCalendar = (await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT))
+        .find((entry) => entry.id === appleCalendarId && entry.allowsModifications !== false);
       if (!selectedCalendar) {
         await clearAppleCalendarAssociation();
         return;
@@ -1526,14 +1410,16 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
       if (selectedCalendar.title && selectedCalendar.title !== appleCalendarName) {
         setAppleCalendarName(selectedCalendar.title);
+        setAppleCalendarIdDraft(selectedCalendar.id);
         setAppleCalendarNameDraft(selectedCalendar.title);
       }
 
       setIsAppleConnected(true);
-    } catch {
-      setIsAppleConnected(false);
+    } catch (error) {
+      // Avoid clearing a valid connected state due transient bridge/runtime errors.
+      console.warn('Apple connection status refresh failed', error);
     }
-  }, [appleCalendarId, appleCalendarName, isAppleConfigured, isAppleLocalSyncSupported, user.id]);
+  }, [appleCalendarId, appleCalendarName, isAppleConfigured, isAppleLocalSyncSupported]);
 
   useEffect(() => {
     (async () => {
@@ -1557,16 +1443,22 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
       try {
         const reminderTime = await loadReminderDefaultTimeSettings(user.id);
+        const loadedInterval = normalizeClockIntervalMinutes(reminderTime.clockIntervalMinutes);
+        const loadedMinute = alignMinuteToClockInterval(reminderTime.minute, loadedInterval);
         setDefaultReminderHour(reminderTime.hour);
-        setDefaultReminderMinute(reminderTime.minute);
+        setDefaultReminderMinute(loadedMinute);
         setDefaultReminderDraftHour(reminderTime.hour);
-        setDefaultReminderDraftMinute(reminderTime.minute);
+        setDefaultReminderDraftMinute(loadedMinute);
+        setDefaultReminderClockInterval(loadedInterval);
+        setDefaultReminderDraftClockInterval(loadedInterval);
       } catch (error) {
         console.warn('Unable to load account default reminder time settings', error);
         setDefaultReminderHour(9);
         setDefaultReminderMinute(0);
         setDefaultReminderDraftHour(9);
         setDefaultReminderDraftMinute(0);
+        setDefaultReminderClockInterval(5);
+        setDefaultReminderDraftClockInterval(5);
       }
 
       try {
@@ -1594,6 +1486,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         setOutlookCalendarEmailDraft(calendarSyncSettings.outlook.email || '');
         setIsOutlookSyncPaused(calendarSyncSettings.outlook.syncPaused === true);
         setAppleCalendarId(calendarSyncSettings.apple.appleId || '');
+        setAppleCalendarIdDraft(calendarSyncSettings.apple.appleId || '');
         setAppleCalendarName(calendarSyncSettings.apple.calendarName || '');
         setAppleCalendarNameDraft(calendarSyncSettings.apple.calendarName || '');
         setIsAppleSyncPaused(calendarSyncSettings.apple.syncPaused === true);
@@ -1606,6 +1499,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         setOutlookCalendarEmailDraft('');
         setIsOutlookSyncPaused(false);
         setAppleCalendarId('');
+        setAppleCalendarIdDraft('');
         setAppleCalendarName('');
         setAppleCalendarNameDraft('');
         setIsAppleSyncPaused(false);
@@ -1628,7 +1522,9 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       const seededOutlookEmail = outlookCalendarEmail.trim() || user.email.trim();
       setOutlookCalendarEmailDraft(seededOutlookEmail);
     } else if (provider === 'apple') {
+      setAppleCalendarIdDraft(appleCalendarId);
       setAppleCalendarNameDraft(appleCalendarName);
+      void loadAppleWritableCalendars(false);
     } else {
       setGoogleCalendarIdDraft(googleCalendarId);
     }
@@ -1636,11 +1532,12 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   };
 
   const buildCalendarSyncSettings = (overrides?: {
+    provider?: CalendarSyncProvider;
     google?: Partial<{ calendarId: string; permission: CalendarSyncPermission; syncPaused: boolean; autoSyncEnabled: boolean }>;
     outlook?: Partial<{ email: string; syncPaused: boolean }>;
     apple?: Partial<{ appleId: string; calendarName: string; syncPaused: boolean }>;
   }) => ({
-    provider: 'none' as CalendarSyncProvider,
+    provider: overrides?.provider ?? 'none' as CalendarSyncProvider,
     google: {
       calendarId: overrides?.google?.calendarId ?? googleCalendarId,
       permission: overrides?.google?.permission ?? 'write',
@@ -1719,6 +1616,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const clearAppleCalendarAssociation = useCallback(async () => {
     try {
       await saveCalendarSyncSettings(buildCalendarSyncSettings({
+        provider: 'none',
         apple: {
           appleId: '',
           calendarName: '',
@@ -1729,9 +1627,12 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       console.warn('Unable to clear Apple calendar association', error);
     }
 
+    setCalendarSyncProviderDraft('none');
     setAppleCalendarId('');
+    setAppleCalendarIdDraft('');
     setAppleCalendarName('');
     setAppleCalendarNameDraft('');
+    setAppleAvailableCalendars([]);
     setIsAppleConnected(false);
     setIsAppleSyncPaused(false);
   }, [buildCalendarSyncSettings, user.id]);
@@ -1764,7 +1665,11 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   }, [refreshAppleConnectionStatus]);
 
   useEffect(() => {
-    if (typeof window === 'undefined') {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+      return;
+    }
+
+    if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') {
       return;
     }
 
@@ -1890,68 +1795,98 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     await startOutlookConnection(outlookCalendarEmailDraft, true);
   };
 
-  const startAppleConnection = async (calendarName: string, saveAsConfigured: boolean) => {
-    const normalizedCalendarName = calendarName.trim();
+  const startAppleConnection = async (calendarId: string, saveAsConfigured: boolean) => {
+    const normalizedCalendarId = calendarId.trim();
 
     if (!isAppleLocalSyncSupported) {
-      setMessage(`Apple iCalendar sync is only available on iOS devices. Current platform: ${Platform.OS}.`);
+      const platformMessage = `Apple iCalendar sync is only available on iOS devices. Current platform: ${Platform.OS}.`;
+      setMessage(platformMessage);
+      Alert.alert('Apple sync unavailable', platformMessage);
       return;
     }
 
     setIsConnectingApple(true);
     try {
-      const permission = await Calendar.requestCalendarPermissionsAsync();
-      if (permission.status !== 'granted') {
-        setMessage('Calendar permission is required to connect Apple sync on iOS.');
+      try {
+        await saveCalendarSyncSettings(buildCalendarSyncSettings({
+          provider: 'none',
+          apple: {
+            appleId: '',
+            calendarName: '',
+            syncPaused: false,
+          },
+        }), user.id);
+      } catch (error) {
+        console.warn('Unable to reset Apple calendar state before reconnecting', error);
+      }
+
+      setCalendarSyncProviderDraft('none');
+      setAppleCalendarId('');
+      setAppleCalendarIdDraft('');
+      setAppleCalendarName('');
+      setAppleCalendarNameDraft('');
+      setIsAppleConnected(false);
+      setIsAppleSyncPaused(false);
+
+      const writableCalendars = await loadAppleWritableCalendars(true);
+      if (writableCalendars.length === 0) {
+        const permissionMessage = 'Calendar permission is required to connect Apple sync on iOS.';
+        setMessage(permissionMessage);
+        Alert.alert('Calendar permission needed', permissionMessage);
         return;
       }
 
-      const eventCalendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
-      const writableCalendars = eventCalendars.filter((entry) => entry.allowsModifications !== false);
-      const preferredName = normalizedCalendarName.toLowerCase();
-      const matchedCalendar = preferredName
-        ? writableCalendars.find((entry) => entry.title.toLowerCase() === preferredName)
-          || writableCalendars.find((entry) => entry.title.toLowerCase().includes(preferredName))
-        : undefined;
+      let selectedCalendar = writableCalendars.find((entry) => entry.id === normalizedCalendarId);
 
-      let selectedCalendar = matchedCalendar;
-      if (!selectedCalendar) {
-        try {
-          selectedCalendar = await Calendar.getDefaultCalendarAsync();
-        } catch {
-          selectedCalendar = undefined;
-        }
-      }
-
-      if (!selectedCalendar) {
+      if (!selectedCalendar && writableCalendars.length === 1) {
         selectedCalendar = writableCalendars[0];
       }
 
       if (!selectedCalendar) {
-        setMessage('No writable iOS calendar was found on this device.');
+        const calendarMessage = 'Select the Apple calendar you want to connect, then tap Connect again.';
+        if (writableCalendars[0]) {
+          setAppleCalendarIdDraft(writableCalendars[0].id);
+          setAppleCalendarNameDraft(writableCalendars[0].title);
+        }
+        setMessage(calendarMessage);
         return;
       }
 
+      let settingsSaveFailed = false;
       if (saveAsConfigured) {
-        await saveCalendarSyncSettings(buildCalendarSyncSettings({
-          apple: {
-            appleId: selectedCalendar.id,
-            calendarName: selectedCalendar.title,
-            syncPaused: false,
-          },
-        }), user.id);
-
-        setCalendarSyncProviderDraft('apple');
-        setAppleCalendarId(selectedCalendar.id);
-        setAppleCalendarName(selectedCalendar.title);
-        setAppleCalendarNameDraft(selectedCalendar.title);
-        setIsAppleSyncPaused(false);
+        try {
+          await saveCalendarSyncSettings(buildCalendarSyncSettings({
+            provider: 'apple',
+            apple: {
+              appleId: selectedCalendar.id,
+              calendarName: selectedCalendar.title,
+              syncPaused: false,
+            },
+          }), user.id);
+        } catch (error) {
+          settingsSaveFailed = true;
+          console.warn('Apple sync settings save failed after local calendar selection', error);
+        }
       }
+
+      setCalendarSyncProviderDraft('apple');
+      setAppleCalendarId(selectedCalendar.id);
+      setAppleCalendarIdDraft(selectedCalendar.id);
+      setAppleCalendarName(selectedCalendar.title);
+      setAppleCalendarNameDraft(selectedCalendar.title);
+      setIsAppleSyncPaused(false);
       setIsAppleConnected(true);
       setShowCalendarSyncEditor(false);
-      setMessage(`Apple Calendar connected on this device (${selectedCalendar.title}).`);
+      if (settingsSaveFailed) {
+        setMessage(`Apple calendar was selected on this device (${selectedCalendar.title}), but the sync settings could not be saved.`);
+      } else {
+        setMessage(`Apple calendar connected: ${selectedCalendar.title}.`);
+      }
+      void refreshAppleConnectionStatus();
     } catch (error) {
       console.warn('Apple connection failed', error);
+      const reason = error instanceof Error && error.message ? `\n\nDetails: ${error.message}` : '';
+      Alert.alert('Apple connection failed', `Unable to connect Apple Calendar right now.${reason}`);
       setMessage('Unable to connect Apple Calendar right now.');
     } finally {
       setIsConnectingApple(false);
@@ -1959,7 +1894,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   };
 
   const handleConnectApple = async () => {
-    await startAppleConnection(appleCalendarNameDraft, true);
+    await startAppleConnection(appleCalendarIdDraft, true);
   };
 
   const handleConnectGoogleFromSection = async () => {
@@ -2040,6 +1975,26 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     }
 
     openCalendarSyncEditor('apple');
+  };
+
+  const handleCalendarSyncEditorConnect = async () => {
+    if (calendarSyncProviderDraft === 'google') {
+      await handleConnectGoogle();
+      return;
+    }
+
+    if (calendarSyncProviderDraft === 'outlook') {
+      await handleConnectOutlook();
+      return;
+    }
+
+    if (calendarSyncProviderDraft === 'apple') {
+      await handleConnectApple();
+      return;
+    }
+
+    Alert.alert('Select provider', 'Please select a calendar provider before connecting.');
+    setMessage('Please select a calendar provider before connecting.');
   };
 
   const handlePauseGoogle = async () => {
@@ -2167,20 +2122,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const handleRemoveAppleConnection = async () => {
     setIsUpdatingAppleConnection(true);
     try {
-      await saveCalendarSyncSettings(buildCalendarSyncSettings({
-        apple: {
-          appleId: '',
-          calendarName: '',
-          syncPaused: false,
-        },
-      }), user.id);
-
-      setCalendarSyncProviderDraft('none');
-      setAppleCalendarId('');
-      setAppleCalendarName('');
-      setAppleCalendarNameDraft('');
-      setIsAppleConnected(false);
-      setIsAppleSyncPaused(false);
+      await clearAppleCalendarAssociation();
       setShowCalendarSyncEditor(false);
       setMessage('Apple calendar connection was removed.');
     } catch (error) {
@@ -2404,21 +2346,69 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     }
   };
 
-  const handleSaveDefaultReminderTime = async () => {
+  const handleSaveDefaultReminderTime = async (override?: { hour: number; minute: number }) => {
     setIsSavingDefaultReminderTime(true);
+    const nextInterval = normalizeClockIntervalMinutes(defaultReminderDraftClockInterval);
+    const nextHour = override?.hour ?? defaultReminderDraftHour;
+    const draftMinute = override?.minute ?? defaultReminderDraftMinute;
+    const nextMinute = alignMinuteToClockInterval(draftMinute, nextInterval);
 
     try {
       await saveReminderDefaultTimeSettings({
-        hour: defaultReminderDraftHour,
-        minute: defaultReminderDraftMinute,
+        hour: nextHour,
+        minute: nextMinute,
+        clockIntervalMinutes: nextInterval,
       }, user.id);
-      setDefaultReminderHour(defaultReminderDraftHour);
-      setDefaultReminderMinute(defaultReminderDraftMinute);
+      setDefaultReminderHour(nextHour);
+      setDefaultReminderMinute(nextMinute);
+      setDefaultReminderDraftHour(nextHour);
+      setDefaultReminderDraftMinute(nextMinute);
+      setDefaultReminderClockInterval(nextInterval);
+      setDefaultReminderDraftClockInterval(nextInterval);
       setShowDefaultReminderTimeEditor(false);
       setMessage('Default reminder time updated.');
     } catch (error) {
       console.warn('Unable to save account default reminder time settings', error);
       setMessage('Unable to update default reminder time right now.');
+    } finally {
+      setIsSavingDefaultReminderTime(false);
+    }
+  };
+
+  const defaultReminderDraftDate = useMemo(() => {
+    const nextDate = new Date();
+    nextDate.setHours(
+      defaultReminderDraftHour,
+      alignMinuteToClockInterval(defaultReminderDraftMinute, defaultReminderDraftClockInterval),
+      0,
+      0,
+    );
+    return nextDate;
+  }, [defaultReminderDraftHour, defaultReminderDraftMinute, defaultReminderDraftClockInterval]);
+
+  const handleSelectClockInterval = async (interval: 1 | 5 | 15) => {
+    if (isSavingDefaultReminderTime || interval === defaultReminderClockInterval) {
+      return;
+    }
+
+    const normalizedMinute = alignMinuteToClockInterval(defaultReminderMinute, interval);
+    setIsSavingDefaultReminderTime(true);
+
+    try {
+      await saveReminderDefaultTimeSettings({
+        hour: defaultReminderHour,
+        minute: normalizedMinute,
+        clockIntervalMinutes: interval,
+      }, user.id);
+
+      setDefaultReminderMinute(normalizedMinute);
+      setDefaultReminderDraftMinute(normalizedMinute);
+      setDefaultReminderClockInterval(interval);
+      setDefaultReminderDraftClockInterval(interval);
+      setMessage('Clock interval updated.');
+    } catch (error) {
+      console.warn('Unable to save account clock interval settings', error);
+      setMessage('Unable to update clock interval right now.');
     } finally {
       setIsSavingDefaultReminderTime(false);
     }
@@ -2473,40 +2463,11 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       return;
     }
 
-    if (!addressLine1.trim()) {
-      setMessage('Please enter address line 1.');
-      return;
-    }
-
-    if (!addressCity.trim()) {
-      setMessage('Please enter a city on address line 3.');
-      return;
-    }
-
-    if (!addressState.trim()) {
-      setMessage('Please enter a state on address line 4.');
-      return;
-    }
-
-    if (!addressZip.trim()) {
-      setMessage('Please enter a ZIP code on address line 4.');
-      return;
-    }
-
-    const composedAddress = composeAddressParts({
-      line1: addressLine1,
-      line2: addressLine2,
-      city: addressCity,
-      state: addressState,
-      zip: addressZip,
-    });
-
     try {
       setIsSaving(true);
       const result = await updateUserProfile(user.id, {
         mobileNumber: mobileNumber.trim(),
         fullName: `${firstName.trim()} ${lastName.trim()}`.trim(),
-        address: composedAddress,
         birthDate: birthDate.trim(),
       });
       setIsSaving(false);
@@ -2919,7 +2880,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       : [
           ...contacts,
           {
-            id: crypto.randomUUID(),
+            id: generateUUID(),
             email: normalizedEmail,
             firstName: normalizedFirstName,
             lastName: normalizedLastName,
@@ -3016,7 +2977,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     }
 
     const nextGroup: ContactGroup = {
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       name: normalizedName,
       description: normalizedDescription,
       contactIds: [],
@@ -3225,82 +3186,49 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         </View>
       ) : null}
 
-      {showDefaultReminderTimeEditor ? (
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, styles.defaultReminderModalCard]}>
-            <Text style={styles.modalTitle}>Reminder time</Text>
-            <View style={styles.timeRow}>
-              <View style={styles.pickerWrapper}>
-                <Picker
-                  selectedValue={defaultReminderDraftHour % 12 || 12}
-                  onValueChange={(value) => {
-                    const hourValue = Number(value);
-                    const currentHours = defaultReminderDraftHour;
-                    const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
-                    setDefaultReminderDraftHour(adjustedHours);
-                  }}
-                  style={styles.picker}
-                >
-                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
-                    <Picker.Item key={hour} label={hour.toString()} value={hour} />
-                  ))}
-                </Picker>
-              </View>
-              <View style={styles.pickerWrapper}>
-                <Picker
-                  selectedValue={defaultReminderDraftMinute}
-                  onValueChange={(value) => setDefaultReminderDraftMinute(Number(value))}
-                  style={styles.picker}
-                >
-                  {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
-                    <Picker.Item key={minute} label={minute.toString().padStart(2, '0')} value={minute} />
-                  ))}
-                </Picker>
-              </View>
-              <View style={styles.pickerWrapper}>
-                <Picker
-                  selectedValue={defaultReminderDraftHour >= 12 ? 'PM' : 'AM'}
-                  onValueChange={(value) => {
-                    const isPm = value === 'PM';
-                    const currentHour = defaultReminderDraftHour % 12;
-                    setDefaultReminderDraftHour(isPm ? currentHour + 12 : currentHour);
-                  }}
-                  style={styles.picker}
-                >
-                  <Picker.Item label="AM" value="AM" />
-                  <Picker.Item label="PM" value="PM" />
-                </Picker>
-              </View>
-            </View>
+      <TimePickerModal
+        visible={showDefaultReminderTimeEditor}
+        title="Reminder time"
+        initialDate={defaultReminderDraftDate}
+        minuteInterval={defaultReminderDraftClockInterval}
+        saveLabel={isSavingDefaultReminderTime ? 'Saving…' : 'Save'}
+        onCancel={() => {
+          setDefaultReminderDraftHour(defaultReminderHour);
+          setDefaultReminderDraftMinute(defaultReminderMinute);
+          setDefaultReminderDraftClockInterval(defaultReminderClockInterval);
+          setShowDefaultReminderTimeEditor(false);
+        }}
+        onSave={(selectedDate) => {
+          if (isSavingDefaultReminderTime) {
+            return;
+          }
 
-            <View style={styles.modalActionsRow}>
-              <TouchableOpacity style={[styles.primaryButton, styles.modalActionButton]} onPress={() => void handleSaveDefaultReminderTime()} disabled={isSavingDefaultReminderTime}>
-                <Text style={styles.primaryButtonText}>{isSavingDefaultReminderTime ? 'Saving…' : 'Save Time'}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.secondaryButton, styles.modalActionButton]}
-                onPress={() => {
-                  setDefaultReminderDraftHour(defaultReminderHour);
-                  setDefaultReminderDraftMinute(defaultReminderMinute);
-                  setShowDefaultReminderTimeEditor(false);
-                }}
-              >
-                <Text style={styles.secondaryButtonText}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      ) : null}
+          const selectedHour = selectedDate.getHours();
+          const selectedMinute = alignMinuteToClockInterval(selectedDate.getMinutes(), defaultReminderDraftClockInterval);
+          setDefaultReminderDraftHour(selectedHour);
+          setDefaultReminderDraftMinute(selectedMinute);
+          void handleSaveDefaultReminderTime({ hour: selectedHour, minute: selectedMinute });
+        }}
+      />
 
-      {showReminderTimeZoneEditor ? (
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, styles.defaultReminderModalCard]}>
+      <Modal
+        transparent
+        visible={showReminderTimeZoneEditor}
+        animationType="slide"
+        onRequestClose={() => {
+          setDefaultReminderTimeZoneDraft(defaultReminderTimeZone);
+          setShowReminderTimeZoneEditor(false);
+        }}
+      >
+        <View style={[styles.modalOverlay, styles.timeZoneModalOverlay]}>
+          <View style={[styles.modalCard, styles.timeZoneModalCard]}>
+            <View style={styles.timeZoneSheetHandle} />
             <Text style={styles.modalTitle}>Reminder time zone</Text>
-            <View style={styles.pickerWrapper}>
+            <View style={[styles.pickerWrapper, styles.timeZonePickerWrapper]}>
               <Picker
                 selectedValue={defaultReminderTimeZoneDraft}
                 onValueChange={(value) => setDefaultReminderTimeZoneDraft(String(value || getDeviceTimeZone()))}
-                style={styles.picker}
+                style={[styles.picker, styles.timeZonePicker]}
               >
                 {TIME_ZONE_OPTIONS.map((timeZone) => (
                   <Picker.Item key={timeZone} label={timeZone} value={timeZone} />
@@ -3308,9 +3236,9 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
               </Picker>
             </View>
 
-            <View style={styles.modalActionsRow}>
+            <View style={[styles.modalActionsRow, styles.timeZoneModalActionsRow]}>
               <TouchableOpacity style={[styles.primaryButton, styles.modalActionButton]} onPress={() => void handleSaveReminderTimeZone()} disabled={isSavingReminderTimeZone}>
-                <Text style={styles.primaryButtonText}>{isSavingReminderTimeZone ? 'Saving…' : 'Save Zone'}</Text>
+                <Text style={[styles.primaryButtonText, styles.timeZoneModalActionText]}>{isSavingReminderTimeZone ? 'Saving…' : 'Save Zone'}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.secondaryButton, styles.modalActionButton]}
@@ -3319,12 +3247,38 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                   setShowReminderTimeZoneEditor(false);
                 }}
               >
-                <Text style={styles.secondaryButtonText}>Cancel</Text>
+                <Text style={[styles.secondaryButtonText, styles.timeZoneModalActionText]}>Cancel</Text>
               </TouchableOpacity>
             </View>
           </View>
         </View>
-      ) : null}
+      </Modal>
+
+      <Modal
+        transparent
+        visible={showDeviceNotificationInstructions}
+        animationType="fade"
+        onRequestClose={() => setShowDeviceNotificationInstructions(false)}
+      >
+        <View style={[styles.modalOverlay, styles.fullScreenModalOverlay]}>
+          <View style={[styles.modalCard, styles.fullScreenModalCard]}>
+            <Text style={styles.modalTitle}>Device Notification Instructions</Text>
+            <Text style={styles.deleteHint}>On your device go to Settings → Notifications → Remind Me This.</Text>
+            <Text style={styles.deleteHint}>Allow Notifications = ON</Text>
+            <Text style={styles.deleteHint}>Lock Screen, Notification Center, Banners = ON</Text>
+            <Text style={styles.deleteHint}>Sounds = ON</Text>
+
+            <View style={styles.modalActionsRow}>
+              <TouchableOpacity
+                style={[styles.secondaryButton, styles.modalActionButton]}
+                onPress={() => setShowDeviceNotificationInstructions(false)}
+              >
+                <Text style={styles.secondaryButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {showCalendarSyncEditor ? (
         <View style={styles.modalOverlay}>
@@ -3366,17 +3320,30 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
               </>
             ) : calendarSyncProviderDraft === 'apple' ? (
               <>
-                <Text style={styles.fieldLabel}>Calendar Name (optional)</Text>
-                <TextInput
-                  style={styles.input}
-                  value={appleCalendarNameDraft}
-                  onChangeText={setAppleCalendarNameDraft}
-                  autoCapitalize="words"
-                  autoCorrect={false}
-                  placeholder="Home"
-                />
+                <Text style={styles.fieldLabel}>Device Calendar</Text>
+                {appleAvailableCalendars.length ? (
+                  <View style={styles.pickerWrapper}>
+                    <Picker
+                      selectedValue={appleCalendarIdDraft}
+                      onValueChange={(value) => {
+                        const nextId = String(value || '');
+                        const selectedCalendar = appleAvailableCalendars.find((entry) => entry.id === nextId);
+                        setAppleCalendarIdDraft(nextId);
+                        setAppleCalendarNameDraft(selectedCalendar?.title || '');
+                      }}
+                      style={styles.picker}
+                    >
+                      <Picker.Item label="Select a device calendar" value="" />
+                      {appleAvailableCalendars.map((entry) => (
+                        <Picker.Item key={entry.id} label={entry.title} value={entry.id} />
+                      ))}
+                    </Picker>
+                  </View>
+                ) : (
+                  <Text style={styles.deleteHint}>Tap Connect to grant calendar access and load the writable calendars on this device.</Text>
+                )}
 
-                <Text style={styles.deleteHint}>On iOS, connect requests Calendar permission and links the selected device calendar.</Text>
+                <Text style={styles.deleteHint}>This connects to a device calendar on this iPhone or iPad, not to an Apple ID email address.</Text>
                 {!isAppleLocalSyncSupported ? (
                   <Text style={styles.deleteHint}>Apple iCalendar connect is disabled on this platform. Use an iOS device to connect.</Text>
                 ) : null}
@@ -3389,22 +3356,14 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
               <TouchableOpacity
                 style={[styles.primaryButton, styles.modalActionButton]}
                 onPress={() => {
-                  if (calendarSyncProviderDraft === 'google') {
-                    void handleConnectGoogle();
-                    return;
-                  }
-
-                  if (calendarSyncProviderDraft === 'outlook') {
-                    void handleConnectOutlook();
-                    return;
-                  }
-
-                  if (calendarSyncProviderDraft === 'apple') {
-                    void handleConnectApple();
-                    return;
-                  }
+                  void handleCalendarSyncEditorConnect();
                 }}
-                disabled={isConnectingGoogle || isConnectingOutlook || isConnectingApple || isSavingCalendarSync || (calendarSyncProviderDraft === 'apple' && !isAppleLocalSyncSupported)}
+                disabled={
+                  isConnectingGoogle
+                  || isConnectingOutlook
+                  || isConnectingApple
+                  || isSavingCalendarSync
+                }
               >
                 <Text style={styles.primaryButtonText}>{isConnectingGoogle || isConnectingOutlook || isConnectingApple ? 'Opening…' : 'Connect'}</Text>
               </TouchableOpacity>
@@ -3414,6 +3373,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                   setCalendarSyncProviderDraft('none');
                   setGoogleCalendarIdDraft(googleCalendarId);
                   setOutlookCalendarEmailDraft(outlookCalendarEmail);
+                  setAppleCalendarIdDraft(appleCalendarId);
                   setAppleCalendarNameDraft(appleCalendarName);
                   setShowCalendarSyncEditor(false);
                 }}
@@ -3471,25 +3431,25 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                 style={[styles.contactsSidebarButton, activeContactsView === 'contacts' && styles.contactsSidebarButtonActive]}
                 onPress={() => setActiveContactsView('contacts')}
               >
-                <Text style={styles.contactsSidebarButtonText} numberOfLines={1}>Contacts</Text>
+                <Text style={styles.contactsSidebarButtonText}>Contacts</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.contactsSidebarButton, activeContactsView === 'favorites' && styles.contactsSidebarButtonActive]}
                 onPress={() => setActiveContactsView('favorites')}
               >
-                <Text style={styles.contactsSidebarButtonText} numberOfLines={1}>Favorites</Text>
+                <Text style={styles.contactsSidebarButtonText}>Favorites</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.contactsSidebarButton, activeContactsView === 'deleted' && styles.contactsSidebarButtonActive]}
                 onPress={() => setActiveContactsView('deleted')}
               >
-                <Text style={styles.contactsSidebarButtonText} numberOfLines={1}>Deleted</Text>
+                <Text style={styles.contactsSidebarButtonText}>Deleted</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.contactsSidebarButton, activeContactsView === 'groups' && styles.contactsSidebarButtonActive]}
                 onPress={() => setActiveContactsView('groups')}
               >
-                <Text style={styles.contactsSidebarButtonText} numberOfLines={1}>Groups</Text>
+                <Text style={styles.contactsSidebarButtonText}>Groups</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.contactsSidebarButton}
@@ -3498,7 +3458,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                   setShowContactsModal(false);
                 }}
               >
-                <Text style={styles.contactsSidebarButtonText} numberOfLines={1}>Close</Text>
+                <Text style={styles.contactsSidebarButtonText}>Close</Text>
               </TouchableOpacity>
             </View>
 
@@ -4098,7 +4058,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                 <Text style={styles.sectionTitle}>Personal details</Text>
                 <View style={styles.accountDetailsColumns}>
                   <View style={styles.accountDetailsPrimaryColumn}>
-                    <View style={styles.accountNameRow}>
+                    <View style={styles.accountProfileFieldStack}>
                       <View style={styles.accountInlineField}>
                         <Text style={styles.fieldLabel}>First name</Text>
                         <TextInput
@@ -4128,116 +4088,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                           }}
                         />
                       </View>
-                    </View>
 
-                    <View style={styles.accountAddressBlock}>
-                      <Text style={styles.fieldLabel}>Address</Text>
-
-                      <TextInput
-                        style={[styles.input, styles.accountCompactInput]}
-                        placeholder="Address line 1"
-                        value={addressLine1}
-                        onFocus={() => setIsAccountAddressLine1Focused(true)}
-                        onBlur={() => {
-                          accountAddressBlurTimeoutRef.current = setTimeout(() => {
-                            if (isSelectingAccountAddressPredictionRef.current) {
-                              isSelectingAccountAddressPredictionRef.current = false;
-                              return;
-                            }
-                            setIsAccountAddressLine1Focused(false);
-                            setAddressPredictions([]);
-                          }, 120);
-                        }}
-                        onChangeText={(value) => {
-                          setAddressLine1(value);
-                          if (message) {
-                            setMessage(null);
-                          }
-                        }}
-                      />
-
-                      {isAccountAddressLine1Focused && addressPredictions.length ? (
-                        <View style={styles.addressSuggestionsList}>
-                          {addressPredictions.map((prediction) => (
-                            <TouchableOpacity
-                              key={prediction.placeId}
-                              style={styles.addressSuggestionItem}
-                              onPressIn={() => {
-                                isSelectingAccountAddressPredictionRef.current = true;
-                                if (accountAddressBlurTimeoutRef.current) {
-                                  clearTimeout(accountAddressBlurTimeoutRef.current);
-                                }
-                              }}
-                              onPress={() => void applyAccountAddressPrediction(prediction)}
-                            >
-                              <Text style={styles.addressSuggestionMainText} numberOfLines={1}>{prediction.mainText}</Text>
-                              {prediction.secondaryText ? <Text style={styles.addressSuggestionSecondaryText} numberOfLines={1}>{prediction.secondaryText}</Text> : null}
-                            </TouchableOpacity>
-                          ))}
-                        </View>
-                      ) : null}
-
-                      <TextInput
-                        style={[styles.input, styles.accountCompactInput, !addressLine2.trim() && styles.optionalAddressLine2Input]}
-                        placeholder="Address line 2"
-                        placeholderTextColor="#94a3b8"
-                        value={addressLine2}
-                        onChangeText={(value) => {
-                          setAddressLine2(value);
-                          if (message) {
-                            setMessage(null);
-                          }
-                        }}
-                      />
-
-                      <TextInput
-                        style={[styles.input, styles.accountCompactInput]}
-                        placeholder="City"
-                        value={addressCity}
-                        onChangeText={(value) => {
-                          setAddressCity(value);
-                          if (message) {
-                            setMessage(null);
-                          }
-                        }}
-                      />
-
-                      <View style={styles.accountAddressCityStateZipRow}>
-                        <View style={[styles.accountInlineField, styles.accountStateField]}>
-                          <TextInput
-                            style={[styles.input, styles.accountCompactInput]}
-                            placeholder="State"
-                            value={addressState}
-                            onChangeText={(value) => {
-                              setAddressState(value.replace(/[^a-zA-Z]/g, '').toUpperCase().slice(0, 2));
-                              if (message) {
-                                setMessage(null);
-                              }
-                            }}
-                            autoCapitalize="characters"
-                            maxLength={2}
-                          />
-                        </View>
-
-                        <View style={[styles.accountInlineField, styles.accountZipField]}>
-                          <TextInput
-                            style={[styles.input, styles.accountCompactInput]}
-                            placeholder="ZIP"
-                            value={addressZip}
-                            onChangeText={(value) => {
-                              setAddressZip(value.replace(/\D/g, '').slice(0, 5));
-                              if (message) {
-                                setMessage(null);
-                              }
-                            }}
-                            keyboardType="number-pad"
-                            maxLength={5}
-                          />
-                        </View>
-                      </View>
-                    </View>
-
-                    <View style={styles.accountMobileBirthRow}>
                       <View style={styles.accountInlineField}>
                         <Text style={styles.fieldLabel}>Mobile phone</Text>
                         <TextInput
@@ -4292,14 +4143,24 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                 <Text style={styles.sectionTitle}>Reminder notifications</Text>
 
                 <Text style={styles.preferenceSubheading}>Delivery type</Text>
-                <View style={styles.deliveryOptionsRow}>
+                <View style={styles.deliveryPrimaryRow}>
                   <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption]} onPress={() => void handleDeliveryToggle('device')} activeOpacity={0.8}>
                     <View style={styles.passwordCheckbox}>
                       {deliveryDevice ? <View style={styles.passwordCheckboxChecked} /> : null}
                     </View>
                     <Text style={styles.preferenceToggleText}>Device</Text>
                   </TouchableOpacity>
+                </View>
 
+                <TouchableOpacity
+                  style={styles.deviceInstructionLinkRow}
+                  onPress={() => setShowDeviceNotificationInstructions(true)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.deviceInstructionLinkText}>Device Notification Instructions</Text>
+                </TouchableOpacity>
+
+                <View style={styles.deliveryOptionsRow}>
                   <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption]} onPress={() => void handleDeliveryToggle('email')} activeOpacity={0.8}>
                     <View style={styles.passwordCheckbox}>
                       {deliveryEmail ? <View style={styles.passwordCheckboxChecked} /> : null}
@@ -4335,6 +4196,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                       onPress={() => {
                         setDefaultReminderDraftHour(defaultReminderHour);
                         setDefaultReminderDraftMinute(defaultReminderMinute);
+                        setDefaultReminderDraftClockInterval(defaultReminderClockInterval);
                         setShowDefaultReminderTimeEditor(true);
                       }}
                       activeOpacity={0.8}
@@ -4356,6 +4218,30 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                     >
                       <Text style={styles.passwordToggleText}>Change</Text>
                     </TouchableOpacity>
+                  </View>
+
+                  <View style={[styles.defaultReminderTimeRow, { marginTop: 8 }]}>
+                    <Text style={styles.preferenceSubheading}>Clock interval</Text>
+                    <View style={styles.clockIntervalOptionsRow}>
+                      {([
+                        { value: 1 as const, label: '1 Minute' },
+                        { value: 5 as const, label: '5 Minute' },
+                        { value: 15 as const, label: '15 Minute' },
+                      ]).map((option) => (
+                        <TouchableOpacity
+                          key={option.value}
+                          style={[styles.preferenceToggleRow, styles.clockIntervalOption]}
+                          onPress={() => void handleSelectClockInterval(option.value)}
+                          activeOpacity={0.8}
+                          disabled={isSavingDefaultReminderTime}
+                        >
+                          <View style={styles.passwordCheckbox}>
+                            {defaultReminderClockInterval === option.value ? <View style={styles.passwordCheckboxChecked} /> : null}
+                          </View>
+                          <Text style={styles.preferenceToggleText}>{option.label}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
                   </View>
                 </View>
               </View>
@@ -4469,9 +4355,18 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                     <Text style={styles.calendarSyncProviderLabel}>Apple</Text>
                     <Text style={styles.calendarSyncProviderSubtext}>
                       {isAppleConfigured
-                        ? `Calendar: ${appleCalendarName || appleCalendarId}`
-                        : 'Calendar: Not configured'}
+                        ? `Selected Calendar: ${appleCalendarName || 'Unnamed calendar'}`
+                        : 'Selected Calendar: Not configured'}
                     </Text>
+                    {isAppleConfigured ? (
+                      <TouchableOpacity
+                        style={[styles.primaryButton, styles.googleSyncInlineButton]}
+                        onPress={() => void handlePushAppleCalendar()}
+                        disabled={isPushingAppleCalendar}
+                      >
+                        <Text style={[styles.primaryButtonText, styles.calendarSyncPrimaryButtonText]}>{isPushingAppleCalendar ? 'Syncing…' : 'Manual Sync'}</Text>
+                      </TouchableOpacity>
+                    ) : null}
                     {!isAppleLocalSyncSupported ? (
                       <Text style={styles.calendarSyncProviderSubtext}>Connect is available on iOS only.</Text>
                     ) : null}
@@ -4608,15 +4503,6 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                 </View>
               </View>
 
-              {isAppleConfigured ? (
-                <TouchableOpacity
-                  style={[styles.primaryButton, styles.syncPushButton]}
-                  onPress={() => void handlePushAppleCalendar()}
-                  disabled={isPushingAppleCalendar}
-                >
-                  <Text style={[styles.primaryButtonText, styles.calendarSyncPrimaryButtonText]}>{isPushingAppleCalendar ? 'Syncing…' : 'Sync to Apple Calendar'}</Text>
-                </TouchableOpacity>
-              ) : null}
             </View>
               </View>
             ) : null}
@@ -4920,9 +4806,7 @@ export default function App() {
         <View style={styles.headerRow}>
           <View style={styles.headerBrand}>
             <Image source={require('./assets/icon.png')} style={styles.headerBrandImage} resizeMode="cover" />
-            <View style={styles.headerBrandTextWrap}>
-              <Text style={styles.headerBrandTitle}>Remind Me This</Text>
-            </View>
+            <Text style={styles.headerBrandTitle}>Remind Me This</Text>
           </View>
           <View style={styles.headerActions}>
             <TouchableOpacity style={styles.secondaryButton} onPress={() => setShowAccount(true)}>
@@ -4991,7 +4875,6 @@ const styles = StyleSheet.create({
     height: 260,
     borderRadius: 130,
     backgroundColor: '#93c5fd',
-    filter: 'blur(24px)',
     top: '10%',
   },
   authCard: {
@@ -5007,7 +4890,6 @@ const styles = StyleSheet.create({
     elevation: 4,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.7)',
-    backdropFilter: 'blur(16px)',
   },
   heroRow: {
     flexDirection: 'row',
@@ -5250,22 +5132,20 @@ const styles = StyleSheet.create({
   },
   headerBrand: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
   },
   headerBrandImage: {
     width: 40,
     height: 40,
     borderRadius: 10,
-    marginRight: 10,
-  },
-  headerBrandTextWrap: {
-    flexShrink: 1,
+    marginBottom: 4,
   },
   headerBrandTitle: {
-    fontSize: 18,
+    fontSize: 14,
     fontWeight: '700',
     color: '#0f172a',
+    textAlign: 'center',
   },
   headerActions: {
     flexDirection: 'row',
@@ -5323,7 +5203,7 @@ const styles = StyleSheet.create({
   accountCard: {
     backgroundColor: '#fff',
     borderRadius: 16,
-    padding: 16,
+    padding: 10,
     shadowColor: '#0f172a',
     shadowOpacity: 0.08,
     shadowRadius: 10,
@@ -5357,7 +5237,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   accountNav: {
-    width: 96,
+    width: 88,
     borderWidth: 1,
     borderColor: '#d9e2f0',
     borderRadius: 12,
@@ -5395,12 +5275,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 12,
-    flexWrap: 'nowrap',
+    flexWrap: 'wrap',
   },
   accountDetailsPrimaryColumn: {
     flex: 1,
-    minWidth: 0,
-    flexBasis: '50%',
+    minWidth: 200,
   },
   accountDetailsSecondaryColumn: {
     flex: 1,
@@ -5432,6 +5311,12 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: 8,
     flexWrap: 'wrap',
+    marginTop: 2,
+  },
+  accountMobileBirthColumn: {
+    marginTop: 2,
+  },
+  accountProfileFieldStack: {
     marginTop: 2,
   },
   accountInlineField: {
@@ -5554,17 +5439,17 @@ const styles = StyleSheet.create({
     minHeight: 420,
   },
   contactsSidebar: {
-    width: 90,
+    width: 84,
     borderWidth: 1,
     borderColor: '#d9e2f0',
     borderRadius: 12,
-    padding: 8,
+    padding: 6,
     backgroundColor: '#f8fafc',
     alignSelf: 'stretch',
   },
   contactsSidebarButton: {
-    paddingVertical: 10,
-    paddingHorizontal: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
     borderRadius: 10,
     marginBottom: 6,
     backgroundColor: '#e2e8f0',
@@ -5594,13 +5479,14 @@ const styles = StyleSheet.create({
   },
   contactsTopActions: {
     flexDirection: 'row',
-    justifyContent: 'center',
+    justifyContent: 'flex-start',
     alignItems: 'center',
-    gap: 8,
+    flexWrap: 'wrap',
+    gap: 6,
     marginBottom: 8,
   },
   contactsTopActionButton: {
-    minWidth: 96,
+    minWidth: 64,
   },
   contactsTopActionButtonActive: {
     backgroundColor: '#bfdbfe',
@@ -5782,6 +5668,15 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
   },
+  clockIntervalOptionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  clockIntervalOption: {
+    marginBottom: 0,
+  },
   pickerWrapper: {
     flex: 1,
     borderWidth: 1,
@@ -5802,14 +5697,28 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#e2e8f0',
   },
+  deliveryPrimaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
   deliveryOptionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
     flexWrap: 'wrap',
-    marginBottom: 2,
+    marginBottom: 8,
   },
   deliveryOption: {
     marginRight: 12,
+  },
+  deviceInstructionLinkRow: {
+    alignSelf: 'flex-start',
+    marginBottom: 8,
+  },
+  deviceInstructionLinkText: {
+    color: '#2563eb',
+    fontWeight: '600',
+    textDecorationLine: 'underline',
   },
   preferenceToggleText: {
     color: '#0f172a',
@@ -5930,10 +5839,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   calendarSyncRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: 'column',
+    alignItems: 'stretch',
     paddingHorizontal: 8,
-    paddingVertical: 7,
+    paddingVertical: 10,
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
   },
@@ -5968,8 +5877,7 @@ const styles = StyleSheet.create({
     color: '#b91c1c',
   },
   calendarSyncProviderColumn: {
-    width: 190,
-    minWidth: 130,
+    marginBottom: 6,
   },
   calendarSyncProviderLabel: {
     color: '#0f172a',
@@ -5982,8 +5890,6 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   calendarSyncDetailsColumn: {
-    flex: 1,
-    minWidth: 0,
   },
   calendarSyncStatusColumn: {
     color: '#334155',
@@ -6065,9 +5971,65 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
     shadowOffset: { width: 0, height: 8 },
   },
+  fullScreenModalOverlay: {
+    padding: 0,
+  },
+  fullScreenModalCard: {
+    width: '100%',
+    maxWidth: undefined,
+    height: '100%',
+    borderRadius: 0,
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 28,
+  },
   defaultReminderModalCard: {
     maxWidth: 220,
     padding: 12,
+  },
+  timeZoneModalOverlay: {
+    padding: 0,
+    justifyContent: 'flex-end',
+  },
+  timeZoneModalCard: {
+    width: '100%',
+    maxWidth: undefined,
+    height: '50%',
+    minHeight: 340,
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+    backgroundColor: '#ffffff',
+    overflow: 'hidden',
+    paddingTop: 10,
+    paddingBottom: 20,
+    paddingHorizontal: 20,
+  },
+  timeZoneSheetHandle: {
+    width: 78,
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: '#94a3b8',
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  timeZonePickerWrapper: {
+    flex: 1,
+    marginBottom: 10,
+    backgroundColor: '#ffffff',
+  },
+  timeZonePicker: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+  },
+  timeZoneModalActionsRow: {
+    marginTop: 0,
+    marginBottom: 0,
+    backgroundColor: '#ffffff',
+  },
+  timeZoneModalActionText: {
+    textAlign: 'center',
   },
   modalTitle: {
     fontSize: 18,

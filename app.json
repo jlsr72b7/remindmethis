@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "special-date-reminder",
+    "name": "Remind Me This",
     "slug": "special-date-reminder",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -18,14 +18,17 @@
       [
         "expo-calendar",
         {
-          "calendarPermission": "Allow Special Date Reminder to access your calendars so it can sync your reminders.",
-          "remindersPermission": "Allow Special Date Reminder to access reminders."
+          "calendarPermission": "Allow Remind Me This to access your calendars so it can sync your reminders.",
+          "remindersPermission": "Allow Remind Me This to access reminders."
         }
       ]
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.example.specialdatereminder"
+      "bundleIdentifier": "com.example.specialdatereminder",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.example.specialdatereminder",
@@ -35,10 +38,25 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.READ_CALENDAR",
+        "android.permission.WRITE_CALENDAR"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "d17578ad-faff-4fd0-9e9a-0c74a4bbe6e4"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/d17578ad-faff-4fd0-9e9a-0c74a4bbe6e4"
     }
   }
 }

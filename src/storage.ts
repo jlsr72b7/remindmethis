@@ -117,6 +117,7 @@ export interface ReminderDeliverySettings {
 export interface ReminderDefaultTimeSettings {
   hour: number;
   minute: number;
+  clockIntervalMinutes: 1 | 5 | 15;
 }
 
 export interface ReminderTimeZoneSettings {
@@ -233,7 +234,25 @@ const defaultReminderDeliverySettings: ReminderDeliverySettings = {
 const defaultReminderDefaultTimeSettings: ReminderDefaultTimeSettings = {
   hour: 9,
   minute: 0,
+  clockIntervalMinutes: 5,
 };
+
+function normalizeClockIntervalMinutes(value: unknown, fallback: 1 | 5 | 15 = 5): 1 | 5 | 15 {
+  if (value === 5 || value === 15) {
+    return value;
+  }
+
+  if (value === 1) {
+    return 1;
+  }
+
+  return fallback;
+}
+
+function alignMinuteToInterval(minute: number, interval: 1 | 5 | 15): number {
+  const normalizedMinute = Math.max(0, Math.min(59, Math.trunc(minute)));
+  return normalizedMinute - (normalizedMinute % interval);
+}
 
 const defaultReminderTimeZoneSettings: ReminderTimeZoneSettings = {
   timeZone: getDeviceTimeZone(),
@@ -325,10 +344,12 @@ function parseReminderDefaultTimeSettings(raw: string | null): ReminderDefaultTi
 
   try {
     const parsed = JSON.parse(raw) as Partial<ReminderDefaultTimeSettings>;
+    const clockIntervalMinutes = normalizeClockIntervalMinutes(parsed.clockIntervalMinutes, defaultReminderDefaultTimeSettings.clockIntervalMinutes);
     const hour = Number.isFinite(parsed.hour) ? Math.max(0, Math.min(23, Math.trunc(parsed.hour as number))) : defaultReminderDefaultTimeSettings.hour;
-    const minute = Number.isFinite(parsed.minute) ? Math.max(0, Math.min(59, Math.trunc(parsed.minute as number))) : defaultReminderDefaultTimeSettings.minute;
+    const minuteCandidate = Number.isFinite(parsed.minute) ? Math.max(0, Math.min(59, Math.trunc(parsed.minute as number))) : defaultReminderDefaultTimeSettings.minute;
+    const minute = alignMinuteToInterval(minuteCandidate, clockIntervalMinutes);
 
-    return { hour, minute };
+    return { hour, minute, clockIntervalMinutes };
   } catch (error) {
     console.warn('Failed to parse reminder default time settings; using defaults.', error);
     return defaultReminderDefaultTimeSettings;
@@ -717,9 +738,11 @@ export async function loadReminderDefaultTimeSettings(userId?: string): Promise<
 }
 
 export async function saveReminderDefaultTimeSettings(settings: ReminderDefaultTimeSettings, userId?: string) {
+  const clockIntervalMinutes = normalizeClockIntervalMinutes(settings.clockIntervalMinutes, defaultReminderDefaultTimeSettings.clockIntervalMinutes);
   const nextSettings: ReminderDefaultTimeSettings = {
     hour: Math.max(0, Math.min(23, Math.trunc(settings.hour))),
-    minute: Math.max(0, Math.min(59, Math.trunc(settings.minute))),
+    minute: alignMinuteToInterval(settings.minute, clockIntervalMinutes),
+    clockIntervalMinutes,
   };
 
   try {
