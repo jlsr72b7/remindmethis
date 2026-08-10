@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Alert,
   Button,
+  KeyboardAvoidingView,
   Linking,
   Modal,
   Pressable,
@@ -31,17 +32,17 @@ import {
   respondToShareInvite,
   loadReminderDefaultTimeSettings,
   loadReminderDeliverySettings,
+  type ReminderDefaultTimeSettings,
   loadReminderSoundSettings,
   saveEvents,
-  sendShareEmailNotification,
-  sendReminderEmailNotification,
   sendReminderSmsNotification,
   subscribeApiStorageStatus,
   validateEmail,
   validatePhoneNumber,
 } from './storage';
-import { playReminderPing, requestNotificationPermission, scheduleReminder } from './notifications';
+import { clearScheduledReminders, playReminderPing, requestNotificationPermission, scheduleReminder } from './notifications';
 import { getDeviceTimeZone } from './timeZones';
+import TimePickerModal from './TimePickerModal';
 import { EventLocationAddress, ReminderFrequency, SpecialDateEvent, VariableReminderEntry } from './types';
 
 type EventTypeValue = 'birthday' | 'party' | 'wedding' | 'anniversary' | 'medical' | 'dental' | 'work' | 'school' | 'other';
@@ -51,11 +52,25 @@ type DentalSubtypeValue = 'cleaning' | 'extraction' | 'check-up' | 'root-canal' 
 type WorkSubtypeValue = 'meeting' | 'review' | 'conference' | 'demo' | 'workshop' | 'presentation' | 'interview' | 'other';
 type SchoolSubtypeValue = 'quiz' | 'test' | 'paper-due' | 'project-due' | 'class-presentation' | 'other';
 type ReminderModeValue = 'none' | 'default' | 'static' | 'variable';
+type TimePickerTarget = 'event-start' | 'event-end' | 'static-reminder' | 'pending-reminder';
 
 const DEVICE_TIME_ZONE = getDeviceTimeZone();
 const SHARE_ACCEPT_BASE_URL = (typeof process !== 'undefined' && process.env && process.env.EXPO_PUBLIC_API_BASE_URL
   ? process.env.EXPO_PUBLIC_API_BASE_URL
   : 'http://localhost:4000').replace(/\/$/, '');
+
+const normalizeClockIntervalMinutes = (value: number): 1 | 5 | 15 => {
+  if (value === 1 || value === 5 || value === 15) {
+    return value;
+  }
+
+  return 5;
+};
+
+const alignMinuteToClockInterval = (minute: number, interval: 1 | 5 | 15): number => {
+  const normalizedMinute = Math.max(0, Math.min(59, Math.trunc(minute)));
+  return normalizedMinute - (normalizedMinute % interval);
+};
 
 const getDateTimePartsForTimeZone = (date: Date, timeZone: string) => {
   const formatter = new Intl.DateTimeFormat('en-US', {
@@ -191,6 +206,68 @@ const workSubtypeLabels: Record<WorkSubtypeValue, string> = {
 const eventTypeOptions: Array<{ label: string; value: EventTypeValue }> = Object.entries(eventTypeLabels).map(
   ([value, label]) => ({ label, value: value as EventTypeValue }),
 );
+
+const eventTypeHasSubtype = (eventType: EventTypeValue) => (
+  eventType === 'party'
+  || eventType === 'school'
+  || eventType === 'medical'
+  || eventType === 'dental'
+  || eventType === 'work'
+);
+
+const getSubtypeFieldLabel = (eventType: EventTypeValue) => {
+  switch (eventType) {
+    case 'party':
+      return 'Party subtype';
+    case 'school':
+      return 'School subtype';
+    case 'medical':
+      return 'Medical subtype';
+    case 'dental':
+      return 'Dental subtype';
+    case 'work':
+      return 'Work subtype';
+    default:
+      return null;
+  }
+};
+
+const getSubtypeDisplayLabel = (form: ReturnType<typeof getResetFormState>) => {
+  switch (form.eventType) {
+    case 'party':
+      return partySubtypeLabels[form.partySubtype];
+    case 'school':
+      return schoolSubtypeLabels[form.schoolSubtype];
+    case 'medical':
+      return medicalSubtypeLabels[form.medicalSubtype];
+    case 'dental':
+      return dentalSubtypeLabels[form.dentalSubtype];
+    case 'work':
+      return workSubtypeLabels[form.workSubtype];
+    default:
+      return '';
+  }
+};
+
+const getSubtypeValueForEventType = (
+  form: ReturnType<typeof getResetFormState>,
+  eventType: EventTypeValue,
+) => {
+  switch (eventType) {
+    case 'party':
+      return form.partySubtype;
+    case 'school':
+      return form.schoolSubtype;
+    case 'medical':
+      return form.medicalSubtype;
+    case 'dental':
+      return form.dentalSubtype;
+    case 'work':
+      return form.workSubtype;
+    default:
+      return '';
+  }
+};
 
 const getDefaultDate = () => {
   const nextDate = new Date();
@@ -869,6 +946,17 @@ const isBirthdayEvent = (event: SpecialDateEvent) => {
   return normalizedTitle === 'birthday' || normalizedTitle === 'birthday party' || normalizedTitle.endsWith('birthday party');
 };
 
+const isBirthdayOrAnniversaryEvent = (event: SpecialDateEvent) => {
+  const normalizedTitle = event.title.toLowerCase().trim();
+  return normalizedTitle === 'birthday' || normalizedTitle === 'anniversary';
+};
+
+const isSameCalendarDay = (left: Date, right: Date) => (
+  left.getFullYear() === right.getFullYear()
+  && left.getMonth() === right.getMonth()
+  && left.getDate() === right.getDate()
+);
+
 const isAllDaySpecialDateEvent = (event: SpecialDateEvent) => {
   const normalizedTitle = event.title.toLowerCase().trim();
   if (normalizedTitle.endsWith(' party')) {
@@ -948,6 +1036,52 @@ const withSafeYear = (source: Date, year: number) => {
   return result;
 };
 
+const buildNextYearBirthdayOrAnniversaryEvent = (
+  event: SpecialDateEvent,
+  reminderTime: { hour: number; minute: number },
+) => {
+  // Use UTC-component-aware local date so events stored as UTC midnight
+  // (or local midnight) both resolve to the correct calendar day.
+  const currentEventDate = isAllDaySpecialDateEvent(event)
+    ? getLocalDateFromUtcDay(event.eventDateTime)
+    : new Date(event.eventDateTime);
+  const nextEventDate = withSafeYear(currentEventDate, currentEventDate.getFullYear() + 1);
+  if (isAllDaySpecialDateEvent(event)) {
+    nextEventDate.setHours(0, 0, 0, 0);
+  }
+
+  const nextDefaultReminders = buildDefaultReminderDrafts(
+    nextEventDate,
+    event.notes || '',
+    event.people,
+    event.title,
+    reminderTime,
+  );
+
+  const nextVariableReminders: VariableReminderEntry[] = nextDefaultReminders.map((item) => ({
+    id: item.id,
+    reminderDateTime: item.reminderDateTime,
+    notes: item.notes,
+  }));
+
+  const fallbackReminderDate = new Date(nextEventDate);
+  fallbackReminderDate.setHours(reminderTime.hour, reminderTime.minute, 0, 0);
+
+  return {
+    ...event,
+    eventDateTime: nextEventDate.toISOString(),
+    reminderMode: 'default' as const,
+    frequency: 'once' as ReminderFrequency,
+    reminderDateTime: nextVariableReminders[0]?.reminderDateTime || fallbackReminderDate.toISOString(),
+    variableReminders: nextVariableReminders,
+    notified: false,
+    lastReminderTriggeredAt: undefined,
+    ageAsOfToday: typeof event.ageAsOfToday === 'number' && Number.isFinite(event.ageAsOfToday)
+      ? event.ageAsOfToday + 1
+      : event.ageAsOfToday,
+  };
+};
+
 const getNextAnnualOccurrenceDate = (source: Date, allDay: boolean) => {
   const candidate = new Date(source);
   if (allDay) {
@@ -1019,8 +1153,15 @@ const getDefaultReminderAnchorDate = (eventDate: Date, isAnnualEvent: boolean, a
   return nextYearDate;
 };
 
+const REMINDER_VISIBILITY_GRACE_MS = 2 * 60 * 1000;
+
 const isEventExpired = (event: SpecialDateEvent) => {
   if (isBirthdayEvent(event)) {
+    return false;
+  }
+
+  const reminderCandidates = getReminderCandidates(event);
+  if (reminderCandidates.some((candidate) => new Date(candidate.reminderDateTime).getTime() >= Date.now() - REMINDER_VISIBILITY_GRACE_MS)) {
     return false;
   }
 
@@ -1213,9 +1354,11 @@ const getUpcomingOccurrencesForEvent = (event: SpecialDateEvent, fromDate: Date,
     return [];
   }
 
+  const reminderVisibilityThreshold = fromDate.getTime() - REMINDER_VISIBILITY_GRACE_MS;
+
   const variableOccurrences = (event.variableReminders || [])
     .map((entry) => new Date(entry.reminderDateTime))
-    .filter((occurrence) => occurrence.getTime() > fromDate.getTime())
+    .filter((occurrence) => occurrence.getTime() >= reminderVisibilityThreshold)
     .sort((left, right) => left.getTime() - right.getTime());
 
   const getStaticOccurrences = () => {
@@ -1236,7 +1379,7 @@ const getUpcomingOccurrencesForEvent = (event: SpecialDateEvent, fromDate: Date,
     }
 
     while (occurrences.length < count) {
-      if (nextOccurrence.getTime() <= fromDate.getTime()) {
+      if (nextOccurrence.getTime() < reminderVisibilityThreshold) {
         break;
       }
 
@@ -1261,7 +1404,7 @@ const getUpcomingOccurrencesForEvent = (event: SpecialDateEvent, fromDate: Date,
     }
 
     const fallbackOccurrence = getNextReminderOccurrenceForEvent(event, fromDate);
-    return fallbackOccurrence.getTime() > fromDate.getTime() ? [fallbackOccurrence] : [];
+    return fallbackOccurrence.getTime() >= reminderVisibilityThreshold ? [fallbackOccurrence] : [];
   }
 
   const staticOccurrences = getStaticOccurrences();
@@ -1497,8 +1640,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const effectiveReminderTimeZone = defaultReminderTimeZone || DEVICE_TIME_ZONE;
   const [events, setEvents] = useState<SpecialDateEvent[]>([]);
   const [form, setForm] = useState(() => getResetFormState(effectiveReminderTimeZone));
+  const [hasSelectedEventType, setHasSelectedEventType] = useState(false);
+  const [isEventTypePickerVisible, setIsEventTypePickerVisible] = useState(true);
+  const [eventTypeDraft, setEventTypeDraft] = useState<EventTypeValue | ''>('');
+  const [hasSelectedSubtype, setHasSelectedSubtype] = useState(false);
+  const [isSubtypePickerVisible, setIsSubtypePickerVisible] = useState(false);
+  const [subtypeDraft, setSubtypeDraft] = useState('');
   const [pickerTarget, setPickerTarget] = useState<'event' | 'reminder' | null>(null);
   const [pickerMonth, setPickerMonth] = useState(new Date());
+  const [activeTimePicker, setActiveTimePicker] = useState<{ target: TimePickerTarget; title: string } | null>(null);
+  const [timePickerDraftDate, setTimePickerDraftDate] = useState<Date>(getDefaultDate());
   const [activeReminder, setActiveReminder] = useState<SpecialDateEvent | null>(null);
   const [editingEvent, setEditingEvent] = useState<SpecialDateEvent | null>(null);
   const [confirmCancelEventId, setConfirmCancelEventId] = useState<string | null>(null);
@@ -1508,6 +1659,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     reminderSource?: 'static' | 'variable';
     target: 'reminder' | 'event' | 'all-reminders';
   } | null>(null);
+  const [isDeletingConfirmedItem, setIsDeletingConfirmedItem] = useState(false);
+  const [isDeletingConfirmedEvent, setIsDeletingConfirmedEvent] = useState(false);
   const [remindersForEventId, setRemindersForEventId] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<'landing' | 'create' | 'share'>('landing');
   const [viewVersion, setViewVersion] = useState(0);
@@ -1526,6 +1679,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
   const [savedRemindersCalendarMonth, setSavedRemindersCalendarMonth] = useState<Date>(new Date());
   const [selectedReminderPopup, setSelectedReminderPopup] = useState<Date | null>(null);
+  const [selectedReminderDetail, setSelectedReminderDetail] = useState<{ eventId: string; occurrenceTime: number } | null>(null);
   const [selectedEventPopupDate, setSelectedEventPopupDate] = useState<Date | null>(null);
   const [selectedSummaryEventId, setSelectedSummaryEventId] = useState<string | null>(null);
   const [reminderPage, setReminderPage] = useState(0);
@@ -1540,7 +1694,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const [reminderDeliveryEmailEnabled, setReminderDeliveryEmailEnabled] = useState(false);
   const [reminderDeliveryTextEnabled, setReminderDeliveryTextEnabled] = useState(false);
   const [reminderSoundEnabled, setReminderSoundEnabled] = useState(true);
-  const [defaultReminderTime, setDefaultReminderTime] = useState<{ hour: number; minute: number }>({ hour: 9, minute: 0 });
+  const [defaultReminderTime, setDefaultReminderTime] = useState<ReminderDefaultTimeSettings>({ hour: 9, minute: 0, clockIntervalMinutes: 5 });
   const [sharingEvent, setSharingEvent] = useState<SpecialDateEvent | null>(null);
   const [shareContacts, setShareContacts] = useState<ShareContact[]>([]);
   const [shareGroups, setShareGroups] = useState<ShareGroup[]>([]);
@@ -1550,6 +1704,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const [shareManualPhone, setShareManualPhone] = useState('');
   const [shareRecipients, setShareRecipients] = useState<ShareRecipient[]>([]);
   const [shareMessage, setShareMessage] = useState('');
+  const [isSendingShare, setIsSendingShare] = useState(false);
   const [hasInitializedReminderScheduleView, setHasInitializedReminderScheduleView] = useState(false);
   const [pendingShareInvites, setPendingShareInvites] = useState<PendingShareInvite[]>([]);
   const [activeShareInvite, setActiveShareInvite] = useState<PendingShareInvite | null>(null);
@@ -1591,9 +1746,39 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     () => shareGroups.map((group) => ({ label: group.name, value: group.id })),
     [shareGroups],
   );
+  const activeClockIntervalMinutes = useMemo(
+    () => normalizeClockIntervalMinutes(defaultReminderTime.clockIntervalMinutes),
+    [defaultReminderTime.clockIntervalMinutes],
+  );
   const [eventLocationPredictions, setEventLocationPredictions] = useState<GoogleAddressPrediction[]>([]);
+  const [isEventLocationLine1Focused, setIsEventLocationLine1Focused] = useState(false);
   const [eventLocationAutocompleteSessionToken] = useState(() => `event-addr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const skipNextEventLocationAutocompleteFetchRef = useRef(0);
+  const eventLocationBlurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const resetTypeSelectionUi = useCallback(() => {
+    setHasSelectedEventType(false);
+    setIsEventTypePickerVisible(true);
+    setEventTypeDraft('');
+    setHasSelectedSubtype(false);
+    setIsSubtypePickerVisible(false);
+    setSubtypeDraft('');
+  }, []);
+
+  useEffect(() => () => {
+    if (eventLocationBlurTimeoutRef.current) {
+      clearTimeout(eventLocationBlurTimeoutRef.current);
+    }
+  }, []);
+
+  const collapseTypeSelectionUiForEdit = useCallback((eventType: EventTypeValue, subtypeValue: string) => {
+    setHasSelectedEventType(true);
+    setIsEventTypePickerVisible(false);
+    setEventTypeDraft(eventType);
+    setHasSelectedSubtype(eventTypeHasSubtype(eventType));
+    setIsSubtypePickerVisible(false);
+    setSubtypeDraft(subtypeValue);
+  }, []);
 
   const repairLegacyReminderTimes = useCallback((items: SpecialDateEvent[]) => {
     let changed = false;
@@ -1650,6 +1835,42 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       reminderTimeZone: effectiveReminderTimeZone,
     }));
   }, [effectiveReminderTimeZone]);
+
+  useEffect(() => {
+    const alignDateMinute = (date: Date) => {
+      const alignedMinute = alignMinuteToClockInterval(date.getMinutes(), activeClockIntervalMinutes);
+      if (alignedMinute === date.getMinutes()) {
+        return date;
+      }
+
+      const nextDate = new Date(date);
+      nextDate.setMinutes(alignedMinute, 0, 0);
+      return nextDate;
+    };
+
+    setForm((current) => {
+      const nextEventDateTime = alignDateMinute(current.eventDateTime);
+      const nextReminderDateTime = alignDateMinute(current.reminderDateTime);
+      const nextEventEndDateTime = current.eventEndDateTime ? alignDateMinute(current.eventEndDateTime) : null;
+
+      const hasEventChanged = nextEventDateTime !== current.eventDateTime;
+      const hasReminderChanged = nextReminderDateTime !== current.reminderDateTime;
+      const hasEndChanged = nextEventEndDateTime !== current.eventEndDateTime;
+
+      if (!hasEventChanged && !hasReminderChanged && !hasEndChanged) {
+        return current;
+      }
+
+      return {
+        ...current,
+        eventDateTime: nextEventDateTime,
+        eventEndDateTime: nextEventEndDateTime,
+        reminderDateTime: nextReminderDateTime,
+      };
+    });
+
+    setPendingReminderDateTime((current) => alignDateMinute(current));
+  }, [activeClockIntervalMinutes]);
 
   const autoPushGoogleCalendarIfConfigured = useCallback(async () => {
     if (!userId) {
@@ -1794,7 +2015,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     let isActive = true;
     const query = form.eventLocationLine1.trim();
 
-    if (!form.eventLocationEnabled || query.length < 4) {
+    if (!form.eventLocationEnabled || !isEventLocationLine1Focused || query.length < 4) {
       setEventLocationPredictions([]);
       return () => {
         isActive = false;
@@ -1821,10 +2042,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       isActive = false;
       clearTimeout(timeoutId);
     };
-  }, [eventLocationAutocompleteSessionToken, form.eventLocationEnabled, form.eventLocationLine1]);
+  }, [eventLocationAutocompleteSessionToken, form.eventLocationEnabled, form.eventLocationLine1, isEventLocationLine1Focused]);
 
   const applyEventLocationPrediction = useCallback(async (prediction: GoogleAddressPrediction) => {
     skipNextEventLocationAutocompleteFetchRef.current = 2;
+    setIsEventLocationLine1Focused(false);
     setEventLocationPredictions([]);
 
     setForm((current) => ({
@@ -1896,10 +2118,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
       try {
         const reminderTimeSettings = await loadReminderDefaultTimeSettings(userId);
-        setDefaultReminderTime(reminderTimeSettings);
+        const clockIntervalMinutes = normalizeClockIntervalMinutes(reminderTimeSettings.clockIntervalMinutes);
+        setDefaultReminderTime({
+          hour: reminderTimeSettings.hour,
+          minute: alignMinuteToClockInterval(reminderTimeSettings.minute, clockIntervalMinutes),
+          clockIntervalMinutes,
+        });
       } catch (error) {
         console.warn('Reminder default time settings load failed', error);
-        setDefaultReminderTime({ hour: 9, minute: 0 });
+        setDefaultReminderTime({ hour: 9, minute: 0, clockIntervalMinutes: 5 });
       }
 
       try {
@@ -2079,6 +2306,21 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
             return event;
           }
 
+          if (isBirthdayOrAnniversaryEvent(event)) {
+            // Always use UTC-component-aware local date so UTC-midnight storage in
+            // negative-offset timezones doesn't shift the calendar day backward.
+            const eventDate = getLocalDateFromUtcDay(event.eventDateTime);
+            // For static yearly triggers, dueReminder.reminderDateTime is the
+            // original stored time (possibly from a prior year), so compare against
+            // `now` instead. For variable entries, compare the entry's specific time.
+            const comparisonDate = dueReminder.entry
+              ? new Date(dueReminder.reminderDateTime)
+              : now;
+            if (isSameCalendarDay(comparisonDate, eventDate)) {
+              return buildNextYearBirthdayOrAnniversaryEvent(event, defaultReminderTime);
+            }
+          }
+
           if (dueReminder.entry) {
             return {
               ...event,
@@ -2100,24 +2342,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         } catch (error) {
           console.warn('Unable to persist reminder trigger state before delivery.', error);
           setApiStorageStatusMessage('Reminder delivery triggered, but saving reminder state failed. It may retry after refresh.');
-        }
-
-        if (reminderDeliveryEmailEnabled) {
-          void (async () => {
-            const emailSent = await sendReminderEmailNotification(userId, {
-              eventId: dueReminder.event.id,
-              eventTitle: dueReminder.event.title,
-              people: dueReminder.event.people,
-              eventDateTime: dueReminder.event.eventDateTime,
-              eventAllDay: dueReminder.event.eventAllDay,
-              reminderDateTime: dueReminder.reminderDateTime,
-              notes: dueReminder.entry?.notes || dueReminder.event.notes,
-            });
-
-            if (!emailSent) {
-              setApiStorageStatusMessage('Reminder email was not sent. Check SMTP server settings and your email delivery toggle.');
-            }
-          })();
         }
 
         if (reminderDeliveryTextEnabled) {
@@ -2175,6 +2399,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     const interval = setInterval(checkReminders, 1000);
     return () => clearInterval(interval);
   }, [
+    defaultReminderTime,
     events,
     reminderDeliveryDeviceEnabled,
     reminderDeliveryEmailEnabled,
@@ -2323,6 +2548,126 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setSeededVariableDraftIds((current) => current.filter((seededId) => seededId !== id));
   };
 
+  const scheduleEventDeviceReminders = async (
+    title: string,
+    people: string,
+    reminderMode: ReminderModeValue,
+    primaryReminderDateTime: string,
+    entries: VariableReminderEntry[],
+  ) => {
+    if (reminderMode === 'none') {
+      return;
+    }
+
+    const futureReminderDates = (entries.length
+      ? entries.map((entry) => new Date(entry.reminderDateTime))
+      : [new Date(primaryReminderDateTime)]
+    )
+      .filter((date) => Number.isFinite(date.getTime()) && date.getTime() > Date.now())
+      .sort((left, right) => left.getTime() - right.getTime())
+      .filter((date, index, all) => index === 0 || date.getTime() !== all[index - 1].getTime());
+
+    if (!futureReminderDates.length) {
+      return;
+    }
+
+    const schedulingResults = await Promise.allSettled(futureReminderDates.map((date) => scheduleReminder(
+      'Calendar Reminder',
+      `${title} for ${people}`,
+      date,
+    )));
+
+    const failedSchedules = schedulingResults.filter((result) => (
+      result.status === 'rejected' || (result.status === 'fulfilled' && !result.value)
+    ));
+
+    if (failedSchedules.length) {
+      console.warn('Some reminder schedules failed', failedSchedules);
+      setApiStorageStatusMessage('Reminder saved, but one or more device reminders failed to schedule. Verify notification permission in iOS Settings for Remind Me This.');
+    }
+  };
+
+  const getFutureDeviceReminderDatesForEvent = (event: SpecialDateEvent, now: Date) => {
+    const reminderMode = getReminderModeValue(event);
+    if (reminderMode === 'none') {
+      return [] as Date[];
+    }
+
+    const variableFutureDates = (event.variableReminders || [])
+      .map((entry) => new Date(entry.reminderDateTime))
+      .filter((date) => Number.isFinite(date.getTime()) && date.getTime() > now.getTime());
+
+    if (variableFutureDates.length) {
+      return variableFutureDates;
+    }
+
+    const nextOccurrence = getNextReminderOccurrenceForEvent(event, now);
+    if (!Number.isFinite(nextOccurrence.getTime()) || nextOccurrence.getTime() <= now.getTime()) {
+      return [] as Date[];
+    }
+
+    return [nextOccurrence];
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const syncScheduledDeviceReminders = async () => {
+      if (!reminderDeliveryDeviceEnabled) {
+        await clearScheduledReminders();
+        return;
+      }
+
+      const now = new Date();
+      const scheduleQueue: Array<{ title: string; people: string; date: Date }> = [];
+
+      events.forEach((event) => {
+        const dates = getFutureDeviceReminderDatesForEvent(event, now);
+        dates.forEach((date) => {
+          scheduleQueue.push({
+            title: event.title,
+            people: event.people,
+            date,
+          });
+        });
+      });
+
+      const dedupedQueue = [...new Map(
+        scheduleQueue.map((item) => [`${item.title}|${item.people}|${item.date.getTime()}`, item]),
+      ).values()].sort((left, right) => left.date.getTime() - right.date.getTime());
+
+      await clearScheduledReminders();
+
+      if (!dedupedQueue.length || cancelled) {
+        return;
+      }
+
+      const schedulingResults = await Promise.allSettled(dedupedQueue.map((item) => scheduleReminder(
+        'Calendar Reminder',
+        `${item.title} for ${item.people}`,
+        item.date,
+      )));
+
+      if (cancelled) {
+        return;
+      }
+
+      const failedSchedules = schedulingResults.filter((result) => (
+        result.status === 'rejected' || (result.status === 'fulfilled' && !result.value)
+      ));
+
+      if (failedSchedules.length) {
+        setApiStorageStatusMessage('Some device reminders could not be scheduled. Check iOS Notifications settings for Remind Me This.');
+      }
+    };
+
+    void syncScheduledDeviceReminders();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [events, reminderDeliveryDeviceEnabled]);
+
   const saveCurrentEvent = async () => {
     if (isSavingEvent) {
       return;
@@ -2330,6 +2675,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
     setIsSavingEvent(true);
     try {
+      if (!hasSelectedEventType) {
+        setValidationMessage('Please choose an event type.');
+        return;
+      }
+
+      if (eventTypeHasSubtype(form.eventType) && !hasSelectedSubtype) {
+        setValidationMessage(`Please choose a ${String(getSubtypeFieldLabel(form.eventType) || 'subtype').toLowerCase()}.`);
+        return;
+      }
+
       if (form.eventType === 'other' && !form.customType.trim()) {
         Alert.alert('Missing info', 'Please enter a custom event type.');
         return;
@@ -2473,6 +2828,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       setEvents(updated);
 
       setEditingEvent(null);
+      resetTypeSelectionUi();
       setPendingVariableReminders([]);
       setSeededVariableDraftIds([]);
       setHasTouchedStaticReminderSchedule(false);
@@ -2490,19 +2846,13 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       setEvents(reloaded);
       void autoPushGoogleCalendarIfConfigured();
 
-      if (form.reminderMode !== 'none') {
-        const remindersToSchedule = variableReminderEntries;
-
-        const schedulingResults = await Promise.allSettled(remindersToSchedule.map((item) => scheduleReminder(
-          'Calendar Reminder',
-          `${newEvent.title} for ${newEvent.people}`,
-          new Date(item.reminderDateTime),
-        )));
-        const failedSchedules = schedulingResults.filter((result) => result.status === 'rejected');
-        if (failedSchedules.length) {
-          console.warn('Some reminder schedules failed', failedSchedules);
-        }
-      }
+      await scheduleEventDeviceReminders(
+        newEvent.title,
+        newEvent.people,
+        newEvent.reminderMode || 'none',
+        primaryReminderDateTime,
+        variableReminderEntries,
+      );
 
       if (shouldShareAfterSave) {
         startShareForEvent(newEvent);
@@ -2511,7 +2861,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
       setCurrentView('landing');
 
-      Alert.alert('Saved', 'Your reminder has been added.');
+      const savedMessage = variableReminderEntries.length > 0
+        ? 'Your event and reminder(s) have been saved.'
+        : 'Your event has been saved.';
+      Alert.alert('Saved', savedMessage);
     } catch (error) {
       console.error('saveCurrentEvent failed', error);
       Alert.alert('Save failed', error instanceof Error ? error.message : 'Unknown error');
@@ -2530,24 +2883,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     restoreInterruptedModalContext();
   };
 
-  const formatReminderLeadTime = (eventDateTime: string) => {
-    const deltaMs = new Date(eventDateTime).getTime() - Date.now();
-    if (deltaMs <= 0) {
-      return 'now';
-    }
-
-    const totalMinutes = Math.ceil(deltaMs / 60000);
-    if (totalMinutes < 60) {
-      return `${totalMinutes} min`;
-    }
-
-    const totalHours = Math.floor(totalMinutes / 60);
-    const remainingMinutes = totalMinutes % 60;
-    return remainingMinutes
-      ? `${totalHours} hr ${remainingMinutes} min`
-      : `${totalHours} hr`;
-  };
-
   const formatActiveReminderWhen = (event: SpecialDateEvent) => {
     const eventDate = new Date(event.eventDateTime);
     if (isAllDaySpecialDateEvent(event)) {
@@ -2555,7 +2890,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     }
 
     const timeLabel = eventDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    return `@ ${timeLabel} (in ${formatReminderLeadTime(event.eventDateTime)})`;
+    const dateLabel = eventDate.toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+    return `@ ${timeLabel} (${dateLabel})`;
   };
 
   const handleViewActiveReminder = () => {
@@ -2731,6 +3071,83 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     return startTimeLabel;
   };
 
+  const applyEventTypeDraftSelection = useCallback(() => {
+    if (!eventTypeDraft) {
+      return;
+    }
+
+    const nextEventType = eventTypeDraft;
+    const nextIsAllDay = nextEventType === 'birthday' || nextEventType === 'anniversary';
+    const nextShowsSubtype = eventTypeHasSubtype(nextEventType);
+
+    setForm((current) => {
+      const nextEventDate = new Date(current.eventDateTime);
+      const nextReminderDate = new Date(current.reminderDateTime);
+      if (nextIsAllDay) {
+        nextEventDate.setHours(0, 0, 0, 0);
+      }
+
+      const nextSubtypeDraft = getSubtypeValueForEventType(current, nextEventType);
+      setSubtypeDraft(nextSubtypeDraft);
+
+      return {
+        ...current,
+        eventType: nextEventType,
+        ageAsOfToday: nextEventType === 'birthday'
+          ? (current.ageAsOfToday || getDefaultBirthdayAgeString(nextEventDate))
+          : '',
+        eventAllDay: nextIsAllDay,
+        reminderAllDay: nextIsAllDay ? current.reminderAllDay : false,
+        eventDateTime: nextEventDate,
+        reminderDateTime: nextReminderDate,
+      };
+    });
+
+    setHasSelectedEventType(true);
+    setIsEventTypePickerVisible(false);
+    setHasSelectedSubtype(false);
+    setIsSubtypePickerVisible(nextShowsSubtype);
+    setValidationMessage(null);
+  }, [eventTypeDraft]);
+
+  const applySubtypeDraftSelection = useCallback(() => {
+    if (!subtypeDraft) {
+      return;
+    }
+
+    setForm((current) => {
+      if (current.eventType === 'party') {
+        return {
+          ...current,
+          partySubtype: subtypeDraft as PartySubtypeValue,
+          eventAllDay: false,
+        };
+      }
+
+      if (current.eventType === 'school') {
+        return { ...current, schoolSubtype: subtypeDraft as SchoolSubtypeValue };
+      }
+
+      if (current.eventType === 'medical') {
+        return { ...current, medicalSubtype: subtypeDraft as MedicalSubtypeValue };
+      }
+
+      if (current.eventType === 'dental') {
+        return { ...current, dentalSubtype: subtypeDraft as DentalSubtypeValue };
+      }
+
+      if (current.eventType === 'work') {
+        return { ...current, workSubtype: subtypeDraft as WorkSubtypeValue };
+      }
+
+      return current;
+    });
+
+    setHasSelectedSubtype(true);
+    setIsSubtypePickerVisible(false);
+    setValidationMessage(null);
+  }, [subtypeDraft]);
+
   const startEditingEvent = (event: SpecialDateEvent) => {
     const now = getDefaultDate();
     setHasInitializedReminderScheduleView(false);
@@ -2738,6 +3155,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setEditingEvent(event);
     setCurrentView('create');
     const eventFormState = getEventFormState(event);
+    collapseTypeSelectionUiForEdit(
+      eventFormState.eventType,
+      getSubtypeValueForEventType(eventFormState, eventFormState.eventType),
+    );
     const nextPendingVariableReminders = (event.variableReminders || [])
       .filter((entry) => isFutureReminderDateTime(entry.reminderDateTime))
       .map((entry) => ({
@@ -2790,6 +3211,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setIsSavingEvent(true);
 
     try {
+
+      if (!hasSelectedEventType) {
+        setValidationMessage('Please choose an event type.');
+        return;
+      }
+
+      if (eventTypeHasSubtype(form.eventType) && !hasSelectedSubtype) {
+        setValidationMessage(`Please choose a ${String(getSubtypeFieldLabel(form.eventType) || 'subtype').toLowerCase()}.`);
+        return;
+      }
 
       if (form.eventType === 'other' && !form.customType.trim()) {
         Alert.alert('Missing info', 'Please enter a custom event type.');
@@ -2934,6 +3365,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
       setEvents(updatedEvents);
       setEditingEvent(null);
+      resetTypeSelectionUi();
       setPendingVariableReminders([]);
       setSeededVariableDraftIds([]);
       const resetDate = new Date();
@@ -2949,6 +3381,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       const reloaded = await loadEvents(userId);
       setEvents(reloaded);
       void autoPushGoogleCalendarIfConfigured();
+
+      await scheduleEventDeviceReminders(
+        resolvedEventType,
+        peopleLabel,
+        isNoReminderMode(form.reminderMode) ? 'none' : form.reminderMode,
+        primaryReminderDateTime,
+        variableReminderEntries,
+      );
 
       if (shouldShareAfterSave && updatedEvent) {
         startShareForEvent(updatedEvent);
@@ -3118,7 +3558,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     customMessage: string,
     acceptLink?: string,
   ) => {
-    const acceptExplanation = 'As a registered user of the Special Date Reminder App clicking the Accept link will load the event into your Saved Events folder.';
+    const acceptExplanation = 'As a registered user of the Remind Me This App clicking the Accept link will load the event into your Saved Events folder.';
     const normalizedCustomMessage = customMessage.trim().slice(0, 255);
     const eventDate = isAllDaySpecialDateEvent(event)
       ? getLocalDateFromUtcDay(event.eventDateTime)
@@ -3179,6 +3619,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   };
 
   const handleSendShare = async () => {
+    if (isSendingShare) {
+      return;
+    }
     if (!sharingEvent) {
       setValidationMessage('Please select an event to share.');
       setCurrentView('landing');
@@ -3196,16 +3639,19 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     }
 
     const currentUser = userId ? await loadUser(userId) : null;
-    const senderName = currentUser?.fullName?.trim() || 'A Special Date Reminder user';
+    const senderName = currentUser?.fullName?.trim() || 'A Remind Me This user';
 
     const currentUserEmail = userEmail?.trim().toLowerCase() || '';
     const currentUserPhoneDigits = (currentUser?.mobileNumber || '').replace(/\D/g, '').slice(0, 10);
 
+    setIsSendingShare(true);
     let launchedAnyChannel = false;
     const deliveryErrors: string[] = [];
     const successfulDeliveries: string[] = [];
     const inviteRecipients = new Set<string>();
     const shareDraftParts: string[] = [];
+    const sentEmails = new Set<string>();
+    const sentPhones = new Set<string>();
 
     for (const recipient of shareRecipients) {
       const normalizedEmail = recipient.email?.trim().toLowerCase() || '';
@@ -3244,51 +3690,57 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         inviteRecipients.add(matchedRecipientUserId);
         successfulDeliveries.push(`Popup invite to ${recipient.label}`);
         launchedAnyChannel = true;
-
-        if (!shouldAlsoUseContactChannels) {
-          continue;
-        }
       }
 
       let deliveredToRecipient = false;
 
       if (normalizedEmail && validateEmail(normalizedEmail)) {
-        const emailSent = await sendShareEmailNotification({
-          toEmail: normalizedEmail,
-          subject: `Shared event: ${sharingEvent.title}`,
-          body: sharePayload.text,
-          htmlBody: sharePayload.html,
-        });
-
-        if (emailSent) {
-          launchedAnyChannel = true;
-          deliveredToRecipient = true;
-          successfulDeliveries.push(`Email to ${recipient.label}`);
+        if (sentEmails.has(normalizedEmail)) {
+          deliveryErrors.push(`Skipped duplicate email for ${recipient.label}.`);
         } else {
-          deliveryErrors.push(`Unable to send email to ${recipient.label}.`);
-          shareDraftParts.push(`EMAIL\nTo: ${normalizedEmail}\nSubject: Shared event: ${sharingEvent.title}\n\n${sharePayload.text}`);
+          sentEmails.add(normalizedEmail);
+          const emailSent = await sendShareEmailNotification({
+            toEmail: normalizedEmail,
+            subject: `Shared event: ${sharingEvent.title}`,
+            body: sharePayload.text,
+            htmlBody: sharePayload.html,
+          });
+
+          if (emailSent) {
+            launchedAnyChannel = true;
+            deliveredToRecipient = true;
+            successfulDeliveries.push(`Email to ${recipient.label}`);
+          } else {
+            deliveryErrors.push(`Unable to send email to ${recipient.label}.`);
+            shareDraftParts.push(`EMAIL\nTo: ${normalizedEmail}\nSubject: Shared event: ${sharingEvent.title}\n\n${sharePayload.text}`);
+          }
         }
       }
 
       if (normalizedRecipientPhone && !validatePhoneNumber(recipient.phone || '')) {
-        const smsUrl = `sms:${normalizedRecipientPhone}?body=${encodeURIComponent(sharePayload.text)}`;
-        try {
-          const openedSms = await openExternalComposer(smsUrl);
-          if (openedSms) {
-            launchedAnyChannel = true;
-            deliveredToRecipient = true;
-            successfulDeliveries.push(`Text to ${recipient.label}`);
-          } else {
-            deliveryErrors.push(`Text messaging is not available for ${recipient.label}.`);
+        if (sentPhones.has(normalizedRecipientPhone)) {
+          deliveryErrors.push(`Skipped duplicate phone for ${recipient.label}.`);
+        } else {
+          sentPhones.add(normalizedRecipientPhone);
+          const smsUrl = `sms:${normalizedRecipientPhone}?body=${encodeURIComponent(sharePayload.text)}`;
+          try {
+            const openedSms = await openExternalComposer(smsUrl);
+            if (openedSms) {
+              launchedAnyChannel = true;
+              deliveredToRecipient = true;
+              successfulDeliveries.push(`Text to ${recipient.label}`);
+            } else {
+              deliveryErrors.push(`Text messaging is not available for ${recipient.label}.`);
+              shareDraftParts.push(`TEXT\nTo: ${recipient.phone}\n\n${sharePayload.text}`);
+            }
+          } catch {
+            deliveryErrors.push(`Unable to open text composer for ${recipient.label}.`);
             shareDraftParts.push(`TEXT\nTo: ${recipient.phone}\n\n${sharePayload.text}`);
           }
-        } catch {
-          deliveryErrors.push(`Unable to open text composer for ${recipient.label}.`);
-          shareDraftParts.push(`TEXT\nTo: ${recipient.phone}\n\n${sharePayload.text}`);
         }
       }
 
-      if (!deliveredToRecipient) {
+      if (!deliveredToRecipient && !matchedRecipientUserId) {
         deliveryErrors.push(`Skipped ${recipient.label}: no app account match and no valid email or mobile phone was available.`);
       }
     }
@@ -3314,6 +3766,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     if (!launchedAnyChannel && deliveryErrors.length) {
       const copied = await copyTextToClipboard(shareDraftParts.join('\n\n--------------------\n\n'));
       setValidationMessage(`${deliveryErrors.join(' ')} ${copied ? 'Share draft copied to clipboard.' : 'Copy the share details manually from your message and try again.'}`.trim());
+      setIsSendingShare(false);
       return;
     }
 
@@ -3324,6 +3777,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       successfulDeliveries.some((entry) => entry.startsWith('Text to ')) ? 'Complete text sending from the opened message composer.' : null,
     ].filter(Boolean).join('\n');
 
+    setIsSendingShare(false);
     Alert.alert('Share sent', resultNotes);
     cancelShareFlow();
   };
@@ -3363,9 +3817,58 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
   const closeDatePicker = () => setPickerTarget(null);
 
+  const openTimePicker = (target: TimePickerTarget, title: string, value: Date) => {
+    const nextDate = new Date(value);
+    nextDate.setMinutes(alignMinuteToClockInterval(nextDate.getMinutes(), activeClockIntervalMinutes), 0, 0);
+    setTimePickerDraftDate(nextDate);
+    setActiveTimePicker({ target, title });
+  };
+
+  const closeTimePicker = () => {
+    setActiveTimePicker(null);
+  };
+
+  const handleSaveTimePicker = (nextDate: Date) => {
+    if (!activeTimePicker) {
+      return;
+    }
+
+    const hours = nextDate.getHours();
+    const minutes = alignMinuteToClockInterval(nextDate.getMinutes(), activeClockIntervalMinutes);
+
+    if (activeTimePicker.target === 'event-start') {
+      updateFieldTime('eventDateTime', hours, minutes);
+      closeTimePicker();
+      return;
+    }
+
+    if (activeTimePicker.target === 'event-end') {
+      updateFieldTime('eventEndDateTime', hours, minutes);
+      closeTimePicker();
+      return;
+    }
+
+    if (activeTimePicker.target === 'static-reminder') {
+      updateFieldTime('reminderDateTime', hours, minutes);
+      closeTimePicker();
+      return;
+    }
+
+    setPendingReminderDateTime((current) => {
+      const pendingDate = new Date(current);
+      pendingDate.setHours(hours, minutes, 0, 0);
+      return pendingDate;
+    });
+    closeTimePicker();
+  };
+
   const cancelCreateFlow = () => {
     const now = getDefaultDate();
     setEditingEvent(null);
+    resetTypeSelectionUi();
+    setIsEventLocationLine1Focused(false);
+    setEventLocationPredictions([]);
+    setActiveTimePicker(null);
     setHasInitializedReminderScheduleView(false);
     setHasTouchedStaticReminderSchedule(false);
     setPendingVariableReminders([]);
@@ -3517,6 +4020,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setSelectedEventPopupDate(null);
     setSelectedReminderPopup(null);
     setSelectedReminderCalendarDate(null);
+    setSelectedReminderDetail(null);
     setRemindersForEventId(null);
     setSelectedSummaryEventId(eventId);
   };
@@ -3610,6 +4114,17 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         && occurrence.getDate() === targetDay;
     });
   }, [savedReminders, selectedReminderCalendarDate]);
+
+  const selectedReminderDetailEntry = useMemo(() => {
+    if (!selectedReminderDetail) {
+      return null;
+    }
+
+    return savedReminders.find(({ event, occurrence }) => (
+      event.id === selectedReminderDetail.eventId
+      && occurrence.getTime() === selectedReminderDetail.occurrenceTime
+    )) || null;
+  }, [savedReminders, selectedReminderDetail]);
 
   const getReminderOccurrencesForEvent = (eventId: string) => {
     return savedReminders.filter(({ event }) => event.id === eventId);
@@ -3799,7 +4314,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
   const renderLandingView = () => (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Special Date Reminder</Text>
       <Text style={styles.subtitle}>Track birthdays, anniversaries, and other meaningful dates.</Text>
 
       {apiStorageStatusMessage ? (
@@ -3816,6 +4330,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           setHasInitializedReminderScheduleView(false);
           setHasTouchedStaticReminderSchedule(false);
           setEditingEvent(null);
+          resetTypeSelectionUi();
           setPendingVariableReminders([]);
           setSeededVariableDraftIds([]);
           setForm(getResetFormState(effectiveReminderTimeZone));
@@ -4020,7 +4535,22 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
               <View key={event.id} style={styles.eventRow}>
                 <View style={styles.eventContentRow}>
                   <View style={styles.eventDetails}>
-                    <Text style={styles.eventTitle}>{event.title}</Text>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={[styles.eventTitle, { flex: 1 }]}>{event.title}</Text>
+                      <TouchableOpacity
+                        onPress={() => openRemindersForEvent(event)}
+                        disabled={!getReminderSummaryState(event).isActive}
+                      >
+                        <Text
+                          style={[
+                            styles.reminderCountLink,
+                            !getReminderSummaryState(event).isActive && styles.reminderCountLinkDisabled,
+                          ]}
+                        >
+                          {getReminderSummaryState(event).label}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
                     <Text>{event.people}</Text>
                     <Text numberOfLines={1} ellipsizeMode="tail">{formatEventDateLabel(event)}</Text>
                     <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventTimeOnlyLabel(event)}</Text>
@@ -4044,20 +4574,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                         </TouchableOpacity>
                       </View>
                     </View>
-                    <TouchableOpacity
-                      style={{ marginTop: 8 }}
-                      onPress={() => openRemindersForEvent(event)}
-                      disabled={!getReminderSummaryState(event).isActive}
-                    >
-                      <Text
-                        style={[
-                          styles.reminderCountLink,
-                          !getReminderSummaryState(event).isActive && styles.reminderCountLinkDisabled,
-                        ]}
-                      >
-                        {getReminderSummaryState(event).label}
-                      </Text>
-                    </TouchableOpacity>
                   </View>
                 </View>
                 {(() => {
@@ -4173,6 +4689,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                     key={dayKey}
                     style={[styles.dayCell, hasReminder && styles.dayCellWithReminder]}
                     onPress={() => {
+                      setSelectedReminderDetail(null);
                       setSelectedReminderCalendarDate(day);
                       setSelectedReminderPopup(day);
                     }}
@@ -4192,7 +4709,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                 style={styles.summaryLink}
                 onPress={() => {
                   const reminderDate = new Date(occurrence);
-                  setSelectedReminderCalendarDate(reminderDate);
+                  setSelectedReminderCalendarDate(null);
+                  setSelectedReminderDetail({ eventId: event.id, occurrenceTime: reminderDate.getTime() });
                   setSelectedReminderPopup(reminderDate);
                 }}
               >
@@ -4271,18 +4789,37 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         )}
       </View>
 
-      <Modal transparent visible={confirmCancelEventId !== null} animationType="fade" onRequestClose={() => setConfirmCancelEventId(null)}>
+      <Modal transparent visible={confirmCancelEventId !== null} animationType="fade" onRequestClose={() => {
+        if (!isDeletingConfirmedEvent) {
+          setConfirmCancelEventId(null);
+        }
+      }}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Delete event?</Text>
             <Text style={styles.modalBody}>This will permanently remove the event and all associated reminders from your saved list. Are you sure?</Text>
             <View style={styles.confirmActionRow}>
               <View style={styles.confirmActionSide}>
-                <Button title="No" onPress={() => setConfirmCancelEventId(null)} />
+                <Button title="No" onPress={() => {
+                  if (!isDeletingConfirmedEvent) {
+                    setConfirmCancelEventId(null);
+                  }
+                }} disabled={isDeletingConfirmedEvent} />
               </View>
               <View style={styles.confirmActionDivider} />
               <View style={styles.confirmActionSide}>
-                <Button title="Yes" onPress={() => confirmCancelEventId && cancelEvent(confirmCancelEventId)} />
+                <Button title={isDeletingConfirmedEvent ? 'Deleting...' : 'Yes'} disabled={isDeletingConfirmedEvent} onPress={async () => {
+                  if (!confirmCancelEventId || isDeletingConfirmedEvent) {
+                    return;
+                  }
+
+                  setIsDeletingConfirmedEvent(true);
+                  try {
+                    await cancelEvent(confirmCancelEventId);
+                  } finally {
+                    setIsDeletingConfirmedEvent(false);
+                  }
+                }} />
               </View>
             </View>
           </View>
@@ -4477,7 +5014,25 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
               <View style={styles.eventRow}>
                 <View style={styles.eventContentRow}>
                   <View style={styles.eventDetails}>
-                    <Text style={styles.eventTitle}>{selectedSummaryEvent.title}</Text>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={[styles.eventTitle, { flex: 1 }]}>{selectedSummaryEvent.title}</Text>
+                      <TouchableOpacity
+                        onPress={() => {
+                          setSelectedSummaryEventId(null);
+                          openRemindersForEvent(selectedSummaryEvent);
+                        }}
+                        disabled={!getReminderSummaryState(selectedSummaryEvent).isActive}
+                      >
+                        <Text
+                          style={[
+                            styles.reminderCountLink,
+                            !getReminderSummaryState(selectedSummaryEvent).isActive && styles.reminderCountLinkDisabled,
+                          ]}
+                        >
+                          {getReminderSummaryState(selectedSummaryEvent).label}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
                     <Text>{selectedSummaryEvent.people}</Text>
                     <Text numberOfLines={1} ellipsizeMode="tail">{formatEventDateLabel(selectedSummaryEvent)}</Text>
                     <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventTimeOnlyLabel(selectedSummaryEvent)}</Text>
@@ -4543,11 +5098,56 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         </View>
       </Modal>
 
-      <Modal transparent visible={selectedReminderPopup !== null} animationType="fade" onRequestClose={() => setSelectedReminderPopup(null)}>
+      <Modal transparent visible={selectedReminderPopup !== null} animationType="fade" onRequestClose={() => {
+        setSelectedReminderPopup(null);
+        setSelectedReminderCalendarDate(null);
+        setSelectedReminderDetail(null);
+      }}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Reminder details</Text>
-            {selectedReminderCalendarDate ? (
+            {selectedReminderDetailEntry ? (
+              <View>
+                <Text style={styles.modalBody}>{selectedReminderDetailEntry.occurrence.toLocaleDateString()}</Text>
+                <View style={styles.reminderListItem}>
+                  <View style={styles.reminderListRow}>
+                    <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
+                      <Text style={styles.reminderListDate}>{selectedReminderDetailEntry.event.title} • {selectedReminderDetailEntry.event.people}</Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
+                        <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(selectedReminderDetailEntry.occurrence, selectedReminderDetailEntry.event.reminderAllDay)}</Text>
+                      </View>
+                      <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
+                        <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event date: {formatEventDateOnly(selectedReminderDetailEntry.event)} • {formatEventTimeOnlyLabel(selectedReminderDetailEntry.event)}</Text>
+                      </View>
+                      {selectedReminderDetailEntry.event.notes ? (
+                        <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
+                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Notes: {selectedReminderDetailEntry.event.notes}</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <TouchableOpacity
+                      style={styles.reminderDeleteButton}
+                      onPress={async () => {
+                        const reminderEntryId = selectedReminderDetailEntry.event.variableReminders?.find((entry) => (
+                          new Date(entry.reminderDateTime).getTime() === selectedReminderDetailEntry.occurrence.getTime()
+                        ))?.id;
+
+                        if (reminderEntryId) {
+                          await deleteReminderEntry(selectedReminderDetailEntry.event.id, reminderEntryId);
+                        } else {
+                          await deleteStaticReminder(selectedReminderDetailEntry.event.id);
+                        }
+
+                        setSelectedReminderPopup(null);
+                        setSelectedReminderDetail(null);
+                      }}
+                    >
+                      <Text style={styles.reminderDeleteButtonText}>Delete reminder</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            ) : selectedReminderCalendarDate ? (
               <View>
                 <Text style={styles.modalBody}>{selectedReminderCalendarDate.toLocaleDateString()}</Text>
                 {selectedReminderDayEvents.length ? selectedReminderDayEvents.map(({ event, occurrence }) => (
@@ -4587,6 +5187,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                           }
 
                           setSelectedReminderPopup(null);
+                          setSelectedReminderCalendarDate(null);
                         }}
                       >
                         <Text style={styles.reminderDeleteButtonText}>Delete reminder</Text>
@@ -4599,13 +5200,21 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
               </View>
             ) : null}
             <View style={{ marginTop: 8 }}>
-              <Button title="Close" onPress={() => setSelectedReminderPopup(null)} />
+              <Button title="Close" onPress={() => {
+                setSelectedReminderPopup(null);
+                setSelectedReminderCalendarDate(null);
+                setSelectedReminderDetail(null);
+              }} />
             </View>
           </View>
         </View>
       </Modal>
 
-      <Modal transparent visible={confirmDeleteReminder !== null} animationType="fade" onRequestClose={() => setConfirmDeleteReminder(null)}>
+      <Modal transparent visible={confirmDeleteReminder !== null} animationType="fade" onRequestClose={() => {
+        if (!isDeletingConfirmedItem) {
+          setConfirmDeleteReminder(null);
+        }
+      }}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>
@@ -4626,21 +5235,32 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
               <View style={styles.confirmActionSide}>
                 <Button
                   title="No"
-                  onPress={() => setConfirmDeleteReminder(null)}
+                  onPress={() => {
+                    if (!isDeletingConfirmedItem) {
+                      setConfirmDeleteReminder(null);
+                    }
+                  }}
+                  disabled={isDeletingConfirmedItem}
                 />
               </View>
               <View style={styles.confirmActionDivider} />
               <View style={styles.confirmActionSide}>
-                <Button title="Yes" onPress={async () => {
-                  if (!confirmDeleteReminder) return;
-                  if (confirmDeleteReminder.target === 'event') {
-                    await deleteReminderEvent(confirmDeleteReminder.eventId);
-                  } else if (confirmDeleteReminder.target === 'all-reminders') {
-                    await deleteAllRemindersForEvent(confirmDeleteReminder.eventId);
-                  } else if (confirmDeleteReminder.reminderSource === 'static') {
-                    await deleteStaticReminder(confirmDeleteReminder.eventId);
-                  } else if (confirmDeleteReminder.reminderEntryId) {
-                    await deleteReminderEntry(confirmDeleteReminder.eventId, confirmDeleteReminder.reminderEntryId);
+                <Button title={isDeletingConfirmedItem ? 'Deleting...' : 'Yes'} disabled={isDeletingConfirmedItem} onPress={async () => {
+                  if (!confirmDeleteReminder || isDeletingConfirmedItem) return;
+
+                  setIsDeletingConfirmedItem(true);
+                  try {
+                    if (confirmDeleteReminder.target === 'event') {
+                      await deleteReminderEvent(confirmDeleteReminder.eventId);
+                    } else if (confirmDeleteReminder.target === 'all-reminders') {
+                      await deleteAllRemindersForEvent(confirmDeleteReminder.eventId);
+                    } else if (confirmDeleteReminder.reminderSource === 'static') {
+                      await deleteStaticReminder(confirmDeleteReminder.eventId);
+                    } else if (confirmDeleteReminder.reminderEntryId) {
+                      await deleteReminderEntry(confirmDeleteReminder.eventId, confirmDeleteReminder.reminderEntryId);
+                    }
+                  } finally {
+                    setIsDeletingConfirmedItem(false);
                   }
                 }} />
               </View>
@@ -4701,7 +5321,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   );
 
   const renderShareView = () => (
-    <ScrollView contentContainerStyle={styles.container}>
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
+    >
+      <ScrollView
+        contentContainerStyle={[styles.container, { paddingBottom: 32 }]}
+        keyboardShouldPersistTaps="handled"
+      >
       <Text style={styles.title}>Share event</Text>
       <Text style={styles.subtitle}>Send this event to another person by email and/or text.</Text>
 
@@ -4725,43 +5353,61 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
         <Text style={styles.label}>Share event with</Text>
         <View style={styles.shareBuilderCard}>
-          <Text style={styles.viewLabel}>Contacts</Text>
-          <View style={styles.shareRecipientPickerRow}>
-            <View style={styles.shareRecipientPickerWrapper}>
-              <Picker
-                selectedValue={selectedShareContactId}
-                onValueChange={(value) => setSelectedShareContactId(String(value))}
-                style={styles.picker}
-              >
-                <Picker.Item label={shareContactOptions.length ? 'Select contact' : 'No contacts available'} value="" />
-                {shareContactOptions.map((option) => (
-                  <Picker.Item key={option.value} label={option.label} value={option.value} />
-                ))}
-              </Picker>
-            </View>
-            <TouchableOpacity style={styles.shareRecipientAddButton} onPress={addSelectedShareContact}>
-              <Text style={styles.primaryButtonText}>Add</Text>
-            </TouchableOpacity>
-          </View>
+          {shareContactOptions.length ? (
+            <>
+              <Text style={styles.viewLabel}>Contacts</Text>
+              <View style={styles.shareRecipientPickerRow}>
+                <View style={styles.shareRecipientPickerWrapper}>
+                  <Picker
+                    selectedValue={selectedShareContactId}
+                    onValueChange={(value) => setSelectedShareContactId(String(value))}
+                    style={styles.picker}
+                  >
+                    <Picker.Item label="Select contact" value="" />
+                    {shareContactOptions.map((option) => (
+                      <Picker.Item key={option.value} label={option.label} value={option.value} />
+                    ))}
+                  </Picker>
+                </View>
+                <TouchableOpacity style={styles.shareRecipientAddButton} onPress={addSelectedShareContact}>
+                  <Text style={styles.primaryButtonText}>Add</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          ) : (
+            <>
+              <Text style={styles.viewLabel}>Contacts <Text style={styles.helperText}>(No Contacts Available)</Text></Text>
+              <Text style={styles.helperText}>Setup contacts in Account screen.</Text>
+            </>
+          )}
 
-          <Text style={styles.viewLabel}>Groups</Text>
-          <View style={styles.shareRecipientPickerRow}>
-            <View style={styles.shareRecipientPickerWrapper}>
-              <Picker
-                selectedValue={selectedShareGroupId}
-                onValueChange={(value) => setSelectedShareGroupId(String(value))}
-                style={styles.picker}
-              >
-                <Picker.Item label={shareGroupOptions.length ? 'Select group' : 'No groups available'} value="" />
-                {shareGroupOptions.map((option) => (
-                  <Picker.Item key={option.value} label={option.label} value={option.value} />
-                ))}
-              </Picker>
-            </View>
-            <TouchableOpacity style={styles.shareRecipientAddButton} onPress={addSelectedShareGroup}>
-              <Text style={styles.primaryButtonText}>Add</Text>
-            </TouchableOpacity>
-          </View>
+          {shareGroupOptions.length ? (
+            <>
+              <Text style={styles.viewLabel}>Groups</Text>
+              <View style={styles.shareRecipientPickerRow}>
+                <View style={styles.shareRecipientPickerWrapper}>
+                  <Picker
+                    selectedValue={selectedShareGroupId}
+                    onValueChange={(value) => setSelectedShareGroupId(String(value))}
+                    style={styles.picker}
+                  >
+                    <Picker.Item label="Select group" value="" />
+                    {shareGroupOptions.map((option) => (
+                      <Picker.Item key={option.value} label={option.label} value={option.value} />
+                    ))}
+                  </Picker>
+                </View>
+                <TouchableOpacity style={styles.shareRecipientAddButton} onPress={addSelectedShareGroup}>
+                  <Text style={styles.primaryButtonText}>Add</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          ) : (
+            <>
+              <Text style={styles.viewLabel}>Groups <Text style={styles.helperText}>(No Groups Available)</Text></Text>
+              <Text style={styles.helperText}>Setup groups in Account screen.</Text>
+            </>
+          )}
 
           <Text style={styles.viewLabel}>Individual email</Text>
           <View style={styles.shareRecipientPickerRow}>
@@ -4789,7 +5435,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
               keyboardType="phone-pad"
               maxLength={14}
             />
-            <TouchableOpacity style={styles.shareRecipientAddButton} onPress={addManualPhoneRecipient}>
+            <TouchableOpacity
+              style={[
+                styles.shareRecipientAddButton,
+                !reminderDeliveryTextEnabled && styles.shareRecipientAddButtonDisabled,
+              ]}
+              onPress={addManualPhoneRecipient}
+              disabled={!reminderDeliveryTextEnabled}
+            >
               <Text style={styles.primaryButtonText}>Add</Text>
             </TouchableOpacity>
           </View>
@@ -4831,24 +5484,32 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         />
 
         <View style={styles.shareActionsRow}>
-          <TouchableOpacity style={[styles.primaryButton, styles.shareActionButton]} onPress={() => void handleSendShare()}>
-            <Text style={styles.primaryButtonText}>Send</Text>
+          <TouchableOpacity
+            style={[styles.primaryButton, styles.shareActionButton, isSendingShare && styles.actionButtonDisabled]}
+            onPress={() => void handleSendShare()}
+            disabled={isSendingShare}
+          >
+            <Text style={styles.primaryButtonText}>{isSendingShare ? 'Sending…' : 'Send'}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.toggleButton, styles.shareActionButton]} onPress={cancelShareFlow}>
+          <TouchableOpacity style={[styles.toggleButton, styles.shareActionButton]} onPress={cancelShareFlow} disabled={isSendingShare}>
             <Text style={styles.toggleButtonText}>Cancel</Text>
           </TouchableOpacity>
         </View>
       </View>
-    </ScrollView>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 
   const renderCreateView = () => {
     const effectiveEventEndDateTime = resolveEventEndDateTime(form.eventDateTime, form.eventEndDateTime);
+    const subtypeFieldLabel = getSubtypeFieldLabel(form.eventType);
+    const subtypeDisplayLabel = getSubtypeDisplayLabel(form);
+    const shouldShowSubtypeField = eventTypeHasSubtype(form.eventType);
 
     return (
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-      <Text style={styles.title}>Create reminder</Text>
-      <Text style={styles.subtitle}>Set up a new event and reminder schedule.</Text>
+      <Text style={styles.title}>{editingEvent ? 'Modify Event' : 'Create Event'}</Text>
+      <Text style={styles.subtitle}>{editingEvent ? 'Update the event details and reminder schedule.' : 'Set up a new event and reminder schedule.'}</Text>
 
       {apiStorageStatusMessage ? (
         <View style={styles.apiStatusBanner}>
@@ -4857,128 +5518,87 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       ) : null}
 
       <View style={styles.card}>
-        <Text style={styles.label}>Event type</Text>
-        <View style={styles.pickerWrapper}>
-          <Picker
-            selectedValue={form.eventType}
-            onValueChange={(value) => {
-              const nextIsAllDay = value === 'birthday' || value === 'anniversary';
-              setForm((current) => {
-                const nextEventDate = new Date(current.eventDateTime);
-                const nextReminderDate = new Date(current.reminderDateTime);
-                if (nextIsAllDay) {
-                  nextEventDate.setHours(0, 0, 0, 0);
-                }
-
-                return {
-                  ...current,
-                  eventType: value as EventTypeValue,
-                  ageAsOfToday: value === 'birthday'
-                    ? (current.ageAsOfToday || getDefaultBirthdayAgeString(nextEventDate))
-                    : '',
-                  eventAllDay: nextIsAllDay,
-                  reminderAllDay: nextIsAllDay ? current.reminderAllDay : false,
-                  eventDateTime: nextEventDate,
-                  reminderDateTime: nextReminderDate,
-                };
-              });
-            }}
-            style={styles.picker}
-          >
-            {eventTypeOptions.map((option) => (
-              <Picker.Item key={option.value} label={option.label} value={option.value} />
-            ))}
-          </Picker>
+        <View style={styles.inlineSelectionRow}>
+          <Text style={styles.label}>Event type</Text>
+          {!isEventTypePickerVisible && hasSelectedEventType ? (
+            <TouchableOpacity style={styles.inlineSelectionValueButton} onPress={() => {
+              setEventTypeDraft(form.eventType);
+              setIsEventTypePickerVisible(true);
+            }} activeOpacity={0.8}>
+              <Text style={styles.inlineSelectionValueText}>{eventTypeLabels[form.eventType]}</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
+        {(isEventTypePickerVisible || !hasSelectedEventType) ? (
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={eventTypeDraft}
+              onValueChange={(value) => setEventTypeDraft(value as EventTypeValue | '')}
+              style={styles.picker}
+            >
+              <Picker.Item label="Select event type" value="" />
+              {eventTypeOptions.map((option) => (
+                <Picker.Item key={option.value} label={option.label} value={option.value} />
+              ))}
+            </Picker>
+            <TouchableOpacity
+              style={[styles.toggleButton, styles.inlineSelectionConfirmButton, !eventTypeDraft && styles.actionButtonDisabled]}
+              onPress={applyEventTypeDraftSelection}
+              disabled={!eventTypeDraft}
+            >
+              <Text style={styles.toggleButtonText}>Select event type</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
 
-        {form.eventType === 'party' && (
+        {shouldShowSubtypeField && subtypeFieldLabel ? (
           <>
-            <Text style={styles.label}>Party subtype</Text>
-            <View style={styles.pickerWrapper}>
-              <Picker
-                selectedValue={form.partySubtype}
-                onValueChange={(value) => setForm({
-                  ...form,
-                  partySubtype: value as PartySubtypeValue,
-                  eventAllDay: false,
-                })}
-                style={styles.picker}
-              >
-                {Object.entries(partySubtypeLabels).map(([value, label]) => (
-                  <Picker.Item key={value} label={label} value={value} />
-                ))}
-              </Picker>
+            <View style={styles.inlineSelectionRow}>
+              <Text style={styles.label}>{subtypeFieldLabel}</Text>
+              {!isSubtypePickerVisible && hasSelectedSubtype ? (
+                <TouchableOpacity style={styles.inlineSelectionValueButton} onPress={() => {
+                  setSubtypeDraft(getSubtypeValueForEventType(form, form.eventType));
+                  setIsSubtypePickerVisible(true);
+                }} activeOpacity={0.8}>
+                  <Text style={styles.inlineSelectionValueText}>{subtypeDisplayLabel}</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
+            {(isSubtypePickerVisible || !hasSelectedSubtype) ? (
+              <View style={styles.pickerWrapper}>
+                <Picker
+                  selectedValue={subtypeDraft}
+                  onValueChange={(value) => setSubtypeDraft(String(value || ''))}
+                  style={styles.picker}
+                >
+                  <Picker.Item label={`Select ${subtypeFieldLabel.toLowerCase()}`} value="" />
+                  {form.eventType === 'party' ? Object.entries(partySubtypeLabels).map(([value, label]) => (
+                    <Picker.Item key={value} label={label} value={value} />
+                  )) : null}
+                  {form.eventType === 'school' ? Object.entries(schoolSubtypeLabels).map(([value, label]) => (
+                    <Picker.Item key={value} label={label} value={value} />
+                  )) : null}
+                  {form.eventType === 'medical' ? Object.entries(medicalSubtypeLabels).map(([value, label]) => (
+                    <Picker.Item key={value} label={label} value={value} />
+                  )) : null}
+                  {form.eventType === 'dental' ? Object.entries(dentalSubtypeLabels).map(([value, label]) => (
+                    <Picker.Item key={value} label={label} value={value} />
+                  )) : null}
+                  {form.eventType === 'work' ? Object.entries(workSubtypeLabels).map(([value, label]) => (
+                    <Picker.Item key={value} label={label} value={value} />
+                  )) : null}
+                </Picker>
+                <TouchableOpacity
+                  style={[styles.toggleButton, styles.inlineSelectionConfirmButton, !subtypeDraft && styles.actionButtonDisabled]}
+                  onPress={applySubtypeDraftSelection}
+                  disabled={!subtypeDraft}
+                >
+                  <Text style={styles.toggleButtonText}>Select subtype</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
           </>
-        )}
-
-        {form.eventType === 'school' && (
-          <>
-            <Text style={styles.label}>School subtype</Text>
-            <View style={styles.pickerWrapper}>
-              <Picker
-                selectedValue={form.schoolSubtype}
-                onValueChange={(value) => setForm({ ...form, schoolSubtype: value as SchoolSubtypeValue })}
-                style={styles.picker}
-              >
-                {Object.entries(schoolSubtypeLabels).map(([value, label]) => (
-                  <Picker.Item key={value} label={label} value={value} />
-                ))}
-              </Picker>
-            </View>
-          </>
-        )}
-
-        {form.eventType === 'medical' && (
-          <>
-            <Text style={styles.label}>Medical subtype</Text>
-            <View style={styles.pickerWrapper}>
-              <Picker
-                selectedValue={form.medicalSubtype}
-                onValueChange={(value) => setForm({ ...form, medicalSubtype: value as MedicalSubtypeValue })}
-                style={styles.picker}
-              >
-                {Object.entries(medicalSubtypeLabels).map(([value, label]) => (
-                  <Picker.Item key={value} label={label} value={value} />
-                ))}
-              </Picker>
-            </View>
-          </>
-        )}
-
-        {form.eventType === 'dental' && (
-          <>
-            <Text style={styles.label}>Dental subtype</Text>
-            <View style={styles.pickerWrapper}>
-              <Picker
-                selectedValue={form.dentalSubtype}
-                onValueChange={(value) => setForm({ ...form, dentalSubtype: value as DentalSubtypeValue })}
-                style={styles.picker}
-              >
-                {Object.entries(dentalSubtypeLabels).map(([value, label]) => (
-                  <Picker.Item key={value} label={label} value={value} />
-                ))}
-              </Picker>
-            </View>
-          </>
-        )}
-
-        {form.eventType === 'work' && (
-          <>
-            <Text style={styles.label}>Work subtype</Text>
-            <View style={styles.pickerWrapper}>
-              <Picker
-                selectedValue={form.workSubtype}
-                onValueChange={(value) => setForm({ ...form, workSubtype: value as WorkSubtypeValue })}
-                style={styles.picker}
-              >
-                {Object.entries(workSubtypeLabels).map(([value, label]) => (
-                  <Picker.Item key={value} label={label} value={value} />
-                ))}
-              </Picker>
-            </View>
-          </>
-        )}
+        ) : null}
 
         {form.eventType === 'other' && (
           <>
@@ -5035,6 +5655,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                     };
                   }
 
+                  setIsEventLocationLine1Focused(false);
                   setEventLocationPredictions([]);
                   return {
                     ...current,
@@ -5053,7 +5674,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
               <View style={styles.eventLocationRadioOuter}>
                 {form.eventLocationEnabled ? <View style={styles.eventLocationRadioInner} /> : null}
               </View>
-              <Text style={styles.eventLocationToggleText}>Use event location address</Text>
+              <Text style={styles.eventLocationToggleText}>Set event location address</Text>
             </TouchableOpacity>
 
             {form.eventLocationEnabled ? (
@@ -5061,6 +5682,18 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                 <TextInput
                   style={styles.input}
                   value={form.eventLocationLine1}
+                  onFocus={() => {
+                    if (eventLocationBlurTimeoutRef.current) {
+                      clearTimeout(eventLocationBlurTimeoutRef.current);
+                    }
+                    setIsEventLocationLine1Focused(true);
+                  }}
+                  onBlur={() => {
+                    eventLocationBlurTimeoutRef.current = setTimeout(() => {
+                      setIsEventLocationLine1Focused(false);
+                      setEventLocationPredictions([]);
+                    }, 150);
+                  }}
                   onChangeText={(value) => setForm((current) => ({
                     ...current,
                     eventLocationLine1: value,
@@ -5151,147 +5784,36 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
               <View style={styles.eventTimeGroupsRow}>
                 <View style={styles.eventTimeGroup}>
                   <Text style={styles.label}>Event start time</Text>
-                  <View style={styles.timeRow}>
-                    <View style={styles.pickerWrapper}>
-                      <Picker
-                        selectedValue={form.eventDateTime.getHours() % 12 || 12}
-                        onValueChange={(value) => {
-                          const hourValue = Number(value);
-                          const currentHours = form.eventDateTime.getHours();
-                          const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
-                          updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
-                        }}
-                        style={styles.picker}
-                      >
-                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
-                          <Picker.Item key={hour} label={hour.toString()} value={hour} />
-                        ))}
-                      </Picker>
-                    </View>
-                    <View style={styles.pickerWrapper}>
-                      <Picker
-                        selectedValue={form.eventDateTime.getMinutes()}
-                        onValueChange={(value) => updateFieldTime('eventDateTime', form.eventDateTime.getHours(), Number(value))}
-                        style={styles.picker}
-                      >
-                        {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
-                          <Picker.Item key={minute} label={minute.toString().padStart(2, '0')} value={minute} />
-                        ))}
-                      </Picker>
-                    </View>
-                    <View style={styles.pickerWrapper}>
-                      <Picker
-                        selectedValue={form.eventDateTime.getHours() >= 12 ? 'PM' : 'AM'}
-                        onValueChange={(value) => {
-                          const currentHours = form.eventDateTime.getHours();
-                          const isPm = value === 'PM';
-                          const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
-                          updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
-                        }}
-                        style={styles.picker}
-                      >
-                        <Picker.Item label="AM" value="AM" />
-                        <Picker.Item label="PM" value="PM" />
-                      </Picker>
-                    </View>
-                  </View>
+                  <TouchableOpacity
+                    style={styles.timeValueButton}
+                    onPress={() => openTimePicker('event-start', 'Start time', form.eventDateTime)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.timeValueButtonText}>{formatTimeLabel(form.eventDateTime)}</Text>
+                  </TouchableOpacity>
                 </View>
 
                 <View style={styles.eventTimeGroup}>
                   <Text style={styles.label}>Event end time</Text>
-                  <View style={styles.timeRow}>
-                    <View style={styles.pickerWrapper}>
-                      <Picker
-                        selectedValue={effectiveEventEndDateTime.getHours() % 12 || 12}
-                        onValueChange={(value) => {
-                          const hourValue = Number(value);
-                          const currentHours = effectiveEventEndDateTime.getHours();
-                          const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
-                          updateFieldTime('eventEndDateTime', adjustedHours, effectiveEventEndDateTime.getMinutes());
-                        }}
-                        style={styles.picker}
-                      >
-                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
-                          <Picker.Item key={`end-hour-${hour}`} label={hour.toString()} value={hour} />
-                        ))}
-                      </Picker>
-                    </View>
-                    <View style={styles.pickerWrapper}>
-                      <Picker
-                        selectedValue={effectiveEventEndDateTime.getMinutes()}
-                        onValueChange={(value) => updateFieldTime('eventEndDateTime', effectiveEventEndDateTime.getHours(), Number(value))}
-                        style={styles.picker}
-                      >
-                        {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
-                          <Picker.Item key={`end-minute-${minute}`} label={minute.toString().padStart(2, '0')} value={minute} />
-                        ))}
-                      </Picker>
-                    </View>
-                    <View style={styles.pickerWrapper}>
-                      <Picker
-                        selectedValue={effectiveEventEndDateTime.getHours() >= 12 ? 'PM' : 'AM'}
-                        onValueChange={(value) => {
-                          const currentHours = effectiveEventEndDateTime.getHours();
-                          const isPm = value === 'PM';
-                          const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
-                          updateFieldTime('eventEndDateTime', adjustedHours, effectiveEventEndDateTime.getMinutes());
-                        }}
-                        style={styles.picker}
-                      >
-                        <Picker.Item label="AM" value="AM" />
-                        <Picker.Item label="PM" value="PM" />
-                      </Picker>
-                    </View>
-                  </View>
+                  <TouchableOpacity
+                    style={styles.timeValueButton}
+                    onPress={() => openTimePicker('event-end', 'End time', effectiveEventEndDateTime)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.timeValueButtonText}>{formatTimeLabel(effectiveEventEndDateTime)}</Text>
+                  </TouchableOpacity>
                 </View>
               </View>
             ) : (
               <>
                 <Text style={styles.label}>Event start time</Text>
-                <View style={styles.timeRow}>
-                  <View style={styles.pickerWrapper}>
-                    <Picker
-                      selectedValue={form.eventDateTime.getHours() % 12 || 12}
-                      onValueChange={(value) => {
-                        const hourValue = Number(value);
-                        const currentHours = form.eventDateTime.getHours();
-                        const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
-                        updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
-                      }}
-                      style={styles.picker}
-                    >
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
-                        <Picker.Item key={hour} label={hour.toString()} value={hour} />
-                      ))}
-                    </Picker>
-                  </View>
-                  <View style={styles.pickerWrapper}>
-                    <Picker
-                      selectedValue={form.eventDateTime.getMinutes()}
-                      onValueChange={(value) => updateFieldTime('eventDateTime', form.eventDateTime.getHours(), Number(value))}
-                      style={styles.picker}
-                    >
-                      {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
-                        <Picker.Item key={minute} label={minute.toString().padStart(2, '0')} value={minute} />
-                      ))}
-                    </Picker>
-                  </View>
-                  <View style={styles.pickerWrapper}>
-                    <Picker
-                      selectedValue={form.eventDateTime.getHours() >= 12 ? 'PM' : 'AM'}
-                      onValueChange={(value) => {
-                        const currentHours = form.eventDateTime.getHours();
-                        const isPm = value === 'PM';
-                        const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
-                        updateFieldTime('eventDateTime', adjustedHours, form.eventDateTime.getMinutes());
-                      }}
-                      style={styles.picker}
-                    >
-                      <Picker.Item label="AM" value="AM" />
-                      <Picker.Item label="PM" value="PM" />
-                    </Picker>
-                  </View>
-                </View>
+                <TouchableOpacity
+                  style={styles.timeValueButton}
+                  onPress={() => openTimePicker('event-start', 'Start time', form.eventDateTime)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.timeValueButtonText}>{formatTimeLabel(form.eventDateTime)}</Text>
+                </TouchableOpacity>
               </>
             )}
           </>
@@ -5354,11 +5876,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
                   if (option.value !== 'static') {
                     setHasTouchedStaticReminderSchedule(false);
-                  }
-
-                  if (option.value !== 'default' && seededVariableDraftIds.length) {
-                    setPendingVariableReminders((current) => current.filter((item) => !seededVariableDraftIds.includes(item.id)));
-                    setSeededVariableDraftIds([]);
                   }
 
                   if (isFirstReminderModeSelection) {
@@ -5510,50 +6027,13 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
               <View style={styles.variableReminderClockCard}>
                 <Text style={styles.label}>Reminder time</Text>
-                <View style={styles.timeRow}>
-                  <View style={styles.pickerWrapper}>
-                    <Picker
-                      selectedValue={form.reminderDateTime.getHours() % 12 || 12}
-                      onValueChange={(value) => {
-                        const hourValue = Number(value);
-                        const currentHours = form.reminderDateTime.getHours();
-                        const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
-                        updateFieldTime('reminderDateTime', adjustedHours, form.reminderDateTime.getMinutes());
-                      }}
-                      style={styles.picker}
-                    >
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
-                        <Picker.Item key={hour} label={hour.toString()} value={hour} />
-                      ))}
-                    </Picker>
-                  </View>
-                  <View style={styles.pickerWrapper}>
-                    <Picker
-                      selectedValue={form.reminderDateTime.getMinutes()}
-                      onValueChange={(value) => updateFieldTime('reminderDateTime', form.reminderDateTime.getHours(), Number(value))}
-                      style={styles.picker}
-                    >
-                      {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
-                        <Picker.Item key={minute} label={minute.toString().padStart(2, '0')} value={minute} />
-                      ))}
-                    </Picker>
-                  </View>
-                  <View style={styles.pickerWrapper}>
-                    <Picker
-                      selectedValue={form.reminderDateTime.getHours() >= 12 ? 'PM' : 'AM'}
-                      onValueChange={(value) => {
-                        const currentHours = form.reminderDateTime.getHours();
-                        const isPm = value === 'PM';
-                        const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
-                        updateFieldTime('reminderDateTime', adjustedHours, form.reminderDateTime.getMinutes());
-                      }}
-                      style={styles.picker}
-                    >
-                      <Picker.Item label="AM" value="AM" />
-                      <Picker.Item label="PM" value="PM" />
-                    </Picker>
-                  </View>
-                </View>
+                <TouchableOpacity
+                  style={styles.timeValueButton}
+                  onPress={() => openTimePicker('static-reminder', 'Reminder time', form.reminderDateTime)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.timeValueButtonText}>{formatTimeLabel(form.reminderDateTime)}</Text>
+                </TouchableOpacity>
 
                 <TouchableOpacity style={styles.primaryButton} onPress={addPendingVariableReminder}>
                   <Text style={styles.primaryButtonText}>Add Reminder(s)</Text>
@@ -5613,58 +6093,13 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
               <View style={styles.variableReminderClockCard}>
                 <Text style={styles.label}>Reminder time</Text>
-                <View style={styles.timeRow}>
-                  <View style={styles.pickerWrapper}>
-                    <Picker
-                      selectedValue={pendingReminderDateTime.getHours() % 12 || 12}
-                      onValueChange={(value) => {
-                        const hourValue = Number(value);
-                        const currentHours = pendingReminderDateTime.getHours();
-                        const adjustedHours = (hourValue % 12) + (currentHours >= 12 ? 12 : 0);
-                        const nextDate = new Date(pendingReminderDateTime);
-                        nextDate.setHours(adjustedHours, pendingReminderDateTime.getMinutes(), 0, 0);
-                        setPendingReminderDateTime(nextDate);
-                      }}
-                      style={styles.picker}
-                    >
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((hour) => (
-                        <Picker.Item key={hour} label={hour.toString()} value={hour} />
-                      ))}
-                    </Picker>
-                  </View>
-                  <View style={styles.pickerWrapper}>
-                    <Picker
-                      selectedValue={pendingReminderDateTime.getMinutes()}
-                      onValueChange={(value) => {
-                        const nextDate = new Date(pendingReminderDateTime);
-                        nextDate.setHours(pendingReminderDateTime.getHours(), Number(value), 0, 0);
-                        setPendingReminderDateTime(nextDate);
-                      }}
-                      style={styles.picker}
-                    >
-                      {Array.from({ length: 60 }, (_, index) => index).map((minute) => (
-                        <Picker.Item key={minute} label={minute.toString().padStart(2, '0')} value={minute} />
-                      ))}
-                    </Picker>
-                  </View>
-                  <View style={styles.pickerWrapper}>
-                    <Picker
-                      selectedValue={pendingReminderDateTime.getHours() >= 12 ? 'PM' : 'AM'}
-                      onValueChange={(value) => {
-                        const currentHours = pendingReminderDateTime.getHours();
-                        const isPm = value === 'PM';
-                        const adjustedHours = isPm ? (currentHours % 12) + 12 : currentHours % 12;
-                        const nextDate = new Date(pendingReminderDateTime);
-                        nextDate.setHours(adjustedHours, pendingReminderDateTime.getMinutes(), 0, 0);
-                        setPendingReminderDateTime(nextDate);
-                      }}
-                      style={styles.picker}
-                    >
-                      <Picker.Item label="AM" value="AM" />
-                      <Picker.Item label="PM" value="PM" />
-                    </Picker>
-                  </View>
-                </View>
+                <TouchableOpacity
+                  style={styles.timeValueButton}
+                  onPress={() => openTimePicker('pending-reminder', 'Reminder time', pendingReminderDateTime)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.timeValueButtonText}>{formatTimeLabel(pendingReminderDateTime)}</Text>
+                </TouchableOpacity>
                 <TouchableOpacity style={styles.primaryButton} onPress={addPendingVariableReminder}>
                   <Text style={styles.primaryButtonText}>Add Reminder(s)</Text>
                 </TouchableOpacity>
@@ -5805,6 +6240,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   return (
     <>
       {currentView === 'landing' ? renderLandingView() : currentView === 'share' ? renderShareView() : renderCreateView()}
+      <TimePickerModal
+        visible={activeTimePicker !== null}
+        title={activeTimePicker?.title || 'Pick time'}
+        initialDate={timePickerDraftDate}
+        minuteInterval={activeClockIntervalMinutes}
+        saveLabel="Save"
+        onCancel={closeTimePicker}
+        onSave={handleSaveTimePicker}
+      />
       <Modal transparent visible={activeReminder !== null} animationType="fade" onRequestClose={() => {
         setActiveReminder(null);
         restoreInterruptedModalContext();
@@ -5953,6 +6397,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  shareRecipientAddButtonDisabled: {
+    backgroundColor: '#94a3b8',
+  },
   shareRecipientList: {
     gap: 8,
   },
@@ -5979,12 +6426,32 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     marginTop: 8,
   },
+  inlineSelectionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  inlineSelectionValueButton: {
+    paddingVertical: 4,
+  },
+  inlineSelectionValueText: {
+    color: '#2563eb',
+    fontSize: 14,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+  inlineSelectionConfirmButton: {
+    alignSelf: 'flex-start',
+    marginTop: 6,
+  },
   savedEventsHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
-    gap: 12,
+    gap: 8,
+    flexWrap: 'wrap',
   },
   savedSectionTitleRow: {
     flexDirection: 'row',
@@ -6200,15 +6667,28 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   eventTimeGroupsRow: {
-    flexDirection: 'row',
+    flexDirection: 'column',
     gap: 12,
-    flexWrap: 'nowrap',
-    alignItems: 'flex-start',
+    alignItems: 'stretch',
     marginBottom: 8,
   },
   eventTimeGroup: {
-    flex: 1,
-    minWidth: 0,
+    width: '100%',
+  },
+  timeValueButton: {
+    borderWidth: 1,
+    borderColor: '#d9e2f0',
+    borderRadius: 12,
+    backgroundColor: '#f8fafc',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+  },
+  timeValueButtonText: {
+    color: '#1d4ed8',
+    fontSize: 24,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   variableReminderLayout: {
     flexDirection: 'row',
@@ -6504,14 +6984,11 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
   },
   eventContentRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: 12,
+    flexDirection: 'column',
+    alignItems: 'stretch',
   },
   eventDetails: {
-    flex: 1,
-    minWidth: 0,
+    width: '100%',
   },
   eventTitle: {
     fontWeight: '700',
@@ -6524,8 +7001,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textDecorationLine: 'underline',
     flexShrink: 1,
-    flexWrap: 'nowrap',
-    whiteSpace: 'nowrap',
   },
   reminderCountLink: {
     color: '#2563eb',
@@ -6552,7 +7027,7 @@ const styles = StyleSheet.create({
   actionColumn: {
     alignItems: 'flex-end',
     gap: 6,
-    marginLeft: 8,
+    marginTop: 8,
   },
   actionButton: {
     backgroundColor: '#e2e8f0',

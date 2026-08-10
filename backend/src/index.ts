@@ -339,6 +339,187 @@ const sendReminderSms = async (phoneNumber: string, payload: {
   await smsProvider.sendText(phoneNumber, messageLines.join('\n'));
 };
 
+type ReminderEmailCandidate = {
+  event: {
+    id: string;
+    title: string;
+    people: string;
+    eventDateTime: Date;
+    eventAllDay: boolean;
+    reminderDateTime: Date;
+    reminderAllDay: boolean;
+    frequency: string;
+    reminderMode: string | null;
+    notes: string | null;
+    notified: boolean;
+    lastReminderTriggeredAt: Date | null;
+    reminders: Array<{
+      id: string;
+      reminderDateTime: Date;
+      notes: string | null;
+      notified: boolean;
+      lastTriggeredAt: Date | null;
+    }>;
+    user: {
+      email: string;
+    };
+  };
+  entry: null | {
+    id: string;
+    reminderDateTime: Date;
+    notes: string | null;
+    notified: boolean;
+    lastTriggeredAt: Date | null;
+  };
+  reminderDateTime: Date;
+  entryId: string;
+};
+
+const reminderEmailPollIntervalMs = Math.max(30_000, Number(process.env.REMINDER_EMAIL_POLL_INTERVAL_MS || 60_000));
+let reminderEmailPollInFlight = false;
+
+const getReminderModeValue = (event: { reminderMode: string | null; reminders?: Array<{ id: string; reminderDateTime: Date; notes: string | null; notified: boolean; lastTriggeredAt: Date | null; }> }) => (
+  event.reminderMode ?? (event.reminders?.length ? 'variable' : 'static')
+);
+
+const buildReminderEmailCandidates = (event: ReminderEmailCandidate['event']) => {
+  const reminderMode = getReminderModeValue(event);
+  const variableCandidates: ReminderEmailCandidate[] = (event.reminders || []).map((entry) => ({
+    event,
+    entry,
+    reminderDateTime: entry.reminderDateTime,
+    entryId: entry.id,
+  }));
+
+  const staticCandidate: ReminderEmailCandidate = {
+    event,
+    entry: null,
+    reminderDateTime: event.reminderDateTime,
+    entryId: event.id,
+  };
+
+  if (reminderMode === 'variable') {
+    return variableCandidates;
+  }
+
+  if (reminderMode === 'default') {
+    return variableCandidates.length ? variableCandidates : [staticCandidate];
+  }
+
+  const candidatesByTime = new Map<number, ReminderEmailCandidate>();
+  [staticCandidate, ...variableCandidates].forEach((candidate) => {
+    const reminderTime = new Date(candidate.reminderDateTime).getTime();
+    const existing = candidatesByTime.get(reminderTime);
+    if (!existing || candidate.entry) {
+      candidatesByTime.set(reminderTime, candidate);
+    }
+  });
+
+  return [...candidatesByTime.values()].sort((left, right) => left.reminderDateTime.getTime() - right.reminderDateTime.getTime());
+};
+
+const dispatchDueReminderEmails = async () => {
+  if (!smtpTransport || reminderEmailPollInFlight) {
+    return;
+  }
+
+  reminderEmailPollInFlight = true;
+
+  try {
+    const now = new Date();
+    const events = await prisma.event.findMany({
+      include: {
+        user: {
+          select: { email: true },
+        },
+        reminders: {
+          select: {
+            id: true,
+            reminderDateTime: true,
+            notes: true,
+            notified: true,
+            lastTriggeredAt: true,
+          },
+        },
+      },
+    });
+
+    const dueCandidates = events.flatMap((event) => buildReminderEmailCandidates({
+      id: event.id,
+      title: event.title,
+      people: event.people,
+      eventDateTime: event.eventDateTime,
+      eventAllDay: event.eventAllDay,
+      reminderDateTime: event.reminderDateTime,
+      reminderAllDay: event.reminderAllDay,
+      frequency: event.frequency,
+      reminderMode: event.reminderMode,
+      notes: event.notes,
+      notified: Boolean(event.notified),
+      lastReminderTriggeredAt: event.lastReminderTriggeredAt,
+      reminders: event.reminders,
+      user: {
+        email: event.user?.email || '',
+      },
+    })).filter((candidate) => {
+      const isDue = candidate.reminderDateTime.getTime() <= now.getTime();
+      const isAlreadyNotified = candidate.entry ? Boolean(candidate.entry.notified) : Boolean(candidate.event.notified);
+      return isDue && !isAlreadyNotified && Boolean(candidate.event.user.email);
+    });
+
+    for (const candidate of dueCandidates) {
+      await sendReminderEmail(candidate.event.user.email, {
+        eventTitle: candidate.event.title,
+        people: candidate.event.people,
+        eventDateTime: candidate.event.eventDateTime.toISOString(),
+        eventAllDay: candidate.event.eventAllDay,
+        reminderDateTime: candidate.reminderDateTime.toISOString(),
+        notes: candidate.entry?.notes || candidate.event.notes || undefined,
+      });
+
+      if (candidate.entry) {
+        await prisma.eventReminder.update({
+          where: { id: candidate.entry.id },
+          data: {
+            notified: true,
+            lastTriggeredAt: new Date(),
+          },
+        });
+        continue;
+      }
+
+      const isAnnual = String(candidate.event.title || '').trim().toLowerCase().includes('birthday')
+        || String(candidate.event.title || '').trim().toLowerCase().includes('anniversary')
+        || String(candidate.event.frequency || '').trim().toLowerCase() === 'yearly';
+
+      if (isAnnual) {
+        await prisma.event.update({
+          where: { id: candidate.event.id },
+          data: {
+            eventDateTime: moveAnnualEventDateToNextOccurrence(candidate.event.title, candidate.event.eventDateTime, candidate.event.eventAllDay),
+            reminderDateTime: moveAnnualEventDateToNextOccurrence(candidate.event.title, candidate.event.reminderDateTime, candidate.event.reminderAllDay),
+            notified: false,
+            lastReminderTriggeredAt: null,
+          },
+        });
+        continue;
+      }
+
+      await prisma.event.update({
+        where: { id: candidate.event.id },
+        data: {
+          notified: true,
+          lastReminderTriggeredAt: new Date(),
+        },
+      });
+    }
+  } catch (error) {
+    console.error('background reminder email dispatch failed', error);
+  } finally {
+    reminderEmailPollInFlight = false;
+  }
+};
+
 const formatGoogleAllDayDate = (value: string | Date) => {
   const date = new Date(value);
   const year = date.getUTCFullYear();
@@ -2687,4 +2868,9 @@ app.listen(port, () => {
   if (!googlePlacesApiKey) {
     console.warn('Google Places is not configured at startup. Set GOOGLE_PLACES_API_KEY (or GOOGLE_MAPS_API_KEY).');
   }
+
+  void dispatchDueReminderEmails();
+  setInterval(() => {
+    void dispatchDueReminderEmails();
+  }, reminderEmailPollIntervalMs);
 });

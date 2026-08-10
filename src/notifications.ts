@@ -1,5 +1,14 @@
 import * as Notifications from 'expo-notifications';
 
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
+
 type AudioContextConstructor = new () => {
   state: string;
   currentTime: number;
@@ -15,7 +24,13 @@ export type ReminderPingVolume = 'normal' | 'loud';
 
 export async function requestNotificationPermission() {
   try {
-    const { status } = await Notifications.requestPermissionsAsync();
+    const { status } = await Notifications.requestPermissionsAsync({
+      ios: {
+        allowAlert: true,
+        allowBadge: true,
+        allowSound: true,
+      },
+    });
     return status === 'granted';
   } catch (error) {
     console.warn('Notification permission request failed', error);
@@ -29,26 +44,49 @@ export async function scheduleReminder(title: string, body: string, date: Date) 
       return false;
     }
 
-    await Promise.race([
-      Notifications.scheduleNotificationAsync({
-        content: {
-          title,
-          body,
-          sound: true,
+    const permission = await Notifications.getPermissionsAsync();
+    if (permission.status !== 'granted') {
+      const requested = await Notifications.requestPermissionsAsync({
+        ios: {
+          allowAlert: true,
+          allowBadge: true,
+          allowSound: true,
         },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.DATE,
-          date,
-        },
-      }),
-      new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Notification scheduling timed out')), 1500);
-      }),
-    ]);
+      });
+      if (requested.status !== 'granted') {
+        return false;
+      }
+    }
+
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title,
+        body,
+        sound: true,
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date,
+      },
+    });
 
     return true;
   } catch (error) {
     console.warn('Reminder scheduling failed', error);
+    return false;
+  }
+}
+
+export async function clearScheduledReminders() {
+  try {
+    if (typeof Notifications.cancelAllScheduledNotificationsAsync !== 'function') {
+      return false;
+    }
+
+    await Notifications.cancelAllScheduledNotificationsAsync();
+    return true;
+  } catch (error) {
+    console.warn('Clearing scheduled reminders failed', error);
     return false;
   }
 }
