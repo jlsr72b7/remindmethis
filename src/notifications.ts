@@ -1,4 +1,5 @@
 import * as Notifications from 'expo-notifications';
+import { Platform } from 'react-native';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -23,6 +24,10 @@ export type ReminderPingPattern = 'single' | 'double';
 export type ReminderPingVolume = 'normal' | 'loud';
 
 export async function requestNotificationPermission() {
+  if (Platform.OS === 'web') {
+    return false;
+  }
+
   try {
     const { status } = await Notifications.requestPermissionsAsync({
       ios: {
@@ -39,6 +44,10 @@ export async function requestNotificationPermission() {
 }
 
 export async function scheduleReminder(title: string, body: string, date: Date) {
+  if (Platform.OS === 'web') {
+    return false;
+  }
+
   try {
     if (typeof Notifications.scheduleNotificationAsync !== 'function') {
       return false;

@@ -180,6 +180,7 @@ export interface GoogleResolvedAddress {
   placeId: string;
   formattedAddress: string;
   line1: string;
+  line2?: string;
   city: string;
   state: string;
   zip: string;
@@ -526,6 +527,7 @@ function mapApiEventToLocal(event: any): SpecialDateEvent {
         placeId: string;
         formattedAddress: string;
         line1: string;
+        line2: string;
         city: string;
         state: string;
         zip: string;
@@ -535,6 +537,7 @@ function mapApiEventToLocal(event: any): SpecialDateEvent {
         placeId: parsed.placeId ? String(parsed.placeId) : undefined,
         formattedAddress: parsed.formattedAddress ? String(parsed.formattedAddress) : undefined,
         line1: parsed.line1 ? String(parsed.line1) : '',
+        line2: parsed.line2 ? String(parsed.line2) : undefined,
         city: parsed.city ? String(parsed.city) : '',
         state: parsed.state ? String(parsed.state) : '',
         zip: parsed.zip ? String(parsed.zip) : '',
@@ -559,6 +562,7 @@ function mapApiEventToLocal(event: any): SpecialDateEvent {
         placeId: event.eventLocation.placeId ? String(event.eventLocation.placeId) : undefined,
         formattedAddress: event.eventLocation.formattedAddress ? String(event.eventLocation.formattedAddress) : undefined,
         line1: event.eventLocation.line1 ? String(event.eventLocation.line1) : '',
+        line2: event.eventLocation.line2 ? String(event.eventLocation.line2) : undefined,
         city: event.eventLocation.city ? String(event.eventLocation.city) : '',
         state: event.eventLocation.state ? String(event.eventLocation.state) : '',
         zip: event.eventLocation.zip ? String(event.eventLocation.zip) : '',
@@ -704,6 +708,21 @@ export async function saveReminderSoundSettings(settings: ReminderSoundSettings,
 }
 
 export async function loadReminderDeliverySettings(userId?: string): Promise<ReminderDeliverySettings> {
+  if (USE_API_STORAGE && userId) {
+    try {
+      const response = await apiRequest<{ settings?: Partial<ReminderDeliverySettings> }>(`/users/${encodeURIComponent(userId)}/reminder-delivery-settings`);
+      const nextSettings: ReminderDeliverySettings = {
+        device: Boolean(response.settings?.device ?? defaultReminderDeliverySettings.device),
+        email: Boolean(response.settings?.email ?? defaultReminderDeliverySettings.email),
+        text: Boolean(response.settings?.text ?? defaultReminderDeliverySettings.text),
+      };
+      await AsyncStorage.setItem(getReminderDeliverySettingsKey(userId), JSON.stringify(nextSettings));
+      return nextSettings;
+    } catch (error) {
+      console.warn('Failed to load reminder delivery settings from API; using local defaults fallback.', error);
+    }
+  }
+
   try {
     const raw = await AsyncStorage.getItem(getReminderDeliverySettingsKey(userId));
     return parseReminderDeliverySettings(raw);
@@ -717,13 +736,26 @@ export async function saveReminderDeliverySettings(settings: ReminderDeliverySet
   const nextSettings: ReminderDeliverySettings = {
     device: Boolean(settings.device),
     email: Boolean(settings.email),
-    text: false,
+    text: Boolean(settings.text),
   };
 
   try {
     await AsyncStorage.setItem(getReminderDeliverySettingsKey(userId), JSON.stringify(nextSettings));
   } catch (error) {
     console.warn('Failed to save reminder delivery settings.', error);
+  }
+
+  if (USE_API_STORAGE && userId) {
+    try {
+      await apiRequest<{ success: boolean }>(`/users/${encodeURIComponent(userId)}/reminder-delivery-settings`, {
+        method: 'PUT',
+        body: JSON.stringify(nextSettings),
+      });
+      setApiStorageStatusMessage(null);
+    } catch (error) {
+      console.warn('Failed to save reminder delivery settings to API.', error);
+      setApiStorageStatusMessage('Cloud sync unavailable. Reminder delivery settings are saved locally until backend returns.');
+    }
   }
 }
 

@@ -339,112 +339,143 @@ const sendReminderSms = async (phoneNumber: string, payload: {
   await smsProvider.sendText(phoneNumber, messageLines.join('\n'));
 };
 
-type ReminderEmailCandidate = {
-  event: {
-    id: string;
-    title: string;
-    people: string;
-    eventDateTime: Date;
-    eventAllDay: boolean;
-    reminderDateTime: Date;
-    reminderAllDay: boolean;
-    frequency: string;
-    reminderMode: string | null;
-    notes: string | null;
-    notified: boolean | null;
-    lastReminderTriggeredAt: Date | null;
-    reminders: Array<{
-      id: string;
-      reminderDateTime: Date;
-      notes: string | null;
-      notified: boolean | null;
-      lastTriggeredAt: Date | null;
-    }>;
-    user: {
-      email: string;
-    };
-  };
-  entry: null | {
-    id: string;
-    reminderDateTime: Date;
-    notes: string | null;
-    notified: boolean | null;
-    lastTriggeredAt: Date | null;
-  };
+type QueueChannel = 'email' | 'sms';
+
+type ReminderQueueSyncEvent = {
+  id: string;
+  title: string;
+  people: string;
+  eventDateTime: Date;
+  eventAllDay: boolean;
   reminderDateTime: Date;
-  entryId: string;
+  reminderAllDay: boolean;
+  frequency: string;
+  reminderMode: string | null;
+  notified: boolean | null;
+  reminders: Array<{
+    id: string;
+    reminderDateTime: Date;
+    notified: boolean | null;
+  }>;
 };
 
-const reminderEmailPollIntervalMs = Math.max(30_000, Number(process.env.REMINDER_EMAIL_POLL_INTERVAL_MS || 60_000));
-let reminderEmailPollInFlight = false;
+const reminderQueuePollIntervalMs = Math.max(15_000, Number(process.env.REMINDER_QUEUE_POLL_INTERVAL_MS || 30_000));
+const reminderQueueRetryDelayMs = Math.max(60_000, Number(process.env.REMINDER_QUEUE_RETRY_DELAY_MS || 5 * 60_000));
+const reminderQueueMaxAttempts = Math.max(1, Number(process.env.REMINDER_QUEUE_MAX_ATTEMPTS || 5));
+let reminderQueuePollInFlight = false;
 
-const getReminderModeValue = (event: { reminderMode: string | null; reminders?: Array<{ id: string; reminderDateTime: Date; notes: string | null; notified: boolean | null; lastTriggeredAt: Date | null; }> }) => (
+const defaultDeliverySettings = {
+  deviceEnabled: true,
+  emailEnabled: false,
+  textEnabled: false,
+};
+
+const normalizeDeliverySettings = (value: Partial<{ deviceEnabled: boolean; emailEnabled: boolean; textEnabled: boolean }>) => ({
+  deviceEnabled: value.deviceEnabled ?? defaultDeliverySettings.deviceEnabled,
+  emailEnabled: value.emailEnabled ?? defaultDeliverySettings.emailEnabled,
+  textEnabled: value.textEnabled ?? defaultDeliverySettings.textEnabled,
+});
+
+const getReminderModeValue = (event: ReminderQueueSyncEvent) => (
   event.reminderMode ?? (event.reminders?.length ? 'variable' : 'static')
 );
 
-const buildReminderEmailCandidates = (event: ReminderEmailCandidate['event']) => {
+const buildReminderCandidatesForQueueSync = (event: ReminderQueueSyncEvent, now: Date) => {
   const reminderMode = getReminderModeValue(event);
-  const variableCandidates: ReminderEmailCandidate[] = (event.reminders || []).map((entry) => ({
-    event,
-    entry,
-    reminderDateTime: entry.reminderDateTime,
-    entryId: entry.id,
-  }));
-
-  const staticCandidate: ReminderEmailCandidate = {
-    event,
-    entry: null,
-    reminderDateTime: event.reminderDateTime,
-    entryId: event.id,
+  const variableCandidates = (event.reminders || [])
+    .map((entry) => ({ eventReminderId: entry.id, reminderDateTime: new Date(entry.reminderDateTime), notified: Boolean(entry.notified) }))
+    .filter((entry) => Number.isFinite(entry.reminderDateTime.getTime()));
+  const staticReminderDate = new Date(event.reminderDateTime);
+  const staticCandidate = {
+    eventReminderId: null as string | null,
+    reminderDateTime: staticReminderDate,
+    notified: Boolean(event.notified),
   };
 
+  let candidates: Array<{ eventReminderId: string | null; reminderDateTime: Date; notified: boolean }>;
+
   if (reminderMode === 'variable') {
-    return variableCandidates;
+    candidates = variableCandidates;
+  } else if (reminderMode === 'default') {
+    candidates = variableCandidates.length ? variableCandidates : [staticCandidate];
+  } else {
+    const byTime = new Map<number, { eventReminderId: string | null; reminderDateTime: Date; notified: boolean }>();
+    [staticCandidate, ...variableCandidates].forEach((candidate) => {
+      const at = candidate.reminderDateTime.getTime();
+      if (!byTime.has(at) || candidate.eventReminderId) {
+        byTime.set(at, candidate);
+      }
+    });
+    candidates = [...byTime.values()];
   }
 
-  if (reminderMode === 'default') {
-    return variableCandidates.length ? variableCandidates : [staticCandidate];
-  }
+  return candidates
+    .map((candidate) => {
+      const normalizedTitle = String(event.title || '').trim().toLowerCase();
+      const isAnnual = normalizedTitle.includes('birthday')
+        || normalizedTitle.includes('anniversary')
+        || String(event.frequency || '').trim().toLowerCase() === 'yearly';
 
-  const candidatesByTime = new Map<number, ReminderEmailCandidate>();
-  [staticCandidate, ...variableCandidates].forEach((candidate) => {
-    const reminderTime = new Date(candidate.reminderDateTime).getTime();
-    const existing = candidatesByTime.get(reminderTime);
-    if (!existing || candidate.entry) {
-      candidatesByTime.set(reminderTime, candidate);
-    }
-  });
+      const adjustedReminderDate = isAnnual
+        ? moveAnnualEventDateToNextOccurrence(event.title, candidate.reminderDateTime, event.reminderAllDay)
+        : candidate.reminderDateTime;
 
-  return [...candidatesByTime.values()].sort((left, right) => left.reminderDateTime.getTime() - right.reminderDateTime.getTime());
+      return {
+        ...candidate,
+        reminderDateTime: adjustedReminderDate,
+      };
+    })
+    .filter((candidate) => !candidate.notified)
+    .filter((candidate) => candidate.reminderDateTime.getTime() >= now.getTime())
+    .sort((left, right) => left.reminderDateTime.getTime() - right.reminderDateTime.getTime());
 };
 
-const dispatchDueReminderEmails = async () => {
-  if (!smtpTransport || reminderEmailPollInFlight) {
-    return;
+const createReminderQueueDedupeKey = (params: {
+  userId: string;
+  eventId: string;
+  eventReminderId: string | null;
+  channel: QueueChannel;
+  scheduledFor: Date;
+}) => (
+  `${params.userId}:${params.eventId}:${params.eventReminderId || 'event'}:${params.channel}:${params.scheduledFor.toISOString()}`
+);
+
+const syncReminderQueueForUser = async (userId: string) => {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) {
+    return { created: 0, deleted: 0 };
   }
 
-  reminderEmailPollInFlight = true;
-
-  try {
-    const now = new Date();
-    const events = await prisma.event.findMany({
+  const [settingsRecord, events] = await Promise.all([
+    prisma.reminderDeliverySetting.findUnique({ where: { userId: normalizedUserId } }),
+    prisma.event.findMany({
+      where: { userId: normalizedUserId },
       include: {
-        user: {
-          select: { email: true },
-        },
         reminders: {
           select: {
             id: true,
             reminderDateTime: true,
-            notes: true,
             notified: true,
-            lastTriggeredAt: true,
           },
         },
       },
-    });
+    }),
+  ]);
 
-    const dueCandidates = events.flatMap((event) => buildReminderEmailCandidates({
+  const settings = normalizeDeliverySettings({
+    deviceEnabled: settingsRecord?.deviceEnabled,
+    emailEnabled: settingsRecord?.emailEnabled,
+    textEnabled: settingsRecord?.textEnabled,
+  });
+
+  const channels: QueueChannel[] = [
+    ...(settings.emailEnabled ? ['email' as QueueChannel] : []),
+    ...(settings.textEnabled ? ['sms' as QueueChannel] : []),
+  ];
+
+  const now = new Date();
+  const desiredJobs = events.flatMap((event) => {
+    const candidates = buildReminderCandidatesForQueueSync({
       id: event.id,
       title: event.title,
       people: event.people,
@@ -454,69 +485,257 @@ const dispatchDueReminderEmails = async () => {
       reminderAllDay: event.reminderAllDay,
       frequency: event.frequency,
       reminderMode: event.reminderMode,
-      notes: event.notes,
-      notified: Boolean(event.notified),
-      lastReminderTriggeredAt: event.lastReminderTriggeredAt,
+      notified: event.notified,
       reminders: event.reminders,
-      user: {
-        email: event.user?.email || '',
+    }, now);
+
+    return candidates.flatMap((candidate) => channels.map((channel) => ({
+      dedupeKey: createReminderQueueDedupeKey({
+        userId: normalizedUserId,
+        eventId: event.id,
+        eventReminderId: candidate.eventReminderId,
+        channel,
+        scheduledFor: candidate.reminderDateTime,
+      }),
+      userId: normalizedUserId,
+      eventId: event.id,
+      eventReminderId: candidate.eventReminderId,
+      channel,
+      scheduledFor: candidate.reminderDateTime,
+      status: 'pending',
+      attemptCount: 0,
+    })));
+  });
+
+  const desiredDedupeKeys = new Set(desiredJobs.map((job) => job.dedupeKey));
+
+  const result = await prisma.$transaction(async (tx) => {
+    const pendingJobs = await tx.reminderQueueJob.findMany({
+      where: {
+        userId: normalizedUserId,
+        status: {
+          in: ['pending', 'retrying'],
+        },
       },
-    })).filter((candidate) => {
-      const isDue = candidate.reminderDateTime.getTime() <= now.getTime();
-      const isAlreadyNotified = candidate.entry ? Boolean(candidate.entry.notified) : Boolean(candidate.event.notified);
-      return isDue && !isAlreadyNotified && Boolean(candidate.event.user.email);
+      select: {
+        id: true,
+        dedupeKey: true,
+      },
     });
 
-    for (const candidate of dueCandidates) {
-      await sendReminderEmail(candidate.event.user.email, {
-        eventTitle: candidate.event.title,
-        people: candidate.event.people,
-        eventDateTime: candidate.event.eventDateTime.toISOString(),
-        eventAllDay: candidate.event.eventAllDay,
-        reminderDateTime: candidate.reminderDateTime.toISOString(),
-        notes: candidate.entry?.notes || candidate.event.notes || undefined,
-      });
+    const removableIds = pendingJobs
+      .filter((job) => !desiredDedupeKeys.has(job.dedupeKey))
+      .map((job) => job.id);
 
-      if (candidate.entry) {
-        await prisma.eventReminder.update({
-          where: { id: candidate.entry.id },
-          data: {
-            notified: true,
-            lastTriggeredAt: new Date(),
+    let deleted = 0;
+    if (removableIds.length) {
+      const deletedResult = await tx.reminderQueueJob.deleteMany({
+        where: {
+          id: {
+            in: removableIds,
           },
-        });
-        continue;
-      }
-
-      const isAnnual = String(candidate.event.title || '').trim().toLowerCase().includes('birthday')
-        || String(candidate.event.title || '').trim().toLowerCase().includes('anniversary')
-        || String(candidate.event.frequency || '').trim().toLowerCase() === 'yearly';
-
-      if (isAnnual) {
-        await prisma.event.update({
-          where: { id: candidate.event.id },
-          data: {
-            eventDateTime: moveAnnualEventDateToNextOccurrence(candidate.event.title, candidate.event.eventDateTime, candidate.event.eventAllDay),
-            reminderDateTime: moveAnnualEventDateToNextOccurrence(candidate.event.title, candidate.event.reminderDateTime, candidate.event.reminderAllDay),
-            notified: false,
-            lastReminderTriggeredAt: null,
-          },
-        });
-        continue;
-      }
-
-      await prisma.event.update({
-        where: { id: candidate.event.id },
-        data: {
-          notified: true,
-          lastReminderTriggeredAt: new Date(),
         },
       });
+      deleted = deletedResult.count;
+    }
+
+    const existingKeys = new Set(pendingJobs.map((job) => job.dedupeKey));
+    const jobsToCreate = desiredJobs.filter((job) => !existingKeys.has(job.dedupeKey));
+
+    let created = 0;
+    if (jobsToCreate.length) {
+      const createResult = await tx.reminderQueueJob.createMany({
+        data: jobsToCreate,
+        skipDuplicates: true,
+      });
+      created = createResult.count;
+    }
+
+    return { created, deleted };
+  });
+
+  return result;
+};
+
+const processReminderQueue = async () => {
+  if (reminderQueuePollInFlight) {
+    return;
+  }
+
+  reminderQueuePollInFlight = true;
+
+  try {
+    const now = new Date();
+    const dueJobs = await prisma.reminderQueueJob.findMany({
+      where: {
+        status: {
+          in: ['pending', 'retrying'],
+        },
+        scheduledFor: {
+          lte: now,
+        },
+      },
+      orderBy: {
+        scheduledFor: 'asc',
+      },
+      take: 100,
+    });
+
+    const annualUsersToResync = new Set<string>();
+
+    for (const dueJob of dueJobs) {
+      const claimed = await prisma.reminderQueueJob.updateMany({
+        where: {
+          id: dueJob.id,
+          status: {
+            in: ['pending', 'retrying'],
+          },
+        },
+        data: {
+          status: 'processing',
+          attemptCount: {
+            increment: 1,
+          },
+          lastAttemptAt: new Date(),
+        },
+      });
+
+      if (!claimed.count) {
+        continue;
+      }
+
+      const job = await prisma.reminderQueueJob.findUnique({
+        where: { id: dueJob.id },
+        include: {
+          user: true,
+          event: true,
+          eventReminder: true,
+        },
+      });
+
+      if (!job || !job.user || !job.event) {
+        await prisma.reminderQueueJob.update({
+          where: { id: dueJob.id },
+          data: {
+            status: 'failed',
+            lastError: 'Queue job is missing related user or event data.',
+          },
+        });
+        continue;
+      }
+
+      try {
+        if (job.channel === 'email') {
+          if (!job.user.email) {
+            throw new Error('User email is missing for reminder email dispatch.');
+          }
+
+          if (!smtpTransport) {
+            throw new Error('SMTP is not configured on the server.');
+          }
+
+          await sendReminderEmail(job.user.email, {
+            eventTitle: job.event.title,
+            people: job.event.people,
+            eventDateTime: job.event.eventDateTime.toISOString(),
+            eventAllDay: Boolean(job.event.eventAllDay),
+            reminderDateTime: job.scheduledFor.toISOString(),
+            notes: job.eventReminder?.notes || job.event.notes || undefined,
+          });
+        } else if (job.channel === 'sms') {
+          if (!job.user.mobileNumber) {
+            throw new Error('User mobile number is missing for reminder SMS dispatch.');
+          }
+
+          await sendReminderSms(job.user.mobileNumber, {
+            eventTitle: job.event.title,
+            people: job.event.people,
+            eventDateTime: job.event.eventDateTime.toISOString(),
+            eventAllDay: Boolean(job.event.eventAllDay),
+            notes: job.eventReminder?.notes || job.event.notes || undefined,
+          });
+        } else {
+          throw new Error(`Unsupported reminder channel: ${job.channel}`);
+        }
+
+        await prisma.$transaction(async (tx) => {
+          await tx.reminderQueueJob.update({
+            where: { id: job.id },
+            data: {
+              status: 'sent',
+              sentAt: new Date(),
+              lastError: null,
+            },
+          });
+
+          if (job.eventReminderId) {
+            await tx.eventReminder.update({
+              where: { id: job.eventReminderId },
+              data: {
+                notified: true,
+                lastTriggeredAt: new Date(),
+              },
+            });
+          } else {
+            const normalizedTitle = String(job.event.title || '').trim().toLowerCase();
+            const isAnnual = normalizedTitle.includes('birthday')
+              || normalizedTitle.includes('anniversary')
+              || String(job.event.frequency || '').trim().toLowerCase() === 'yearly';
+
+            if (isAnnual) {
+              await tx.event.update({
+                where: { id: job.event.id },
+                data: {
+                  eventDateTime: moveAnnualEventDateToNextOccurrence(job.event.title, job.event.eventDateTime, Boolean(job.event.eventAllDay)),
+                  reminderDateTime: moveAnnualEventDateToNextOccurrence(job.event.title, job.event.reminderDateTime, Boolean(job.event.reminderAllDay)),
+                  notified: false,
+                  lastReminderTriggeredAt: null,
+                },
+              });
+              annualUsersToResync.add(job.userId);
+            } else {
+              await tx.event.update({
+                where: { id: job.event.id },
+                data: {
+                  notified: true,
+                  lastReminderTriggeredAt: new Date(),
+                },
+              });
+            }
+          }
+        });
+      } catch (error) {
+        const nextAttemptCount = Number(job.attemptCount || 0);
+        const failureMessage = error instanceof Error ? error.message : String(error);
+        const shouldFail = nextAttemptCount >= reminderQueueMaxAttempts;
+
+        await prisma.reminderQueueJob.update({
+          where: { id: job.id },
+          data: shouldFail
+            ? {
+                status: 'failed',
+                lastError: failureMessage,
+              }
+            : {
+                status: 'retrying',
+                scheduledFor: new Date(Date.now() + reminderQueueRetryDelayMs),
+                lastError: failureMessage,
+              },
+        });
+      }
+    }
+
+    for (const userId of annualUsersToResync) {
+      try {
+        await syncReminderQueueForUser(userId);
+      } catch (error) {
+        console.error('annual reminder queue resync failed', { userId, error });
+      }
     }
   } catch (error) {
-    console.error('background reminder email dispatch failed', error);
+    console.error('background reminder queue processing failed', error);
   } finally {
-    reminderEmailPollInFlight = false;
+    reminderQueuePollInFlight = false;
   }
 };
 
@@ -874,6 +1093,86 @@ app.post('/admin/test-reminder-sms', async (req, res) => {
     });
   } catch (error) {
     console.error('admin test reminder sms failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.get('/users/:userId/reminder-delivery-settings', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const settings = await prisma.reminderDeliverySetting.findUnique({
+      where: { userId },
+    });
+
+    const normalized = normalizeDeliverySettings({
+      deviceEnabled: settings?.deviceEnabled,
+      emailEnabled: settings?.emailEnabled,
+      textEnabled: settings?.textEnabled,
+    });
+
+    return res.json({
+      settings: {
+        device: normalized.deviceEnabled,
+        email: normalized.emailEnabled,
+        text: normalized.textEnabled,
+      },
+    });
+  } catch (error) {
+    console.error('load reminder delivery settings failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.put('/users/:userId/reminder-delivery-settings', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { device, email, text } = req.body ?? {};
+
+    const normalized = normalizeDeliverySettings({
+      deviceEnabled: typeof device === 'boolean' ? device : undefined,
+      emailEnabled: typeof email === 'boolean' ? email : undefined,
+      textEnabled: typeof text === 'boolean' ? text : undefined,
+    });
+
+    await prisma.reminderDeliverySetting.upsert({
+      where: { userId },
+      create: {
+        userId,
+        deviceEnabled: normalized.deviceEnabled,
+        emailEnabled: normalized.emailEnabled,
+        textEnabled: normalized.textEnabled,
+      },
+      update: {
+        deviceEnabled: normalized.deviceEnabled,
+        emailEnabled: normalized.emailEnabled,
+        textEnabled: normalized.textEnabled,
+      },
+    });
+
+    const syncResult = await syncReminderQueueForUser(userId);
+
+    return res.json({
+      success: true,
+      settings: {
+        device: normalized.deviceEnabled,
+        email: normalized.emailEnabled,
+        text: normalized.textEnabled,
+      },
+      queue: syncResult,
+    });
+  } catch (error) {
+    console.error('save reminder delivery settings failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/users/:userId/reminder-queue/sync', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const syncResult = await syncReminderQueueForUser(userId);
+    return res.json({ success: true, queue: syncResult });
+  } catch (error) {
+    console.error('reminder queue sync failed', error);
     return res.status(500).json({ error: 'internal server error' });
   }
 });
@@ -2853,7 +3152,14 @@ app.put('/users/:userId/events', async (req, res) => {
       }
     });
 
-    return res.json({ success: true });
+    let queue = { created: 0, deleted: 0 };
+    try {
+      queue = await syncReminderQueueForUser(userId);
+    } catch (queueError) {
+      console.error('queue sync after save events failed', queueError);
+    }
+
+    return res.json({ success: true, queue });
   } catch (error) {
     console.error('save events failed', error);
     return res.status(500).json({ error: 'internal server error' });
@@ -2869,8 +3175,8 @@ app.listen(port, () => {
     console.warn('Google Places is not configured at startup. Set GOOGLE_PLACES_API_KEY (or GOOGLE_MAPS_API_KEY).');
   }
 
-  void dispatchDueReminderEmails();
+  void processReminderQueue();
   setInterval(() => {
-    void dispatchDueReminderEmails();
-  }, reminderEmailPollIntervalMs);
+    void processReminderQueue();
+  }, reminderQueuePollIntervalMs);
 });

@@ -23,6 +23,8 @@ model User {
   updatedAt    DateTime @updatedAt
 
   events       Event[]
+  reminderDeliverySetting ReminderDeliverySetting?
+  reminderQueueJobs       ReminderQueueJob[]
   calendarCredentials CalendarSyncCredential[]
   sentShareInvites     ShareInvite[] @relation("ShareInviteSender")
   receivedShareInvites ShareInvite[] @relation("ShareInviteRecipient")
@@ -65,6 +67,7 @@ model Event {
 
   user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   reminders EventReminder[]
+  reminderQueueJobs ReminderQueueJob[]
   shareInvites ShareInvite[]
 
   @@index([userId])
@@ -81,9 +84,48 @@ model EventReminder {
   updatedAt      DateTime @updatedAt
 
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  reminderQueueJobs ReminderQueueJob[]
 
   @@index([eventId])
   @@index([reminderDateTime])
+}
+
+model ReminderDeliverySetting {
+  userId       String   @id
+  deviceEnabled Boolean @default(true)
+  emailEnabled  Boolean @default(false)
+  textEnabled   Boolean @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ReminderQueueJob {
+  id              String   @id @default(cuid())
+  dedupeKey       String   @unique
+  userId          String
+  eventId         String
+  eventReminderId String?
+  channel         String
+  scheduledFor    DateTime
+  status          String   @default("pending")
+  attemptCount    Int      @default(0)
+  lastAttemptAt   DateTime?
+  sentAt          DateTime?
+  lastError       String?
+  payload         Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user  User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventReminder EventReminder? @relation(fields: [eventReminderId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status, scheduledFor])
+  @@index([eventId])
+  @@index([eventReminderId])
+  @@index([channel])
 }
 
 model ShareInvite {

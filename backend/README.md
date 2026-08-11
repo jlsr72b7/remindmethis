@@ -137,6 +137,26 @@ If the key is missing, the backend returns HTTP 500 with:
 - `GET /admin/event-reminder-counts`
 - `GET /users/:userId/events`
 - `PUT /users/:userId/events`
+- `GET /users/:userId/reminder-delivery-settings`
+- `PUT /users/:userId/reminder-delivery-settings`
+- `POST /users/:userId/reminder-queue/sync`
+
+## Server-side reminder queue worker
+
+Reminder email/SMS dispatch now runs from a durable server-side queue so delivery does not depend on the mobile app being open.
+
+Queue worker environment knobs:
+
+- `REMINDER_QUEUE_POLL_INTERVAL_MS` (default `30000`)
+- `REMINDER_QUEUE_RETRY_DELAY_MS` (default `300000`)
+- `REMINDER_QUEUE_MAX_ATTEMPTS` (default `5`)
+
+How it works:
+
+1. App saves events and reminder delivery settings to backend.
+2. Backend syncs pending reminder queue jobs per user/channel.
+3. Worker polls due jobs and sends email/SMS.
+4. Failures are retried with backoff until max attempts.
 
 Example body for SMS test endpoint:
 

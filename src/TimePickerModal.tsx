@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Modal, Platform, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { FlatList, Modal, Platform, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 
 interface TimePickerModalProps {
@@ -12,6 +12,10 @@ interface TimePickerModalProps {
   onCancel: () => void;
 }
 
+const WHEEL_ITEM_HEIGHT = 42;
+const WHEEL_VISIBLE_ROWS = 5;
+const WHEEL_CENTER_PADDING = ((WHEEL_VISIBLE_ROWS - 1) / 2) * WHEEL_ITEM_HEIGHT;
+
 export default function TimePickerModal({
   visible,
   title,
@@ -22,14 +26,99 @@ export default function TimePickerModal({
   onCancel,
 }: TimePickerModalProps) {
   const [draftDate, setDraftDate] = useState<Date>(new Date(initialDate));
+  const [webHour, setWebHour] = useState<number>(12);
+  const [webMinute, setWebMinute] = useState<number>(0);
+  const [webPeriod, setWebPeriod] = useState<'AM' | 'PM'>('AM');
+  const [isWebReady, setIsWebReady] = useState(false);
+
+  const hourOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+  const minuteOptions: number[] = [];
+  for (let minute = 0; minute < 60; minute += minuteInterval) {
+    minuteOptions.push(minute);
+  }
+
+  const [hourWheelRef, setHourWheelRef] = useState<FlatList<number> | null>(null);
+  const [minuteWheelRef, setMinuteWheelRef] = useState<FlatList<number> | null>(null);
+
+  const syncWebFieldsFromDate = (value: Date) => {
+    const hours24 = value.getHours();
+    const minute = value.getMinutes();
+    const period = hours24 >= 12 ? 'PM' : 'AM';
+    const hour12 = (hours24 % 12) || 12;
+    const alignedMinute = minute - (minute % minuteInterval);
+
+    setWebHour(hour12);
+    setWebMinute(alignedMinute);
+    setWebPeriod(period);
+  };
+
+  const buildDateFromWebFields = () => {
+    const nextDate = new Date(draftDate);
+    const normalizedHour = webHour % 12;
+    const hours24 = webPeriod === 'PM' ? normalizedHour + 12 : normalizedHour;
+    nextDate.setHours(hours24, webMinute, 0, 0);
+    return nextDate;
+  };
+
+  const findNearestIndex = (offsetY: number, maxIndex: number) => {
+    const raw = Math.round(offsetY / WHEEL_ITEM_HEIGHT);
+    if (raw < 0) {
+      return 0;
+    }
+    if (raw > maxIndex) {
+      return maxIndex;
+    }
+    return raw;
+  };
+
+  const scrollWheelToIndex = (listRef: FlatList<number> | null, index: number) => {
+    if (!listRef) {
+      return;
+    }
+
+    listRef.scrollToOffset({
+      offset: index * WHEEL_ITEM_HEIGHT,
+      animated: false,
+    });
+  };
+
+  const syncWebWheels = () => {
+    const hourIndex = Math.max(0, hourOptions.findIndex((value) => value === webHour));
+    const minuteIndex = Math.max(0, minuteOptions.findIndex((value) => value === webMinute));
+
+    scrollWheelToIndex(hourWheelRef, hourIndex);
+    scrollWheelToIndex(minuteWheelRef, minuteIndex);
+  };
 
   useEffect(() => {
     if (!visible) {
       return;
     }
 
-    setDraftDate(new Date(initialDate));
-  }, [visible, initialDate]);
+    const nextDate = new Date(initialDate);
+    setDraftDate(nextDate);
+    syncWebFieldsFromDate(nextDate);
+    setIsWebReady(false);
+  }, [visible, initialDate, minuteInterval]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !visible) {
+      return;
+    }
+
+    if (!hourWheelRef || !minuteWheelRef) {
+      return;
+    }
+
+    if (!isWebReady) {
+      syncWebWheels();
+      setIsWebReady(true);
+      return;
+    }
+
+    syncWebWheels();
+  }, [visible, hourWheelRef, minuteWheelRef, isWebReady, webHour, webMinute]);
 
   return (
     <Modal transparent visible={visible} animationType="slide" onRequestClose={onCancel}>
@@ -39,21 +128,140 @@ export default function TimePickerModal({
           <Text style={styles.title}>{title}</Text>
           <Text style={styles.subtitle}>Pick a time</Text>
 
-          <DateTimePicker
-            value={draftDate}
-            mode="time"
-            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-            is24Hour={false}
-            minuteInterval={minuteInterval}
-            onChange={(_event, selectedDate) => {
-              if (!selectedDate) {
-                return;
-              }
-              setDraftDate(selectedDate);
-            }}
-          />
+          <View style={styles.pickerWrap}>
+            {Platform.OS === 'web' ? (
+              <View style={styles.webPickerRow}>
+                <View style={styles.webColumn}>
+                  <Text style={styles.webLabel}>Hour</Text>
+                  <View style={styles.webWheelFrame}>
+                    <View style={styles.webWheelHighlight} pointerEvents="none" />
+                    <FlatList
+                      ref={(ref) => setHourWheelRef(ref)}
+                      data={hourOptions}
+                      keyExtractor={(item) => `hour-${item}`}
+                      showsVerticalScrollIndicator={false}
+                      snapToInterval={WHEEL_ITEM_HEIGHT}
+                      decelerationRate="fast"
+                      contentContainerStyle={styles.webWheelContent}
+                      getItemLayout={(_data, index) => ({
+                        length: WHEEL_ITEM_HEIGHT,
+                        offset: WHEEL_ITEM_HEIGHT * index,
+                        index,
+                      })}
+                      onMomentumScrollEnd={(event) => {
+                        const index = findNearestIndex(event.nativeEvent.contentOffset.y, hourOptions.length - 1);
+                        const nextHour = hourOptions[index];
+                        if (nextHour !== webHour) {
+                          setWebHour(nextHour);
+                        }
+                        scrollWheelToIndex(hourWheelRef, index);
+                      }}
+                      renderItem={({ item }) => {
+                        const selected = item === webHour;
+                        return (
+                          <Pressable
+                            style={styles.webWheelItem}
+                            onPress={() => {
+                              setWebHour(item);
+                              const selectedIndex = hourOptions.findIndex((value) => value === item);
+                              scrollWheelToIndex(hourWheelRef, selectedIndex);
+                            }}
+                          >
+                            <Text style={[styles.webWheelText, selected ? styles.webWheelTextActive : undefined]}>
+                              {String(item).padStart(2, '0')}
+                            </Text>
+                          </Pressable>
+                        );
+                      }}
+                    />
+                  </View>
+                </View>
 
-          <TouchableOpacity style={styles.saveButton} onPress={() => onSave(new Date(draftDate))} activeOpacity={0.85}>
+                <View style={styles.webColumn}>
+                  <Text style={styles.webLabel}>Minute</Text>
+                  <View style={styles.webWheelFrame}>
+                    <View style={styles.webWheelHighlight} pointerEvents="none" />
+                    <FlatList
+                      ref={(ref) => setMinuteWheelRef(ref)}
+                      data={minuteOptions}
+                      keyExtractor={(item) => `minute-${item}`}
+                      showsVerticalScrollIndicator={false}
+                      snapToInterval={WHEEL_ITEM_HEIGHT}
+                      decelerationRate="fast"
+                      contentContainerStyle={styles.webWheelContent}
+                      getItemLayout={(_data, index) => ({
+                        length: WHEEL_ITEM_HEIGHT,
+                        offset: WHEEL_ITEM_HEIGHT * index,
+                        index,
+                      })}
+                      onMomentumScrollEnd={(event) => {
+                        const index = findNearestIndex(event.nativeEvent.contentOffset.y, minuteOptions.length - 1);
+                        const nextMinute = minuteOptions[index];
+                        if (nextMinute !== webMinute) {
+                          setWebMinute(nextMinute);
+                        }
+                        scrollWheelToIndex(minuteWheelRef, index);
+                      }}
+                      renderItem={({ item }) => {
+                        const selected = item === webMinute;
+                        return (
+                          <Pressable
+                            style={styles.webWheelItem}
+                            onPress={() => {
+                              setWebMinute(item);
+                              const selectedIndex = minuteOptions.findIndex((value) => value === item);
+                              scrollWheelToIndex(minuteWheelRef, selectedIndex);
+                            }}
+                          >
+                            <Text style={[styles.webWheelText, selected ? styles.webWheelTextActive : undefined]}>
+                              {String(item).padStart(2, '0')}
+                            </Text>
+                          </Pressable>
+                        );
+                      }}
+                    />
+                  </View>
+                </View>
+
+                <View style={styles.webColumn}>
+                  <Text style={styles.webLabel}>Period</Text>
+                  <Pressable
+                    style={[styles.periodButton, webPeriod === 'AM' ? styles.periodButtonActive : undefined]}
+                    onPress={() => setWebPeriod('AM')}
+                  >
+                    <Text style={[styles.periodButtonText, webPeriod === 'AM' ? styles.periodButtonTextActive : undefined]}>AM</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.periodButton, webPeriod === 'PM' ? styles.periodButtonActive : undefined]}
+                    onPress={() => setWebPeriod('PM')}
+                  >
+                    <Text style={[styles.periodButtonText, webPeriod === 'PM' ? styles.periodButtonTextActive : undefined]}>PM</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : (
+              <DateTimePicker
+                value={draftDate}
+                mode="time"
+                display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                is24Hour={false}
+                minuteInterval={minuteInterval}
+                style={styles.picker}
+                onChange={(_event, selectedDate) => {
+                  if (!selectedDate) {
+                    return;
+                  }
+                  setDraftDate(selectedDate);
+                }}
+              />
+            )}
+          </View>
+
+          <TouchableOpacity
+            style={styles.saveButton}
+            onPress={() => onSave(Platform.OS === 'web' ? buildDateFromWebFields() : new Date(draftDate))}
+            activeOpacity={0.85}
+          >
             <Text style={styles.saveButtonText}>{saveLabel.toUpperCase()}</Text>
           </TouchableOpacity>
         </Pressable>
@@ -96,6 +304,92 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     color: '#111827',
     fontSize: 18,
+  },
+  pickerWrap: {
+    minHeight: 220,
+    justifyContent: 'center',
+  },
+  picker: {
+    width: '100%',
+    height: 216,
+    alignSelf: 'stretch',
+  },
+  webPickerRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  webColumn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 14,
+    padding: 10,
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+  },
+  webLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#334155',
+    marginBottom: 6,
+  },
+  webWheelFrame: {
+    width: '100%',
+    height: WHEEL_ITEM_HEIGHT * WHEEL_VISIBLE_ROWS,
+    position: 'relative',
+    overflow: 'hidden',
+    borderRadius: 10,
+    backgroundColor: '#f1f5f9',
+  },
+  webWheelHighlight: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: WHEEL_CENTER_PADDING,
+    height: WHEEL_ITEM_HEIGHT,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#93c5fd',
+    backgroundColor: '#dbeafe',
+    opacity: 0.65,
+    zIndex: 1,
+  },
+  webWheelContent: {
+    paddingVertical: WHEEL_CENTER_PADDING,
+  },
+  webWheelItem: {
+    height: WHEEL_ITEM_HEIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  webWheelText: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  webWheelTextActive: {
+    color: '#1d4ed8',
+  },
+  periodButton: {
+    width: '100%',
+    paddingVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  periodButtonActive: {
+    backgroundColor: '#0ea5e9',
+    borderColor: '#0ea5e9',
+  },
+  periodButtonText: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  periodButtonTextActive: {
+    color: '#fff',
   },
   saveButton: {
     marginTop: 18,

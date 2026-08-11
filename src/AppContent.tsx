@@ -35,12 +35,13 @@ import {
   type ReminderDefaultTimeSettings,
   loadReminderSoundSettings,
   saveEvents,
+  sendReminderEmailNotification,
   sendReminderSmsNotification,
   subscribeApiStorageStatus,
   validateEmail,
   validatePhoneNumber,
 } from './storage';
-import { clearScheduledReminders, playReminderPing, requestNotificationPermission, scheduleReminder } from './notifications';
+import { clearScheduledReminders, playReminderPing, scheduleReminder } from './notifications';
 import { getDeviceTimeZone } from './timeZones';
 import TimePickerModal from './TimePickerModal';
 import { EventLocationAddress, ReminderFrequency, SpecialDateEvent, VariableReminderEntry } from './types';
@@ -203,6 +204,65 @@ const workSubtypeLabels: Record<WorkSubtypeValue, string> = {
   other: 'Other',
 };
 
+const usStateOptions = [
+  { code: 'AL', label: 'Alabama' },
+  { code: 'AK', label: 'Alaska' },
+  { code: 'AZ', label: 'Arizona' },
+  { code: 'AR', label: 'Arkansas' },
+  { code: 'CA', label: 'California' },
+  { code: 'CO', label: 'Colorado' },
+  { code: 'CT', label: 'Connecticut' },
+  { code: 'DE', label: 'Delaware' },
+  { code: 'DC', label: 'District of Columbia' },
+  { code: 'FL', label: 'Florida' },
+  { code: 'GA', label: 'Georgia' },
+  { code: 'HI', label: 'Hawaii' },
+  { code: 'ID', label: 'Idaho' },
+  { code: 'IL', label: 'Illinois' },
+  { code: 'IN', label: 'Indiana' },
+  { code: 'IA', label: 'Iowa' },
+  { code: 'KS', label: 'Kansas' },
+  { code: 'KY', label: 'Kentucky' },
+  { code: 'LA', label: 'Louisiana' },
+  { code: 'ME', label: 'Maine' },
+  { code: 'MD', label: 'Maryland' },
+  { code: 'MA', label: 'Massachusetts' },
+  { code: 'MI', label: 'Michigan' },
+  { code: 'MN', label: 'Minnesota' },
+  { code: 'MS', label: 'Mississippi' },
+  { code: 'MO', label: 'Missouri' },
+  { code: 'MT', label: 'Montana' },
+  { code: 'NE', label: 'Nebraska' },
+  { code: 'NV', label: 'Nevada' },
+  { code: 'NH', label: 'New Hampshire' },
+  { code: 'NJ', label: 'New Jersey' },
+  { code: 'NM', label: 'New Mexico' },
+  { code: 'NY', label: 'New York' },
+  { code: 'NC', label: 'North Carolina' },
+  { code: 'ND', label: 'North Dakota' },
+  { code: 'OH', label: 'Ohio' },
+  { code: 'OK', label: 'Oklahoma' },
+  { code: 'OR', label: 'Oregon' },
+  { code: 'PA', label: 'Pennsylvania' },
+  { code: 'RI', label: 'Rhode Island' },
+  { code: 'SC', label: 'South Carolina' },
+  { code: 'SD', label: 'South Dakota' },
+  { code: 'TN', label: 'Tennessee' },
+  { code: 'TX', label: 'Texas' },
+  { code: 'UT', label: 'Utah' },
+  { code: 'VT', label: 'Vermont' },
+  { code: 'VA', label: 'Virginia' },
+  { code: 'WA', label: 'Washington' },
+  { code: 'WV', label: 'West Virginia' },
+  { code: 'WI', label: 'Wisconsin' },
+  { code: 'WY', label: 'Wyoming' },
+];
+
+const usStateNameToCode = usStateOptions.reduce<Record<string, string>>((accumulator, option) => {
+  accumulator[option.label.toLowerCase()] = option.code;
+  return accumulator;
+}, {});
+
 const eventTypeOptions: Array<{ label: string; value: EventTypeValue }> = Object.entries(eventTypeLabels).map(
   ([value, label]) => ({ label, value: value as EventTypeValue }),
 );
@@ -298,6 +358,7 @@ const createDefaultForm = (reminderTimeZone: string) => {
     eventLocationPlaceId: '',
     eventLocationFormattedAddress: '',
     eventLocationLine1: '',
+    eventLocationLine2: '',
     eventLocationCity: '',
     eventLocationState: '',
     eventLocationZip: '',
@@ -464,6 +525,7 @@ const buildEventLocationFromForm = (form: {
   eventLocationPlaceId: string;
   eventLocationFormattedAddress: string;
   eventLocationLine1: string;
+  eventLocationLine2: string;
   eventLocationCity: string;
   eventLocationState: string;
   eventLocationZip: string;
@@ -474,14 +536,15 @@ const buildEventLocationFromForm = (form: {
   }
 
   const line1 = form.eventLocationLine1.trim();
+  const line2 = form.eventLocationLine2.trim();
   const city = form.eventLocationCity.trim();
-  const state = form.eventLocationState.trim().toUpperCase();
-  const zip = form.eventLocationZip.trim();
+  const state = normalizeStateCode(form.eventLocationState);
+  const zip = normalizeZipCode(form.eventLocationZip);
   const phone = formatPhoneNumberInput(form.eventLocationPhone.trim());
   const placeId = form.eventLocationPlaceId.trim();
   const formattedAddress = form.eventLocationFormattedAddress.trim();
 
-  if (!line1 && !city && !state && !zip && !formattedAddress && !phone) {
+  if (!line1 && !line2 && !city && !state && !zip && !formattedAddress && !phone) {
     return undefined;
   }
 
@@ -490,6 +553,7 @@ const buildEventLocationFromForm = (form: {
     ...(formattedAddress ? { formattedAddress } : {}),
     ...(phone ? { phone } : {}),
     line1,
+    ...(line2 ? { line2 } : {}),
     city,
     state,
     zip,
@@ -545,6 +609,29 @@ const getAgeAsOfToday = (birthDate: Date) => {
 const getDefaultBirthdayAgeString = (birthDate: Date) => {
   const age = getAgeAsOfToday(birthDate);
   return age === null ? '' : String(age);
+};
+
+const normalizeZipCode = (value: string) => value.replace(/\D/g, '').slice(0, 5);
+
+const normalizeStateCode = (value: string) => {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  const upper = normalized.toUpperCase();
+  const byCode = usStateOptions.find((option) => option.code === upper);
+  if (byCode) {
+    return byCode.code;
+  }
+
+  const byName = usStateNameToCode[normalized.toLowerCase()];
+  return byName || '';
+};
+
+const getStateLabelFromCode = (code: string) => {
+  const option = usStateOptions.find((entry) => entry.code === code);
+  return option ? option.label : code;
 };
 
 const openExternalComposer = async (url: string) => {
@@ -671,6 +758,7 @@ const getEventFormState = (event: SpecialDateEvent) => {
     eventLocation
     && (
       eventLocation.line1
+      || eventLocation.line2
       || eventLocation.city
       || eventLocation.state
       || eventLocation.zip
@@ -689,8 +777,9 @@ const getEventFormState = (event: SpecialDateEvent) => {
     eventLocationPlaceId: eventLocation?.placeId || '',
     eventLocationFormattedAddress: eventLocation?.formattedAddress || '',
     eventLocationLine1: eventLocation?.line1 || '',
+    eventLocationLine2: eventLocation?.line2 || '',
     eventLocationCity: eventLocation?.city || '',
-    eventLocationState: eventLocation?.state || '',
+    eventLocationState: normalizeStateCode(eventLocation?.state || ''),
     eventLocationZip: eventLocation?.zip || '',
     eventLocationPhone: formatPhoneNumberInput(eventLocation?.phone || ''),
     customType: '',
@@ -922,13 +1011,14 @@ const getEventLocationDisplayLines = (eventLocation?: EventLocationAddress) => {
   }
 
   const line1 = eventLocation.line1.trim();
+  const line2 = eventLocation.line2 ? eventLocation.line2.trim() : '';
   const city = eventLocation.city.trim();
-  const state = eventLocation.state.trim();
+  const state = getStateLabelFromCode(normalizeStateCode(eventLocation.state.trim()));
   const zip = eventLocation.zip.trim();
   const phone = eventLocation.phone ? formatPhoneNumberInput(eventLocation.phone.trim()) : '';
   const cityStateZip = [city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ').trim();
   const fallback = eventLocation.formattedAddress ? eventLocation.formattedAddress.trim() : '';
-  const lines = [line1, cityStateZip, phone ? `Phone: ${phone}` : ''].filter(Boolean);
+  const lines = [line1, line2, cityStateZip, phone ? `Phone: ${phone}` : ''].filter(Boolean);
 
   if (lines.length) {
     return lines;
@@ -2052,6 +2142,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setForm((current) => ({
       ...current,
       eventLocationLine1: prediction.mainText || prediction.description || '',
+      eventLocationLine2: '',
       eventLocationFormattedAddress: prediction.description || prediction.mainText || '',
       eventLocationPlaceId: prediction.placeId,
     }));
@@ -2062,11 +2153,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setForm((current) => ({
       ...current,
       eventLocationLine1: nextLine1,
+      eventLocationLine2: '',
       eventLocationFormattedAddress: resolved?.formattedAddress || prediction.description || prediction.mainText || '',
       eventLocationPlaceId: resolved?.placeId || prediction.placeId,
       eventLocationCity: resolved?.city || '',
-      eventLocationState: resolved?.state || '',
-      eventLocationZip: resolved?.zip || '',
+      eventLocationState: normalizeStateCode(resolved?.state || ''),
+      eventLocationZip: normalizeZipCode(resolved?.zip || ''),
     }));
   }, [eventLocationAutocompleteSessionToken]);
 
@@ -2129,11 +2221,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         setDefaultReminderTime({ hour: 9, minute: 0, clockIntervalMinutes: 5 });
       }
 
-      try {
-        await requestNotificationPermission();
-      } catch (error) {
-        console.warn('Notification permission request failed', error);
-      }
     })();
   }, [repairLegacyReminderTimes, userId]);
 
@@ -2351,6 +2438,18 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
             people: dueReminder.event.people,
             eventDateTime: dueReminder.event.eventDateTime,
             eventAllDay: dueReminder.event.eventAllDay,
+            notes: dueReminder.entry?.notes || dueReminder.event.notes,
+          });
+        }
+
+        if (reminderDeliveryEmailEnabled) {
+          void sendReminderEmailNotification(userId, {
+            eventId: dueReminder.event.id,
+            eventTitle: dueReminder.event.title,
+            people: dueReminder.event.people,
+            eventDateTime: dueReminder.event.eventDateTime,
+            eventAllDay: dueReminder.event.eventAllDay,
+            reminderDateTime: dueReminder.reminderDateTime,
             notes: dueReminder.entry?.notes || dueReminder.event.notes,
           });
         }
@@ -5663,6 +5762,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                     eventLocationPlaceId: '',
                     eventLocationFormattedAddress: '',
                     eventLocationLine1: '',
+                    eventLocationLine2: '',
                     eventLocationCity: '',
                     eventLocationState: '',
                     eventLocationZip: '',
@@ -5702,6 +5802,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   }))}
                   placeholder="Address line 1"
                 />
+                <TextInput
+                  style={styles.input}
+                  value={form.eventLocationLine2}
+                  onChangeText={(value) => setForm({ ...form, eventLocationLine2: value })}
+                  placeholder="Address line 2"
+                />
                 {eventLocationPredictions.length ? (
                   <View style={styles.eventLocationSuggestionsList}>
                     {eventLocationPredictions.map((prediction) => (
@@ -5727,21 +5833,25 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   placeholder="City"
                 />
                 <View style={styles.eventLocationCityStateZipRow}>
-                  <TextInput
-                    style={[styles.input, styles.eventLocationStateInput]}
-                    value={form.eventLocationState}
-                    onChangeText={(value) => setForm({ ...form, eventLocationState: value.toUpperCase().replace(/[^A-Za-z]/g, '').slice(0, 2) })}
-                    placeholder="ST"
-                    autoCapitalize="characters"
-                    maxLength={2}
-                  />
+                  <View style={[styles.eventLocationStatePickerWrapper, styles.eventLocationStateInput]}>
+                    <Picker
+                      selectedValue={form.eventLocationState}
+                      onValueChange={(value) => setForm({ ...form, eventLocationState: String(value || '') })}
+                      style={styles.picker}
+                    >
+                      <Picker.Item label="Select state" value="" />
+                      {usStateOptions.map((option) => (
+                        <Picker.Item key={option.code} label={option.label} value={option.code} />
+                      ))}
+                    </Picker>
+                  </View>
                   <TextInput
                     style={[styles.input, styles.eventLocationZipInput]}
                     value={form.eventLocationZip}
-                    onChangeText={(value) => setForm({ ...form, eventLocationZip: value.replace(/[^0-9-]/g, '').slice(0, 10) })}
+                    onChangeText={(value) => setForm({ ...form, eventLocationZip: normalizeZipCode(value) })}
                     placeholder="ZIP"
-                    keyboardType="numbers-and-punctuation"
-                    maxLength={10}
+                    keyboardType="number-pad"
+                    maxLength={5}
                   />
                 </View>
                 <TextInput
@@ -6623,11 +6733,19 @@ const styles = StyleSheet.create({
     gap: 8,
     alignItems: 'center',
   },
+  eventLocationStatePickerWrapper: {
+    borderWidth: 1,
+    borderColor: '#d9e2f0',
+    borderRadius: 10,
+    marginBottom: 8,
+    overflow: 'hidden',
+    backgroundColor: '#fff',
+  },
   eventLocationStateInput: {
-    flex: 0.35,
+    flex: 0.62,
   },
   eventLocationZipInput: {
-    flex: 0.65,
+    flex: 0.38,
   },
   checkboxRow: {
     flexDirection: 'row',
