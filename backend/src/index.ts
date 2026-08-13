@@ -1044,10 +1044,51 @@ const hasValidAdminKey = (req: Request) => {
   return false;
 };
 
-app.get('/admin/user-count', async (_req, res) => {
+app.get('/admin/user-count', async (req, res) => {
   try {
     const userCount = await prisma.user.count();
-    return res.json({ userCount });
+
+    const includeUsers = String(req.query.includeUsers || '').trim().toLowerCase() === 'true';
+    if (!includeUsers) {
+      return res.json({ userCount });
+    }
+
+    if (!adminApiKey) {
+      return res.status(503).json({
+        error: 'admin API key is not configured',
+        action: 'Set ADMIN_API_KEY in backend environment variables.',
+      });
+    }
+
+    if (!hasValidAdminKey(req)) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const users = await prisma.user.findMany({
+      orderBy: { createdAt: 'desc' },
+      select: {
+        email: true,
+        fullName: true,
+      },
+    });
+
+    const formattedUsers = users.map((user) => {
+      const nameParts = String(user.fullName || '').trim().split(/\s+/).filter(Boolean);
+      const firstName = nameParts[0] || '';
+      const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
+
+      return {
+        email: user.email,
+        firstName,
+        lastName,
+      };
+    });
+
+    return res.json({
+      userCount,
+      users: formattedUsers,
+    });
+
   } catch (error) {
     console.error('user count failed', error);
 
