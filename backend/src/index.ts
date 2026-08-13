@@ -37,6 +37,8 @@ const userAgreementFileNames = [
   'user-agreement.html',
   'user-agreement.txt',
 ];
+const privacyPolicyFileName = 'privacy-policy.html';
+const termsOfServiceFileName = 'terms-of-service.html';
 
 const smtpHost = process.env.SMTP_HOST;
 const smtpPort = Number(process.env.SMTP_PORT || 587);
@@ -131,6 +133,24 @@ const resolveUserAgreementFilePath = () => {
     if (fs.existsSync(candidatePath)) {
       return candidatePath;
     }
+  }
+
+  return null;
+};
+
+const resolvePrivacyPolicyFilePath = () => {
+  const candidatePath = path.join(legalDocumentsDir, privacyPolicyFileName);
+  if (fs.existsSync(candidatePath)) {
+    return candidatePath;
+  }
+
+  return null;
+};
+
+const resolveTermsOfServiceFilePath = () => {
+  const candidatePath = path.join(legalDocumentsDir, termsOfServiceFileName);
+  if (fs.existsSync(candidatePath)) {
+    return candidatePath;
   }
 
   return null;
@@ -990,6 +1010,42 @@ app.get('/legal/user-agreement', (_req, res) => {
   }
 
   return res.sendFile(agreementPath);
+});
+
+app.get('/legal/privacy-policy', (_req, res) => {
+  const privacyPath = resolvePrivacyPolicyFilePath();
+  if (!privacyPath) {
+    return res.status(404).json({
+      error: 'privacy policy file not found',
+      expectedPath: path.join('backend', 'public', 'legal', privacyPolicyFileName),
+    });
+  }
+
+  return res.sendFile(privacyPath);
+});
+
+app.get('/legal/terms', (_req, res) => {
+  const termsPath = resolveTermsOfServiceFilePath();
+  if (!termsPath) {
+    return res.status(404).json({
+      error: 'terms of service file not found',
+      expectedPath: path.join('backend', 'public', 'legal', termsOfServiceFileName),
+    });
+  }
+
+  return res.sendFile(termsPath);
+});
+
+app.get('/legal/terms-of-service', (_req, res) => {
+  const termsPath = resolveTermsOfServiceFilePath();
+  if (!termsPath) {
+    return res.status(404).json({
+      error: 'terms of service file not found',
+      expectedPath: path.join('backend', 'public', 'legal', termsOfServiceFileName),
+    });
+  }
+
+  return res.sendFile(termsPath);
 });
 
 const mapDatabaseErrorToResponse = (error: unknown) => {
