@@ -56,7 +56,11 @@ const outlookOauthClientId = process.env.OUTLOOK_OAUTH_CLIENT_ID;
 const outlookOauthClientSecret = process.env.OUTLOOK_OAUTH_CLIENT_SECRET;
 const outlookOauthRedirectUri = process.env.OUTLOOK_OAUTH_REDIRECT_URI;
 const outlookOauthAuthorityConfig = String(process.env.OUTLOOK_OAUTH_AUTHORITY || process.env.OUTLOOK_OAUTH_TENANT || process.env.OUTLOOK_TENANT_ID || 'common').trim();
+const adminApiKey = String(process.env.ADMIN_API_KEY || '').trim();
 const appReturnUrl = (process.env.APP_RETURN_URL || 'http://localhost:8081').replace(/\/$/, '');
+const isProductionRuntime = String(process.env.NODE_ENV || '').trim().toLowerCase() === 'production';
+const showOauthErrorDetails = String(process.env.SHOW_OAUTH_ERROR_DETAILS || '').trim().toLowerCase() === 'true'
+  || !isProductionRuntime;
 const resolveAppReturnUrl = (candidate?: string) => {
   const trimmed = String(candidate || '').trim();
   if (!trimmed) {
@@ -783,7 +787,7 @@ const renderGoogleCallbackPage = (options: {
   const escapedReturnUrl = escapeHtml(safeReturnUrl);
   const buttonLabel = options.buttonLabel || 'Return to App';
   const autoRedirectMs = Number.isFinite(options.autoRedirectMs) ? Math.max(0, Math.trunc(options.autoRedirectMs as number)) : 2000;
-  const detailsHtml = options.details
+  const detailsHtml = showOauthErrorDetails && options.details
     ? `<div class="debugBox"><strong>Details</strong><pre>${escapeHtml(options.details)}</pre></div>`
     : '';
 
@@ -851,6 +855,23 @@ const getRedirectUriCandidates = (redirectUri: string) => {
   }
 
   return Array.from(candidates);
+};
+
+const normalizeOauthRedirectUri = (redirectUri: string) => {
+  const trimmed = String(redirectUri || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const normalizedPath = parsed.pathname === '/'
+      ? '/'
+      : parsed.pathname.replace(/\/+$/, '');
+    return `${parsed.origin}${normalizedPath}${parsed.search}`;
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
 };
 
 const isExpiredNonYearlyEvent = (title: string, eventDateTime: Date, frequency: string) => {
@@ -997,12 +1018,94 @@ const mapDatabaseErrorToResponse = (error: unknown) => {
   return null;
 };
 
+const hasValidAdminKey = (req: Request) => {
+  if (!adminApiKey) {
+    return false;
+  }
+
+  const queryValue = String(req.query.adminKey || '').trim();
+  if (queryValue && queryValue === adminApiKey) {
+    return true;
+  }
+
+  const headerValue = String(req.headers['x-admin-key'] || '').trim();
+  if (headerValue && headerValue === adminApiKey) {
+    return true;
+  }
+
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (authHeader.toLowerCase().startsWith('bearer ')) {
+    const token = authHeader.slice(7).trim();
+    if (token && token === adminApiKey) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
 app.get('/admin/user-count', async (_req, res) => {
   try {
     const userCount = await prisma.user.count();
     return res.json({ userCount });
   } catch (error) {
     console.error('user count failed', error);
+
+    const databaseError = mapDatabaseErrorToResponse(error);
+    if (databaseError) {
+      return res.status(databaseError.status).json(databaseError.body);
+    }
+
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.get('/admin/users/email-verification-status', async (req, res) => {
+  try {
+    if (!adminApiKey) {
+      return res.status(503).json({
+        error: 'admin API key is not configured',
+        action: 'Set ADMIN_API_KEY in backend environment variables.',
+      });
+    }
+
+    if (!hasValidAdminKey(req)) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const limitRaw = Number(req.query.limit);
+    const offsetRaw = Number(req.query.offset);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.trunc(limitRaw))) : 200;
+    const offset = Number.isFinite(offsetRaw) ? Math.max(0, Math.trunc(offsetRaw)) : 0;
+
+    const [totalUsers, users] = await Promise.all([
+      prisma.user.count(),
+      prisma.user.findMany({
+        skip: offset,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          email: true,
+          emailVerified: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    const verifiedCount = users.filter((entry) => entry.emailVerified).length;
+
+    return res.json({
+      totalUsers,
+      returnedUsers: users.length,
+      offset,
+      limit,
+      verifiedCount,
+      unverifiedCount: users.length - verifiedCount,
+      users,
+    });
+  } catch (error) {
+    console.error('email verification status list failed', error);
 
     const databaseError = mapDatabaseErrorToResponse(error);
     if (databaseError) {
@@ -1801,7 +1904,7 @@ app.post('/calendar-sync/google/connect-url', async (req, res) => {
     const normalizedReturnUrl = resolveAppReturnUrl(String(returnUrl || '').trim());
     const clientId = String(googleOauthClientId || '').trim();
     const clientSecret = String(googleOauthClientSecret || '').trim();
-    const redirectUri = String(googleOauthRedirectUri || '').trim();
+    const redirectUri = normalizeOauthRedirectUri(String(googleOauthRedirectUri || '').trim());
 
     if (!normalizedUserId) {
       return res.status(400).json({ error: 'userId is required' });
@@ -1848,7 +1951,7 @@ app.get('/calendar-sync/google/callback', async (req, res) => {
     const rawState = String(req.query.state || '').trim();
     const clientId = String(googleOauthClientId || '').trim();
     const clientSecret = String(googleOauthClientSecret || '').trim();
-    const redirectUri = String(googleOauthRedirectUri || '').trim();
+    const redirectUri = normalizeOauthRedirectUri(String(googleOauthRedirectUri || '').trim());
 
     let callbackReturnUrl = appReturnUrl;
     if (rawState) {
