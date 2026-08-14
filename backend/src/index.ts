@@ -1353,6 +1353,120 @@ app.get('/admin/notification-config', (_req, res) => {
   });
 });
 
+app.get('/admin/reminder-queue-jobs', async (req, res) => {
+  try {
+    if (!adminApiKey) {
+      return res.status(503).json({
+        error: 'admin API key is not configured',
+        action: 'Set ADMIN_API_KEY in backend environment variables.',
+      });
+    }
+
+    if (!hasValidAdminKey(req)) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const limitRaw = Number(req.query.limit);
+    const statusFilter = String(req.query.status || '').trim().toLowerCase();
+    const channelFilter = String(req.query.channel || '').trim().toLowerCase();
+    const userIdFilter = String(req.query.userId || '').trim();
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.trunc(limitRaw))) : 100;
+
+    const where: {
+      status?: string;
+      channel?: string;
+      userId?: string;
+    } = {};
+
+    if (statusFilter) {
+      where.status = statusFilter;
+    }
+
+    if (channelFilter) {
+      where.channel = channelFilter;
+    }
+
+    if (userIdFilter) {
+      where.userId = userIdFilter;
+    }
+
+    const [jobs, groupedCounts] = await Promise.all([
+      prisma.reminderQueueJob.findMany({
+        where,
+        take: limit,
+        orderBy: [
+          { scheduledFor: 'asc' },
+          { createdAt: 'desc' },
+        ],
+        include: {
+          user: {
+            select: {
+              email: true,
+            },
+          },
+          event: {
+            select: {
+              title: true,
+              people: true,
+              reminderTimeZone: true,
+            },
+          },
+        },
+      }),
+      prisma.reminderQueueJob.groupBy({
+        by: ['status'],
+        _count: {
+          _all: true,
+        },
+      }),
+    ]);
+
+    const summary = groupedCounts.reduce<Record<string, number>>((accumulator, entry) => {
+      accumulator[entry.status] = entry._count._all;
+      return accumulator;
+    }, {});
+
+    return res.json({
+      filters: {
+        status: statusFilter || null,
+        channel: channelFilter || null,
+        userId: userIdFilter || null,
+        limit,
+      },
+      summary,
+      returnedJobs: jobs.length,
+      jobs: jobs.map((job) => ({
+        id: job.id,
+        status: job.status,
+        channel: job.channel,
+        scheduledFor: job.scheduledFor,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        sentAt: job.sentAt,
+        attemptCount: job.attemptCount,
+        lastAttemptAt: job.lastAttemptAt,
+        lastError: job.lastError,
+        userId: job.userId,
+        userEmail: job.user.email,
+        eventId: job.eventId,
+        eventTitle: job.event.title,
+        eventPeople: job.event.people,
+        reminderTimeZone: job.event.reminderTimeZone,
+        eventReminderId: job.eventReminderId,
+      })),
+    });
+  } catch (error) {
+    console.error('admin reminder queue jobs failed', error);
+
+    const databaseError = mapDatabaseErrorToResponse(error);
+    if (databaseError) {
+      return res.status(databaseError.status).json(databaseError.body);
+    }
+
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
 app.post('/admin/test-reminder-sms', async (req, res) => {
   try {
     const {
