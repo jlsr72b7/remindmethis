@@ -157,6 +157,8 @@ const resolveTermsOfServiceFilePath = () => {
   return null;
 };
 
+app.use('/legal', express.static(legalDocumentsDir));
+
 const resolveSmsConsentProofFilePath = () => {
   const candidatePath = path.join(legalDocumentsDir, smsConsentProofFileName);
   if (fs.existsSync(candidatePath)) {
