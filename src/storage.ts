@@ -229,7 +229,7 @@ const defaultReminderSoundSettings: ReminderSoundSettings = {
 
 const defaultReminderDeliverySettings: ReminderDeliverySettings = {
   device: true,
-  email: false,
+  email: true,
   text: false,
 };
 
@@ -1073,6 +1073,7 @@ export async function sendReminderEmailNotification(userId: string | undefined, 
   eventDateTime: string;
   eventAllDay: boolean;
   reminderDateTime: string;
+  reminderTimeZone?: string;
   notes?: string;
 }) {
   if (!USE_API_STORAGE || !userId) {
@@ -1100,6 +1101,7 @@ export async function sendReminderSmsNotification(userId: string | undefined, pa
   people: string;
   eventDateTime: string;
   eventAllDay: boolean;
+  reminderTimeZone?: string;
   notes?: string;
 }) {
   if (!USE_API_STORAGE || !userId) {
@@ -1477,7 +1479,7 @@ export async function createUser(
   await AsyncStorage.setItem(USERS_KEY, JSON.stringify(nextUsers));
   await saveReminderDeliverySettings({
     device: true,
-    email: false,
+    email: true,
     text: smsTextOptIn === true,
   }, user.id);
   return { user };

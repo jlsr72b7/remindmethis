@@ -464,7 +464,7 @@ let reminderQueuePollInFlight = false;
 
 const defaultDeliverySettings = {
   deviceEnabled: true,
-  emailEnabled: false,
+  emailEnabled: true,
   textEnabled: false,
 };
 
@@ -1677,7 +1677,7 @@ app.post('/users/:userId/mobile-verification/start', async (req, res) => {
       create: {
         userId,
         deviceEnabled: true,
-        emailEnabled: false,
+        emailEnabled: true,
         textEnabled: false,
       },
       update: {
@@ -1792,10 +1792,11 @@ app.post('/auth/signup', async (req, res) => {
       create: {
         userId: user.id,
         deviceEnabled: true,
-        emailEnabled: false,
+        emailEnabled: true,
         textEnabled: smsTextOptIn === true,
       },
       update: {
+        emailEnabled: true,
         textEnabled: smsTextOptIn === true,
       },
     });
@@ -3552,7 +3553,7 @@ app.patch('/users/:userId/profile', async (req, res) => {
         create: {
           userId,
           deviceEnabled: true,
-          emailEnabled: false,
+          emailEnabled: true,
           textEnabled: false,
         },
         update: {
