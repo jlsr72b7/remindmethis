@@ -285,16 +285,30 @@ const getSafeTimeZone = (value?: string) => {
 
 const getEventDateTimeLabels = (eventDateTime: string, eventAllDay: boolean, eventTimeZone?: string) => {
   const eventAt = new Date(eventDateTime);
+  if (!Number.isFinite(eventAt.getTime())) {
+    return {
+      eventDateLabel: 'Invalid event date',
+      eventTimeLabel: eventAllDay ? null : 'Invalid event time',
+    };
+  }
+
   const safeTimeZone = getSafeTimeZone(eventTimeZone);
   const dateOptions: Intl.DateTimeFormatOptions | undefined = safeTimeZone ? { timeZone: safeTimeZone } : undefined;
   const timeOptions: Intl.DateTimeFormatOptions = safeTimeZone
     ? { hour: 'numeric', minute: '2-digit', timeZone: safeTimeZone }
     : { hour: 'numeric', minute: '2-digit' };
 
-  return {
-    eventDateLabel: eventAt.toLocaleDateString(undefined, dateOptions),
-    eventTimeLabel: eventAllDay ? null : eventAt.toLocaleTimeString(undefined, timeOptions),
-  };
+  try {
+    return {
+      eventDateLabel: eventAt.toLocaleDateString(undefined, dateOptions),
+      eventTimeLabel: eventAllDay ? null : eventAt.toLocaleTimeString(undefined, timeOptions),
+    };
+  } catch {
+    return {
+      eventDateLabel: eventAt.toLocaleDateString(),
+      eventTimeLabel: eventAllDay ? null : eventAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+    };
+  }
 };
 
 const isMobileNumberVerified = (user: {
