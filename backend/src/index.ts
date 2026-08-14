@@ -3582,6 +3582,73 @@ app.patch('/users/:userId/profile', async (req, res) => {
   }
 });
 
+app.get('/users/:userId/contacts-snapshot', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    const snapshot = await prisma.userContactsSnapshot.findUnique({
+      where: { userId },
+      select: {
+        payload: true,
+        updatedAt: true,
+      },
+    });
+
+    return res.json({
+      snapshot: snapshot?.payload ?? null,
+      updatedAt: snapshot?.updatedAt ?? null,
+    });
+  } catch (error) {
+    console.error('load contacts snapshot failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.put('/users/:userId/contacts-snapshot', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const snapshot = req.body?.snapshot;
+
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      return res.status(400).json({ error: 'snapshot object is required' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    await prisma.userContactsSnapshot.upsert({
+      where: { userId },
+      create: {
+        userId,
+        payload: snapshot as Prisma.JsonObject,
+      },
+      update: {
+        payload: snapshot as Prisma.JsonObject,
+      },
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('save contacts snapshot failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
 app.post('/users/:userId/change-password', async (req, res) => {
   try {
     const { userId } = req.params;

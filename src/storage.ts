@@ -213,6 +213,11 @@ export interface PendingShareInvitesResult {
   invites: PendingShareInvite[];
 }
 
+export interface UserContactsSnapshotResult {
+  snapshot: unknown | null;
+  updatedAt?: string | null;
+}
+
 const getRuntimeAppReturnUrl = () => {
   if (typeof window === 'undefined' || !window.location) {
     return '';
@@ -1383,7 +1388,12 @@ export function validatePassword(value: string) {
 }
 
 export function normalizePhoneNumber(value: string) {
-  return value.replace(/\D/g, '').slice(0, 10);
+  const digits = String(value || '').replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.slice(1);
+  }
+
+  return digits.slice(0, 10);
 }
 
 export function validatePhoneNumber(value: string) {
@@ -1580,6 +1590,41 @@ export async function loadUser(userId: string) {
 
   const users = await readStoredUsers();
   return users.find((entry) => entry.id === userId) || null;
+}
+
+export async function loadUserContactsSnapshot(userId: string): Promise<UserContactsSnapshotResult | null> {
+  if (!USE_API_STORAGE) {
+    return null;
+  }
+
+  try {
+    const response = await apiRequest<UserContactsSnapshotResult>(`/users/${encodeURIComponent(userId)}/contacts-snapshot`);
+    return {
+      snapshot: response.snapshot ?? null,
+      updatedAt: response.updatedAt ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveUserContactsSnapshot(userId: string, snapshot: unknown): Promise<{ success: boolean; error?: string }> {
+  if (!USE_API_STORAGE) {
+    return { success: false, error: 'API storage is disabled.' };
+  }
+
+  try {
+    await apiRequest<{ success: boolean }>(`/users/${encodeURIComponent(userId)}/contacts-snapshot`, {
+      method: 'PUT',
+      body: JSON.stringify({ snapshot }),
+    });
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unable to save contacts snapshot.',
+    };
+  }
 }
 
 export async function findUserByEmail(email: string) {

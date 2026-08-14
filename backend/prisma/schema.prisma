@@ -31,6 +31,16 @@ model User {
   calendarCredentials CalendarSyncCredential[]
   sentShareInvites     ShareInvite[] @relation("ShareInviteSender")
   receivedShareInvites ShareInvite[] @relation("ShareInviteRecipient")
+  contactsSnapshot     UserContactsSnapshot?
+}
+
+model UserContactsSnapshot {
+  userId    String   @id
+  payload   Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model CalendarSyncCredential {

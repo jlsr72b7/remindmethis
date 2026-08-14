@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Contacts from 'expo-contacts/src/legacy/Contacts';
 import {
   Alert,
   Animated,
@@ -55,6 +56,8 @@ import {
   sendContactSupportMessage,
   resetPassword,
   resendVerificationEmail,
+  loadUserContactsSnapshot,
+  saveUserContactsSnapshot,
   signInUser,
   startMobileVerification,
   StoredUser,
@@ -142,8 +145,17 @@ const formatBirthDateInput = (value: string) => {
   return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
 };
 
+const normalizeUsPhoneDigits = (value: string) => {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.slice(1);
+  }
+
+  return digits.slice(0, 10);
+};
+
 const formatPhoneNumberInput = (value: string) => {
-  const digits = value.replace(/\D/g, '').slice(0, 10);
+  const digits = normalizeUsPhoneDigits(value);
 
   if (!digits) {
     return '';
@@ -202,6 +214,43 @@ const splitNameParts = (fullName: string) => {
     firstName: parts[0],
     lastName: parts.slice(1).join(' '),
   };
+};
+
+const normalizePhoneDigits = (value: string) => String(value || '').replace(/\D/g, '').slice(0, 10);
+
+const getContactDisplayName = (contact: { firstName?: string; lastName?: string; company?: string }) => {
+  const fullName = `${String(contact.firstName || '').trim()} ${String(contact.lastName || '').trim()}`.trim();
+  if (fullName) {
+    return fullName;
+  }
+
+  return String(contact.company || '').trim() || 'Unnamed contact';
+};
+
+const getContactPrimaryChannelLabel = (contact: { email?: string; mobileNumber?: string }) => {
+  const normalizedEmail = String(contact.email || '').trim();
+  if (normalizedEmail) {
+    return normalizedEmail;
+  }
+
+  const normalizedMobile = String(contact.mobileNumber || '').trim();
+  if (normalizedMobile) {
+    return normalizedMobile;
+  }
+
+  return 'No email or mobile phone';
+};
+
+const formatImportedBirthDate = (birthday?: { month?: number | null; day?: number | null; year?: number | null } | null) => {
+  const month = Number(birthday?.month || 0);
+  const day = Number(birthday?.day || 0);
+  const year = Number(birthday?.year || 0);
+
+  if (!month || !day || !year) {
+    return '';
+  }
+
+  return `${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}/${String(year).padStart(4, '0')}`;
 };
 
 const parseAddressParts = (address: string) => {
@@ -1061,6 +1110,20 @@ interface ContactGroup {
 interface ContactsSnapshot {
   contacts: AccountContact[];
   groups: ContactGroup[];
+  ownerUserId?: string;
+  ownerEmail?: string;
+  schemaVersion?: number;
+  updatedAt?: string;
+}
+
+interface DeviceContactImportCandidate {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  mobileNumber: string;
+  company: string;
+  birthDate: string;
 }
 
 type ContactsView = 'contacts' | 'favorites' | 'deleted' | 'groups';
@@ -1079,7 +1142,8 @@ const createEmptyContactDraft = () => ({
   notes: '',
 });
 
-const getContactsStorageKey = (userId: string) => `special-date-contacts:${userId}`;
+const CONTACTS_STORAGE_KEY_PREFIX = 'special-date-contacts:';
+const getContactsStorageKey = (userId: string) => `${CONTACTS_STORAGE_KEY_PREFIX}${userId}`;
 
 function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminderTimeZoneUpdated }: AccountScreenProps) {
   const initialNameParts = useMemo(() => splitNameParts(user.fullName || ''), [user.fullName]);
@@ -1152,6 +1216,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [showContactsModal, setShowContactsModal] = useState(false);
   const [contacts, setContacts] = useState<AccountContact[]>([]);
   const [contactGroups, setContactGroups] = useState<ContactGroup[]>([]);
+  const [contactsLastSyncedAt, setContactsLastSyncedAt] = useState<string | null>(null);
   const [activeContactsView, setActiveContactsView] = useState<ContactsView>('contacts');
   const [isLoadingContacts, setIsLoadingContacts] = useState(false);
   const [contactsMessage, setContactsMessage] = useState<string | null>(null);
@@ -1182,6 +1247,9 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [contactSupportMessage, setContactSupportMessage] = useState('');
   const [contactSupportError, setContactSupportError] = useState<string | null>(null);
   const [isSendingContactSupport, setIsSendingContactSupport] = useState(false);
+  const [showDeviceContactsImportModal, setShowDeviceContactsImportModal] = useState(false);
+  const [deviceContactsToImport, setDeviceContactsToImport] = useState<DeviceContactImportCandidate[]>([]);
+  const [isLoadingDeviceContacts, setIsLoadingDeviceContacts] = useState(false);
   const [deliveryDevice, setDeliveryDevice] = useState(true);
   const [deliveryEmail, setDeliveryEmail] = useState(false);
   const [deliveryText, setDeliveryText] = useState(false);
@@ -1236,6 +1304,40 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
     return activeContacts.filter((entry) => !selectedGroup.contactIds.includes(entry.id));
   }, [activeContacts, selectedGroup]);
+  const activeContactEmails = useMemo(
+    () => new Set(activeContacts.map((entry) => entry.email.trim().toLowerCase()).filter(Boolean)),
+    [activeContacts],
+  );
+  const activeContactPhones = useMemo(
+    () => new Set(activeContacts.map((entry) => normalizePhoneDigits(entry.mobileNumber || '')).filter(Boolean)),
+    [activeContacts],
+  );
+  const contactsLastSyncedLabel = useMemo(() => {
+    if (!contactsLastSyncedAt) {
+      return 'Last backup: pending';
+    }
+
+    const parsedDate = new Date(contactsLastSyncedAt);
+    if (Number.isNaN(parsedDate.getTime())) {
+      return 'Last backup: pending';
+    }
+
+    return `Last backup: ${parsedDate.toLocaleString()}`;
+  }, [contactsLastSyncedAt]);
+  const isImportCandidateAlreadySaved = useCallback((entry: DeviceContactImportCandidate) => (
+    (entry.email && activeContactEmails.has(entry.email.trim().toLowerCase()))
+      || (entry.mobileNumber && activeContactPhones.has(normalizePhoneDigits(entry.mobileNumber)))
+  ), [activeContactEmails, activeContactPhones]);
+  const deviceContactsImportRows = useMemo(() => (
+    deviceContactsToImport.map((entry) => ({
+      ...entry,
+      alreadyAdded: isImportCandidateAlreadySaved(entry),
+    }))
+  ), [deviceContactsToImport, isImportCandidateAlreadySaved]);
+  const importableDeviceContactsCount = useMemo(
+    () => deviceContactsImportRows.filter((entry) => !entry.alreadyAdded).length,
+    [deviceContactsImportRows],
+  );
 
   useEffect(() => {
     setSelectedGroupDescriptionDraft(selectedGroup?.description || '');
@@ -2809,11 +2911,13 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
           const candidate = entry as Partial<AccountContact>;
           const id = String(candidate.id || '').trim();
           const email = String(candidate.email || '').trim().toLowerCase();
+          const mobileNumber = candidate.mobileNumber ? String(candidate.mobileNumber).trim() : '';
+          const company = candidate.company ? String(candidate.company).trim() : '';
           const fallbackName = splitNameParts(String((candidate as { fullName?: string }).fullName || ''));
           const firstName = String(candidate.firstName || fallbackName.firstName).trim();
           const lastName = String(candidate.lastName || fallbackName.lastName).trim();
 
-          if (!id || !email || !firstName) {
+          if (!id || (!email && !mobileNumber) || (!firstName && !lastName && !company)) {
             return null;
           }
 
@@ -2826,8 +2930,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
             lastName,
             address: candidate.address ? String(candidate.address).trim() : '',
             birthDate: candidate.birthDate ? String(candidate.birthDate).trim() : '',
-            mobileNumber: candidate.mobileNumber ? String(candidate.mobileNumber).trim() : '',
-            company: candidate.company ? String(candidate.company).trim() : '',
+            mobileNumber,
+            company,
             notes: candidate.notes ? String(candidate.notes).trim() : '',
             isFavorite: candidate.isFavorite === true,
             groupIds: Array.isArray(candidate.groupIds) ? candidate.groupIds.map((groupId) => String(groupId || '').trim()).filter(Boolean) : [],
@@ -2872,18 +2976,103 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     const payload: ContactsSnapshot = {
       contacts: nextContacts,
       groups: nextGroups,
+      ownerUserId: user.id,
+      ownerEmail: String(user.email || '').trim().toLowerCase(),
+      schemaVersion: 2,
+      updatedAt: new Date().toISOString(),
     };
 
     await AsyncStorage.setItem(getContactsStorageKey(user.id), JSON.stringify(payload));
+
+    if (isApiStorageEnabled()) {
+      const saveResult = await saveUserContactsSnapshot(user.id, payload);
+      if (!saveResult.success) {
+        console.warn('Unable to save contacts snapshot to backend', saveResult.error);
+      } else {
+        setContactsLastSyncedAt(payload.updatedAt || new Date().toISOString());
+      }
+    } else {
+      setContactsLastSyncedAt(payload.updatedAt || new Date().toISOString());
+    }
+
     setContacts(nextContacts);
     setContactGroups(nextGroups);
-  }, [user.id]);
+  }, [user.email, user.id]);
 
   const loadContacts = useCallback(async () => {
     setIsLoadingContacts(true);
     try {
-      const rawContacts = await AsyncStorage.getItem(getContactsStorageKey(user.id));
-      const snapshot = normalizeContactsSnapshot(rawContacts);
+      const primaryKey = getContactsStorageKey(user.id);
+      const rawContacts = await AsyncStorage.getItem(primaryKey);
+      let snapshot = normalizeContactsSnapshot(rawContacts);
+
+      if (isApiStorageEnabled()) {
+        const remoteSnapshotResult = await loadUserContactsSnapshot(user.id);
+        setContactsLastSyncedAt(remoteSnapshotResult?.updatedAt || null);
+        if (remoteSnapshotResult?.snapshot && typeof remoteSnapshotResult.snapshot === 'object') {
+          const remoteSnapshot = normalizeContactsSnapshot(JSON.stringify(remoteSnapshotResult.snapshot));
+          const localScore = (snapshot.contacts.length * 10) + snapshot.groups.length;
+          const remoteScore = (remoteSnapshot.contacts.length * 10) + remoteSnapshot.groups.length;
+
+          if (remoteScore > localScore) {
+            snapshot = remoteSnapshot;
+
+            const migratedPayload: ContactsSnapshot = {
+              contacts: snapshot.contacts,
+              groups: snapshot.groups,
+              ownerUserId: user.id,
+              ownerEmail: String(user.email || '').trim().toLowerCase(),
+              schemaVersion: 2,
+              updatedAt: new Date().toISOString(),
+            };
+            await AsyncStorage.setItem(primaryKey, JSON.stringify(migratedPayload));
+          }
+        }
+      }
+
+      if (!isApiStorageEnabled()) {
+        setContactsLastSyncedAt(snapshot.updatedAt || null);
+      }
+
+      if (!snapshot.contacts.length && !snapshot.groups.length) {
+        const allKeys = await AsyncStorage.getAllKeys();
+        const legacyKeys = allKeys.filter((key) => key.startsWith(CONTACTS_STORAGE_KEY_PREFIX) && key !== primaryKey);
+
+        if (legacyKeys.length) {
+          const normalizedEmail = String(user.email || '').trim().toLowerCase();
+          const prioritizedKeys = [
+            ...legacyKeys.filter((key) => normalizedEmail && key.toLowerCase().includes(normalizedEmail)),
+            ...legacyKeys.filter((key) => !normalizedEmail || !key.toLowerCase().includes(normalizedEmail)),
+          ];
+
+          const legacyEntries = await AsyncStorage.multiGet(prioritizedKeys);
+          let bestSnapshot: ContactsSnapshot | null = null;
+          let bestScore = 0;
+
+          legacyEntries.forEach(([, raw]) => {
+            const candidate = normalizeContactsSnapshot(raw);
+            const score = (candidate.contacts.length * 10) + candidate.groups.length;
+            if (score > bestScore) {
+              bestScore = score;
+              bestSnapshot = candidate;
+            }
+          });
+
+          if (bestSnapshot && (bestSnapshot.contacts.length || bestSnapshot.groups.length)) {
+            snapshot = bestSnapshot;
+            const migratedPayload: ContactsSnapshot = {
+              contacts: snapshot.contacts,
+              groups: snapshot.groups,
+              ownerUserId: user.id,
+              ownerEmail: normalizedEmail,
+              schemaVersion: 2,
+              updatedAt: new Date().toISOString(),
+            };
+            await AsyncStorage.setItem(primaryKey, JSON.stringify(migratedPayload));
+          }
+        }
+      }
+
       setContacts(snapshot.contacts);
       setContactGroups(snapshot.groups);
 
@@ -2902,7 +3091,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     } finally {
       setIsLoadingContacts(false);
     }
-  }, [user.id]);
+  }, [user.email, user.id]);
 
   const resetContactEditor = () => {
     setContactDraft(createEmptyContactDraft());
@@ -2931,6 +3120,129 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     setActiveSummaryContactId(null);
     setIsEditingContact(true);
   };
+
+  const mapDeviceContactToImportCandidate = useCallback((entry: {
+    id?: string;
+    name?: string;
+    firstName?: string;
+    lastName?: string;
+    emails?: Array<{ email?: string }>;
+    phoneNumbers?: Array<{ number?: string }>;
+    company?: string;
+    birthday?: { month?: number | null; day?: number | null; year?: number | null } | null;
+  }): DeviceContactImportCandidate | null => {
+    const rawName = String(entry.name || '').trim();
+    const derivedNameParts = splitNameParts(rawName);
+    const company = String(entry.company || '').trim();
+    const firstName = String(entry.firstName || '').trim() || derivedNameParts.firstName || company;
+    const lastName = String(entry.lastName || '').trim() || derivedNameParts.lastName;
+    const email = String(entry.emails?.[0]?.email || '').trim().toLowerCase();
+    const mobileNumber = formatPhoneNumberInput(String(entry.phoneNumbers?.[0]?.number || '').trim());
+    const birthDate = formatImportedBirthDate(entry.birthday);
+
+    if (!Boolean(firstName || lastName || company) || !Boolean(email || mobileNumber)) {
+      return null;
+    }
+
+    return {
+      id: String(entry.id || generateUUID()),
+      firstName,
+      lastName,
+      email,
+      mobileNumber,
+      company,
+      birthDate,
+    };
+  }, []);
+
+  const importDeviceContacts = useCallback(async (selectedContacts: DeviceContactImportCandidate[]) => {
+    if (!selectedContacts.length) {
+      setContactsMessage('No eligible iPhone contacts were selected for import.');
+      return;
+    }
+
+    const filteredContacts = selectedContacts.filter((entry) => !isImportCandidateAlreadySaved(entry));
+
+    if (!filteredContacts.length) {
+      setContactsMessage(selectedContacts.length === 1 ? 'That contact is already in your saved contacts.' : 'All eligible iPhone contacts are already added.');
+      return;
+    }
+
+    const timestamp = new Date().toISOString();
+    const nextContacts = [...contacts];
+
+    filteredContacts.forEach((entry) => {
+      nextContacts.push({
+        id: generateUUID(),
+        email: entry.email,
+        firstName: entry.firstName,
+        lastName: entry.lastName,
+        address: '',
+        birthDate: entry.birthDate,
+        mobileNumber: entry.mobileNumber,
+        company: entry.company,
+        notes: 'Imported from iPhone contacts.',
+        isFavorite: false,
+        groupIds: [],
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        deletedAt: null,
+      });
+    });
+
+    await persistContactsSnapshot(nextContacts, contactGroups);
+    setContactsMessage(filteredContacts.length === 1
+      ? `Imported ${getContactDisplayName(filteredContacts[0])}.`
+      : `Imported ${filteredContacts.length} iPhone contacts.`);
+  }, [contactGroups, contacts, isImportCandidateAlreadySaved, persistContactsSnapshot]);
+
+  const loadDeviceContactsForImport = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      setContactsMessage('Device contacts import is not supported in the web build. Use an iPhone or iPad app build.');
+      return;
+    }
+
+    setContactsMessage(null);
+    setShowDeviceContactsImportModal(false);
+    setIsLoadingDeviceContacts(true);
+    try {
+      const permission = await Contacts.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        setContactsMessage('Allow Contacts access on your iPhone to import contacts.');
+        return;
+      }
+
+      const selectedContact = await Contacts.presentContactPickerAsync();
+      if (!selectedContact) {
+        return;
+      }
+
+      const fullContact = selectedContact.id
+        ? await Contacts.getContactByIdAsync(String(selectedContact.id), [
+            Contacts.Fields.Name,
+            Contacts.Fields.FirstName,
+            Contacts.Fields.LastName,
+            Contacts.Fields.Emails,
+            Contacts.Fields.PhoneNumbers,
+            Contacts.Fields.Company,
+            Contacts.Fields.Birthday,
+          ])
+        : selectedContact;
+
+      const candidate = mapDeviceContactToImportCandidate(fullContact || selectedContact);
+      if (!candidate) {
+        setContactsMessage('That iPhone contact does not have an importable email or mobile phone number.');
+        return;
+      }
+
+      await importDeviceContacts([candidate]);
+    } catch (error) {
+      console.warn('Unable to load device contacts for import', error);
+      setContactsMessage('Unable to load iPhone contacts right now.');
+    } finally {
+      setIsLoadingDeviceContacts(false);
+    }
+  }, [importDeviceContacts, mapDeviceContactToImportCandidate]);
 
   const openEditContactEditor = (contact: AccountContact) => {
     const addressParts = parseAddressParts(contact.address || '');
@@ -3013,21 +3325,22 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     }).trim();
     const normalizedBirthDate = contactDraft.birthDate.trim();
     const normalizedMobile = contactDraft.mobileNumber.trim();
+    const normalizedMobileDigits = normalizePhoneDigits(normalizedMobile);
     const normalizedCompany = contactDraft.company.trim();
     const normalizedNotes = contactDraft.notes.trim();
 
-    if (!validateEmail(normalizedEmail)) {
+    if (!normalizedEmail && !normalizedMobile) {
+      setContactsMessage('Enter at least an email address or mobile phone number.');
+      return;
+    }
+
+    if (normalizedEmail && !validateEmail(normalizedEmail)) {
       setContactsMessage('Enter a valid contact email address.');
       return;
     }
 
-    if (!normalizedFirstName) {
-      setContactsMessage('Enter a contact first name.');
-      return;
-    }
-
-    if (!normalizedLastName) {
-      setContactsMessage('Enter a contact last name.');
+    if (!normalizedFirstName && !normalizedLastName) {
+      setContactsMessage('Enter at least a first name or last name.');
       return;
     }
 
@@ -3048,13 +3361,16 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     }
 
     const duplicate = contacts.find((entry) => (
-      entry.email.toLowerCase() === normalizedEmail
-      && entry.id !== editingContactId
+      entry.id !== editingContactId
       && !entry.deletedAt
+      && (
+        (normalizedEmail && entry.email.toLowerCase() === normalizedEmail)
+        || (normalizedMobileDigits && normalizePhoneDigits(entry.mobileNumber || '') === normalizedMobileDigits)
+      )
     ));
 
     if (duplicate) {
-      setContactsMessage('A contact with this email already exists.');
+      setContactsMessage('A contact with this email or mobile phone already exists.');
       return;
     }
 
@@ -3584,8 +3900,16 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         </View>
       ) : null}
 
-      {showDeleteConfirm ? (
-        <View style={styles.modalOverlay}>
+      <Modal
+        transparent
+        visible={showDeleteConfirm}
+        animationType="fade"
+        onRequestClose={() => {
+          setShowDeleteConfirm(false);
+          setMessage(null);
+        }}
+      >
+        <View style={[styles.modalOverlay, styles.deleteModalOverlay]}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Delete account</Text>
             <Text style={styles.deleteHint}>This removes your account, events, and reminders permanently.</Text>
@@ -3605,7 +3929,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
             </View>
           </View>
         </View>
-      ) : null}
+      </Modal>
 
       {showMobileVerificationModal ? (
         <View style={styles.modalOverlay}>
@@ -3670,6 +3994,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
               <View style={styles.accountHeaderTextWrap}>
                 <Text style={styles.accountTitle}>Contacts</Text>
                 <Text style={styles.accountSubtitle}>Manage your contacts, favorites, deleted, and groups.</Text>
+                <Text style={styles.contactsSyncMarker}>{contactsLastSyncedLabel}</Text>
               </View>
             </View>
             <TouchableOpacity style={styles.secondaryButton} onPress={() => setShowContactsModal(false)}>
@@ -3875,6 +4200,13 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                       <Text style={styles.secondaryButtonText}>New</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
+                      style={[styles.secondaryButton, styles.contactsTopActionButton]}
+                      onPress={() => void loadDeviceContactsForImport()}
+                      disabled={isLoadingDeviceContacts}
+                    >
+                      <Text style={styles.secondaryButtonText}>{isLoadingDeviceContacts ? 'Loading…' : 'Import iPhone'}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
                       style={[
                         styles.secondaryButton,
                         styles.contactsTopActionButton,
@@ -3915,12 +4247,12 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                           onPress={() => setActiveSummaryContactId(contact.id)}
                           activeOpacity={0.8}
                         >
-                          <Text style={styles.contactsSummaryRowText} numberOfLines={1}>{`${`${contact.firstName} ${contact.lastName}`.trim()} - ${contact.email}`}</Text>
+                          <Text style={styles.contactsSummaryRowText} numberOfLines={1}>{`${getContactDisplayName(contact)} - ${getContactPrimaryChannelLabel(contact)}`}</Text>
                         </TouchableOpacity>
                       ) : (
                         <View key={contact.id} style={styles.contactRowCard}>
-                          <Text style={styles.contactRowName}>{`${contact.firstName} ${contact.lastName}`.trim()}</Text>
-                          <Text style={styles.contactRowMeta}>{contact.email}</Text>
+                          <Text style={styles.contactRowName}>{getContactDisplayName(contact)}</Text>
+                          {contact.email ? <Text style={styles.contactRowMeta}>{contact.email}</Text> : null}
                           {contact.mobileNumber ? <Text style={styles.contactRowMeta}>{contact.mobileNumber}</Text> : null}
                           {contact.company ? <Text style={styles.contactRowMeta}>{`Company: ${contact.company}`}</Text> : null}
                           {contact.birthDate ? <Text style={styles.contactRowMeta}>{`Birth date: ${contact.birthDate}`}</Text> : null}
@@ -4099,7 +4431,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                         >
                           <Picker.Item label="Select contact" value="" />
                           {contactsAvailableForSelectedGroup.map((entry) => (
-                            <Picker.Item key={entry.id} label={`${entry.firstName} ${entry.lastName} (${entry.email})`} value={entry.id} />
+                            <Picker.Item key={entry.id} label={`${getContactDisplayName(entry)} (${getContactPrimaryChannelLabel(entry)})`} value={entry.id} />
                           ))}
                         </Picker>
                       </View>
@@ -4115,7 +4447,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                   {selectedGroupMembers.length ? selectedGroupMembers.map((entry) => (
                     <View key={entry.id} style={styles.contactRowCard}>
                       <View style={styles.groupMemberHeaderRow}>
-                        <Text style={styles.contactRowName}>{`${entry.firstName} ${entry.lastName}`.trim()}</Text>
+                        <Text style={styles.contactRowName}>{getContactDisplayName(entry)}</Text>
                         <TouchableOpacity
                           style={styles.secondaryButton}
                           onPress={() => void removeContactFromSelectedGroup(entry.id)}
@@ -4123,7 +4455,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                           <Text style={styles.secondaryButtonText}>Remove</Text>
                         </TouchableOpacity>
                       </View>
-                      <Text style={styles.contactRowMeta}>{entry.email}</Text>
+                      <Text style={styles.contactRowMeta}>{getContactPrimaryChannelLabel(entry)}</Text>
                     </View>
                   )) : <Text style={styles.contactsEmptySubtext}>No members in this group yet.</Text>}
                 </View>
@@ -4148,8 +4480,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                   <Text style={styles.sectionTitle}>Members</Text>
                   {activeSummaryGroupMembers.length ? activeSummaryGroupMembers.map((member) => (
                     <View key={member.id} style={styles.groupSummaryMemberRow}>
-                      <Text style={styles.contactRowName}>{`${member.firstName} ${member.lastName}`.trim()}</Text>
-                      <Text style={styles.contactRowMeta}>{member.email}</Text>
+                      <Text style={styles.contactRowName}>{getContactDisplayName(member)}</Text>
+                      <Text style={styles.contactRowMeta}>{getContactPrimaryChannelLabel(member)}</Text>
                     </View>
                   )) : <Text style={styles.contactsEmptySubtext}>No members in this group yet.</Text>}
                 </View>
@@ -4173,75 +4505,142 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
             </View>
           ) : null}
 
-          {activeSummaryContact ? (
-            <View style={styles.modalOverlay}>
-              <View style={[styles.modalCard, styles.contactsSummaryModalCard]}>
-                <Text style={styles.modalTitle}>Contact Summary</Text>
+          <Modal
+            transparent
+            visible={activeSummaryContact !== null}
+            animationType="fade"
+            onRequestClose={() => setActiveSummaryContactId(null)}
+          >
+            <View style={[styles.modalOverlay, styles.contactSummaryModalOverlay]}>
+              {activeSummaryContact ? (
+                <View style={[styles.modalCard, styles.contactsSummaryModalCard]}>
+                  <Text style={styles.modalTitle}>Contact Summary</Text>
 
-                <View style={styles.contactsSummaryDetailsCard}>
-                  <Text style={styles.contactRowName}>{`${activeSummaryContact.firstName} ${activeSummaryContact.lastName}`.trim()}</Text>
-                  <Text style={styles.contactRowMeta}>{activeSummaryContact.email}</Text>
-                  {activeSummaryContact.mobileNumber ? <Text style={styles.contactRowMeta}>{activeSummaryContact.mobileNumber}</Text> : null}
-                  {activeSummaryContact.company ? <Text style={styles.contactRowMeta}>{`Company: ${activeSummaryContact.company}`}</Text> : null}
-                  {activeSummaryContact.birthDate ? <Text style={styles.contactRowMeta}>{`Birth date: ${activeSummaryContact.birthDate}`}</Text> : null}
-                  {activeSummaryContact.address ? <Text style={styles.contactRowMeta}>{`Address: ${activeSummaryContact.address}`}</Text> : null}
-                  {activeSummaryContact.notes ? <Text style={styles.contactRowMeta}>{`Notes: ${activeSummaryContact.notes}`}</Text> : null}
+                  <View style={styles.contactsSummaryDetailsCard}>
+                    <Text style={styles.contactRowName}>{getContactDisplayName(activeSummaryContact)}</Text>
+                    <Text style={styles.contactRowMeta}>{getContactPrimaryChannelLabel(activeSummaryContact)}</Text>
+                    {activeSummaryContact.company ? <Text style={styles.contactRowMeta}>{`Company: ${activeSummaryContact.company}`}</Text> : null}
+                    {activeSummaryContact.birthDate ? <Text style={styles.contactRowMeta}>{`Birth date: ${activeSummaryContact.birthDate}`}</Text> : null}
+                    {activeSummaryContact.address ? <Text style={styles.contactRowMeta}>{`Address: ${activeSummaryContact.address}`}</Text> : null}
+                    {activeSummaryContact.notes ? <Text style={styles.contactRowMeta}>{`Notes: ${activeSummaryContact.notes}`}</Text> : null}
+                  </View>
+
+                  <View style={styles.modalActionsRow}>
+                    {activeSummaryContact.deletedAt ? (
+                      <>
+                        <TouchableOpacity
+                          style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
+                          onPress={() => void restoreDeletedContact(activeSummaryContact.id)}
+                        >
+                          <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Restore</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.deleteButton, styles.contactsSummaryActionButton]}
+                          onPress={() => void permanentlyDeleteContact(activeSummaryContact.id)}
+                        >
+                          <Text style={styles.deleteButtonText} numberOfLines={1}>Delete forever</Text>
+                        </TouchableOpacity>
+                      </>
+                    ) : (
+                      <>
+                        <TouchableOpacity
+                          style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
+                          onPress={() => {
+                            openEditContactEditor(activeSummaryContact);
+                            setActiveSummaryContactId(null);
+                          }}
+                        >
+                          <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Edit</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
+                          onPress={() => void toggleFavoriteContact(activeSummaryContact.id)}
+                        >
+                          <Text style={styles.contactsSummaryActionText} numberOfLines={1}>{activeSummaryContact.isFavorite ? 'Unfavorite' : 'Favorite'}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.deleteButton, styles.contactsSummaryActionButton]}
+                          onPress={() => {
+                            void softDeleteContact(activeSummaryContact.id);
+                            setActiveSummaryContactId(null);
+                          }}
+                        >
+                          <Text style={styles.deleteButtonText} numberOfLines={1}>Delete</Text>
+                        </TouchableOpacity>
+                      </>
+                    )}
+                    <TouchableOpacity
+                      style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
+                      onPress={() => setActiveSummaryContactId(null)}
+                    >
+                      <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Close</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
+              ) : null}
+            </View>
+          </Modal>
 
-                <View style={styles.modalActionsRow}>
-                  {activeSummaryContact.deletedAt ? (
-                    <>
-                      <TouchableOpacity
-                        style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
-                        onPress={() => void restoreDeletedContact(activeSummaryContact.id)}
-                      >
-                        <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Restore</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.deleteButton, styles.contactsSummaryActionButton]}
-                        onPress={() => void permanentlyDeleteContact(activeSummaryContact.id)}
-                      >
-                        <Text style={styles.deleteButtonText} numberOfLines={1}>Delete forever</Text>
-                      </TouchableOpacity>
-                    </>
-                  ) : (
-                    <>
-                      <TouchableOpacity
-                        style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
-                        onPress={() => {
-                          openEditContactEditor(activeSummaryContact);
-                          setActiveSummaryContactId(null);
-                        }}
-                      >
-                        <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Edit</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
-                        onPress={() => void toggleFavoriteContact(activeSummaryContact.id)}
-                      >
-                        <Text style={styles.contactsSummaryActionText} numberOfLines={1}>{activeSummaryContact.isFavorite ? 'Unfavorite' : 'Favorite'}</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.deleteButton, styles.contactsSummaryActionButton]}
-                        onPress={() => {
-                          void softDeleteContact(activeSummaryContact.id);
-                          setActiveSummaryContactId(null);
-                        }}
-                      >
-                        <Text style={styles.deleteButtonText} numberOfLines={1}>Delete</Text>
-                      </TouchableOpacity>
-                    </>
-                  )}
+          <Modal
+            transparent
+            visible={showDeviceContactsImportModal}
+            animationType="fade"
+            onRequestClose={() => setShowDeviceContactsImportModal(false)}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, styles.deviceContactsImportModalCard]}>
+                <Text style={styles.modalTitle}>Import iPhone Contacts</Text>
+                <Text style={styles.deleteHint}>Select any iPhone contact below to import it immediately, or use Add all to import every eligible contact at once.</Text>
+
+                <View style={styles.contactsTopActions}>
                   <TouchableOpacity
-                    style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
-                    onPress={() => setActiveSummaryContactId(null)}
+                    style={[
+                      styles.primaryButton,
+                      styles.contactsTopActionButton,
+                      importableDeviceContactsCount === 0 && styles.primaryButtonDisabled,
+                    ]}
+                    onPress={() => void importDeviceContacts(deviceContactsToImport)}
+                    disabled={importableDeviceContactsCount === 0}
                   >
-                    <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Close</Text>
+                    <Text style={styles.primaryButtonText}>Add all</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.secondaryButton, styles.contactsTopActionButton]}
+                    onPress={() => setShowDeviceContactsImportModal(false)}
+                  >
+                    <Text style={styles.secondaryButtonText}>Close</Text>
                   </TouchableOpacity>
                 </View>
+
+                {deviceContactsImportRows.length ? (
+                  <ScrollView style={styles.contactsList} contentContainerStyle={styles.contactsListContent} keyboardShouldPersistTaps="handled">
+                    {deviceContactsImportRows.map((entry) => (
+                      <View key={entry.id} style={styles.contactRowCard}>
+                        <Text style={styles.contactRowName}>{getContactDisplayName(entry)}</Text>
+                        <Text style={styles.contactRowMeta}>{getContactPrimaryChannelLabel(entry)}</Text>
+                        {entry.company ? <Text style={styles.contactRowMeta}>{`Company: ${entry.company}`}</Text> : null}
+                        <View style={styles.contactsCardActionsRow}>
+                          <TouchableOpacity
+                            style={[
+                              styles.primaryButton,
+                              styles.contactInlineActionButton,
+                              entry.alreadyAdded && styles.primaryButtonDisabled,
+                            ]}
+                            onPress={() => void importDeviceContacts([entry])}
+                            disabled={entry.alreadyAdded}
+                          >
+                            <Text style={styles.primaryButtonText}>{entry.alreadyAdded ? 'Added' : 'Add'}</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))}
+                  </ScrollView>
+                ) : (
+                  <Text style={styles.contactsEmptySubtext}>No iPhone contacts are available to import.</Text>
+                )}
               </View>
             </View>
-          ) : null}
+          </Modal>
 
         </View>
       ) : null}
@@ -4518,7 +4917,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                 <Text style={styles.deliveryVerificationHint}>
                   {isMobileNumberVerified
                     ? 'Mobile phone is validated for text reminders.'
-                    : 'Mobile phone is not validated for text reminders. Enabling Text will send a verification code.'}
+                    : 'Mobile phone is not validated for text reminders. Enabling text will send an SMS Opt In message.'}
                 </Text>
 
                 <TouchableOpacity style={styles.preferenceToggleRow} onPress={handleReminderSoundOffToggle} activeOpacity={0.8}>
@@ -5654,6 +6053,11 @@ const styles = StyleSheet.create({
     color: '#64748b',
     marginTop: 2,
   },
+  contactsSyncMarker: {
+    color: '#94a3b8',
+    marginTop: 2,
+    fontSize: 11,
+  },
   sectionTitle: {
     fontSize: 16,
     fontWeight: '700',
@@ -5701,6 +6105,10 @@ const styles = StyleSheet.create({
   },
   contactsModalCard: {
     maxWidth: 980,
+  },
+  deviceContactsImportModalCard: {
+    maxWidth: 560,
+    maxHeight: '80%',
   },
   contactsStandalonePanel: {
     width: '100%',
@@ -5812,6 +6220,10 @@ const styles = StyleSheet.create({
   },
   contactsSummaryModalCard: {
     maxWidth: 560,
+  },
+  contactSummaryModalOverlay: {
+    paddingTop: 110,
+    paddingBottom: 50,
   },
   contactsSummaryActionButton: {
     flex: 1,
@@ -6302,6 +6714,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 20,
     zIndex: 10,
+  },
+  deleteModalOverlay: {
+    paddingTop: 120,
+    paddingBottom: 40,
   },
   modalCard: {
     width: '100%',
