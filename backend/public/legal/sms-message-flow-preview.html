@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Remind Me This SMS Message Flow Preview</title>
+    <style>
+      :root {
+        --bg-top: #f2f7ff;
+        --bg-bottom: #e9eef8;
+        --frame: #f7f9fc;
+        --frame-border: rgba(15, 23, 42, 0.12);
+        --ink: #0f172a;
+        --muted: #64748b;
+        --bubble-in: #eef2f7;
+        --bubble-out: #d8f4d2;
+        --brand: #1d4ed8;
+        --brand-soft: rgba(29, 78, 216, 0.12);
+        --divider: rgba(100, 116, 139, 0.16);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at top left, rgba(29, 78, 216, 0.15), transparent 34%),
+          radial-gradient(circle at bottom right, rgba(37, 99, 235, 0.12), transparent 28%),
+          linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+        color: var(--ink);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      }
+
+      .phone {
+        width: 420px;
+        padding: 14px;
+        border-radius: 40px;
+        background: rgba(255, 255, 255, 0.9);
+        border: 1px solid var(--frame-border);
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+        overflow: hidden;
+      }
+
+      .screen {
+        width: 100%;
+        height: 100%;
+        border-radius: 30px;
+        overflow: hidden;
+        background: linear-gradient(180deg, #fbfdff, #f3f7fc 52%, #edf2f9);
+        border: 1px solid rgba(148, 163, 184, 0.14);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .status-bar {
+        height: 52px;
+        padding: 12px 16px 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: #0f172a;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+
+      .status-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #0f172a;
+      }
+
+      .dot-set {
+        display: flex;
+        gap: 4px;
+      }
+
+      .dot {
+        width: 5px;
+        height: 5px;
+        border-radius: 999px;
+        background: #0f172a;
+        opacity: 0.85;
+      }
+
+      .header {
+        padding: 14px 16px 16px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        border-bottom: 1px solid var(--divider);
+        background: rgba(255, 255, 255, 0.7);
+        backdrop-filter: blur(10px);
+      }
+
+      .avatar {
+        width: 42px;
+        height: 42px;
+        border-radius: 14px;
+        background: linear-gradient(145deg, #2563eb, #1d4ed8);
+        color: white;
+        display: grid;
+        place-items: center;
+        font-size: 18px;
+        font-weight: 700;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+      }
+
+      .title-wrap {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .title {
+        margin: 0;
+        font-size: 20px;
+        line-height: 1.08;
+        font-weight: 700;
+      }
+
+      .subtitle {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .thread {
+        flex: 1;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        overflow: hidden;
+      }
+
+      .date-pill {
+        align-self: center;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.05);
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 600;
+      }
+
+      .row {
+        display: flex;
+        align-items: flex-end;
+        gap: 10px;
+      }
+
+      .row.incoming {
+        justify-content: flex-start;
+      }
+
+      .row.outgoing {
+        justify-content: flex-end;
+      }
+
+      .bubble {
+        max-width: 344px;
+        padding: 16px 18px;
+        border-radius: 24px;
+        font-size: 15px;
+        line-height: 1.36;
+        letter-spacing: -0.01em;
+        box-shadow: 0 10px 20px rgba(15, 23, 42, 0.07);
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+
+      .bubble.incoming {
+        background: var(--bubble-in);
+        border-top-left-radius: 10px;
+      }
+
+      .bubble.outgoing {
+        background: var(--bubble-out);
+        border-top-right-radius: 10px;
+      }
+
+      .label {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--brand);
+        margin-bottom: 6px;
+      }
+
+      .bubble div {
+        word-break: break-word;
+      }
+
+      .footer {
+        padding: 0 16px 14px;
+        color: var(--muted);
+        font-size: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .footer strong {
+        color: var(--ink);
+      }
+
+      .brand-chip {
+        padding: 5px 10px;
+        border-radius: 999px;
+        background: var(--brand-soft);
+        color: var(--brand);
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="phone" id="app"></div>
+
+    <script>
+      const messages = {
+        invite: {
+          title: 'Remind Me This',
+          subtitle: 'SMS opt-in invite',
+          date: 'Today',
+          footer: 'Initial consent message sent from Remind Me This',
+          thread: [
+            {
+              type: 'incoming',
+              label: 'Remind Me This',
+              text: 'Reply YES to receive reminder text messages from Remind Me This. Message frequency varies. Msg & data rates may apply. Reply STOP to opt out or HELP for help. By replying YES, you agree to our Terms of Service: https://remindmethis.onrender.com/legal/terms-of-service and Privacy Policy: https://remindmethis.onrender.com/legal/privacy-policy.'
+            }
+          ]
+        },
+        yes: {
+          title: 'Remind Me This',
+          subtitle: 'Y reply flow',
+          date: 'Today',
+          footer: 'Consent confirmed after the user replies Y',
+          thread: [
+            {
+              type: 'outgoing',
+              text: 'Y'
+            },
+            {
+              type: 'incoming',
+              label: 'Remind Me This',
+              text: 'You are now opted in to receive reminder text messages. Message frequency varies. Msg & data rates may apply. Reply STOP to opt out or HELP for help. Terms: https://remindmethis.onrender.com/legal/terms-of-service Privacy: https://remindmethis.onrender.com/legal/privacy-policy'
+            }
+          ]
+        },
+        no: {
+          title: 'Remind Me This',
+          subtitle: 'N reply flow',
+          date: 'Today',
+          footer: 'No subscription created after the user replies N',
+          thread: [
+            {
+              type: 'outgoing',
+              text: 'N'
+            },
+            {
+              type: 'incoming',
+              label: 'Remind Me This',
+              text: 'You have not been subscribed to Remind Me This text messages. No further messages will be sent. If you change your mind later, reply YES to the original message. Privacy: https://remindmethis.onrender.com/legal/privacy-policy Terms: https://remindmethis.onrender.com/legal/terms-of-service'
+            }
+          ]
+        },
+        stop: {
+          title: 'Remind Me This',
+          subtitle: 'STOP reply flow',
+          date: 'Today',
+          footer: 'Opt-out confirmation after the user replies STOP',
+          thread: [
+            {
+              type: 'outgoing',
+              text: 'STOP'
+            },
+            {
+              type: 'incoming',
+              label: 'Remind Me This',
+              text: 'You have been opted out and will no longer receive reminder text messages. No further messages will be sent. If this was a mistake, reply YES to opt in again. Help: reminderagentbot@gmail.com'
+            }
+          ]
+        }
+      };
+
+      const flow = new URLSearchParams(location.search).get('flow') || 'invite';
+      const config = messages[flow] || messages.invite;
+
+      const app = document.getElementById('app');
+      app.innerHTML = `
+        <div class="screen">
+          <div class="status-bar">
+            <div>9:41</div>
+            <div class="status-right">
+              <div class="dot-set" aria-hidden="true">
+                <span class="dot"></span>
+                <span class="dot"></span>
+                <span class="dot"></span>
+                <span class="dot"></span>
+              </div>
+              <div>5G</div>
+              <div>▮▮▮</div>
+            </div>
+          </div>
+
+          <div class="header">
+            <div class="avatar">R</div>
+            <div class="title-wrap">
+              <h1 class="title">${config.title}</h1>
+              <div class="subtitle">${config.subtitle}</div>
+            </div>
+          </div>
+
+          <div class="thread">
+            <div class="date-pill">${config.date}</div>
+            ${config.thread
+              .map((item) => {
+                const incoming = item.type === 'incoming';
+                const label = item.label ? `<div class="label">${item.label}</div>` : '';
+                return `
+                  <div class="row ${incoming ? 'incoming' : 'outgoing'}">
+                    <div class="bubble ${incoming ? 'incoming' : 'outgoing'}">
+                      ${label}
+                      <div>${item.text}</div>
+                    </div>
+                  </div>
+                `;
+              })
+              .join('')}
+          </div>
+
+          <div class="footer">
+            <div><strong>Remind Me This</strong> SMS preview</div>
+            <div class="brand-chip">Public proof asset</div>
+          </div>
+        </div>
+      `;
+    </script>
+  </body>
+</html>
