@@ -257,6 +257,34 @@ const smsProvider: SmsProvider = (() => {
 
 const normalizePhoneNumberForComparison = (value: string) => String(value || '').replace(/\D/g, '').slice(0, 10);
 
+const getSafeTimeZone = (value?: string) => {
+  const candidate = String(value || '').trim();
+  if (!candidate) {
+    return undefined;
+  }
+
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return undefined;
+  }
+};
+
+const getEventDateTimeLabels = (eventDateTime: string, eventAllDay: boolean, eventTimeZone?: string) => {
+  const eventAt = new Date(eventDateTime);
+  const safeTimeZone = getSafeTimeZone(eventTimeZone);
+  const dateOptions = safeTimeZone ? { timeZone: safeTimeZone } : undefined;
+  const timeOptions = safeTimeZone
+    ? { hour: 'numeric', minute: '2-digit', timeZone: safeTimeZone }
+    : { hour: 'numeric', minute: '2-digit' };
+
+  return {
+    eventDateLabel: eventAt.toLocaleDateString(undefined, dateOptions),
+    eventTimeLabel: eventAllDay ? null : eventAt.toLocaleTimeString(undefined, timeOptions),
+  };
+};
+
 const isMobileNumberVerified = (user: {
   mobileNumber: string | null;
   mobileNumberVerifiedAt: Date | null;
@@ -307,12 +335,15 @@ const sendReminderEmail = async (email: string, payload: {
   people: string;
   eventDateTime: string;
   eventAllDay: boolean;
+  eventTimeZone?: string;
   reminderDateTime: string;
   notes?: string;
 }) => {
-  const eventAt = new Date(payload.eventDateTime);
-  const eventDateLabel = eventAt.toLocaleDateString();
-  const eventTimeLabel = eventAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const { eventDateLabel, eventTimeLabel } = getEventDateTimeLabels(
+    payload.eventDateTime,
+    payload.eventAllDay,
+    payload.eventTimeZone,
+  );
   const subject = `Reminder: ${payload.eventTitle}`;
   const textBody = [
     'Special Date Reminder notification',
@@ -320,7 +351,7 @@ const sendReminderEmail = async (email: string, payload: {
     `Event: ${payload.eventTitle}`,
     `Who/What: ${payload.people}`,
     `Event date: ${eventDateLabel}`,
-    ...(!payload.eventAllDay ? [`Event time: ${eventTimeLabel}`] : []),
+    ...(eventTimeLabel ? [`Event time: ${eventTimeLabel}`] : []),
     payload.notes ? `Notes: ${payload.notes}` : null,
     '',
     'Automated message, please do not reply.',
@@ -331,7 +362,7 @@ const sendReminderEmail = async (email: string, payload: {
     <p><strong>Event:</strong> ${payload.eventTitle}</p>
     <p><strong>Who/What:</strong> ${payload.people}</p>
     <p><strong>Event date:</strong> ${eventDateLabel}</p>
-    ${!payload.eventAllDay ? `<p><strong>Event time:</strong> ${eventTimeLabel}</p>` : ''}
+    ${eventTimeLabel ? `<p><strong>Event time:</strong> ${eventTimeLabel}</p>` : ''}
     ${payload.notes ? `<p><strong>Notes:</strong> ${payload.notes}</p>` : ''}
     <p>Automated message, please do not reply.</p>
   `;
@@ -359,17 +390,20 @@ const sendReminderSms = async (phoneNumber: string, payload: {
   people: string;
   eventDateTime: string;
   eventAllDay: boolean;
+  eventTimeZone?: string;
   notes?: string;
 }) => {
-  const eventAt = new Date(payload.eventDateTime);
-  const eventDateLabel = eventAt.toLocaleDateString();
-  const eventTimeLabel = eventAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const { eventDateLabel, eventTimeLabel } = getEventDateTimeLabels(
+    payload.eventDateTime,
+    payload.eventAllDay,
+    payload.eventTimeZone,
+  );
 
   const messageLines = [
     `Reminder: ${payload.eventTitle}`,
     `Who/What: ${payload.people}`,
     `Event date: ${eventDateLabel}`,
-    ...(!payload.eventAllDay ? [`Event time: ${eventTimeLabel}`] : []),
+    ...(eventTimeLabel ? [`Event time: ${eventTimeLabel}`] : []),
     payload.notes ? `Notes: ${payload.notes}` : null,
     'Automated message, please do not reply.',
   ].filter(Boolean) as string[];
@@ -677,6 +711,7 @@ const processReminderQueue = async () => {
             people: job.event.people,
             eventDateTime: job.event.eventDateTime.toISOString(),
             eventAllDay: Boolean(job.event.eventAllDay),
+            eventTimeZone: job.event.reminderTimeZone || undefined,
             reminderDateTime: job.scheduledFor.toISOString(),
             notes: job.eventReminder?.notes || job.event.notes || undefined,
           });
@@ -690,6 +725,7 @@ const processReminderQueue = async () => {
             people: job.event.people,
             eventDateTime: job.event.eventDateTime.toISOString(),
             eventAllDay: Boolean(job.event.eventAllDay),
+            eventTimeZone: job.event.reminderTimeZone || undefined,
             notes: job.eventReminder?.notes || job.event.notes || undefined,
           });
         } else {
@@ -1790,6 +1826,7 @@ app.post('/notifications/reminder-email', async (req, res) => {
       people,
       eventDateTime,
       eventAllDay,
+      reminderTimeZone,
       reminderDateTime,
       notes,
     } = req.body ?? {};
@@ -1814,6 +1851,7 @@ app.post('/notifications/reminder-email', async (req, res) => {
       people: String(people),
       eventDateTime: String(eventDateTime),
       eventAllDay: Boolean(eventAllDay),
+      eventTimeZone: reminderTimeZone ? String(reminderTimeZone) : undefined,
       reminderDateTime: String(reminderDateTime),
       notes: notes ? String(notes) : undefined,
     });
@@ -1952,6 +1990,7 @@ app.post('/notifications/reminder-sms', async (req, res) => {
       people,
       eventDateTime,
       eventAllDay,
+      reminderTimeZone,
       notes,
     } = req.body ?? {};
 
@@ -1975,6 +2014,7 @@ app.post('/notifications/reminder-sms', async (req, res) => {
       people: String(people),
       eventDateTime: String(eventDateTime),
       eventAllDay: Boolean(eventAllDay),
+      eventTimeZone: reminderTimeZone ? String(reminderTimeZone) : undefined,
       notes: notes ? String(notes) : undefined,
     });
 
