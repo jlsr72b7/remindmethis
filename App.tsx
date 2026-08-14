@@ -5,6 +5,7 @@ import {
   Alert,
   Animated,
   Image,
+  KeyboardAvoidingView,
   Linking,
   Modal,
   Platform,
@@ -55,12 +56,14 @@ import {
   resetPassword,
   resendVerificationEmail,
   signInUser,
+  startMobileVerification,
   StoredUser,
   updateUserProfile,
   validateBirthDate,
   validateEmail,
   validatePassword,
   validatePhoneNumber,
+  verifyMobileVerificationCode,
   type GoogleAddressPrediction,
 } from './src/storage';
 import { getDeviceTimeZone, TIME_ZONE_OPTIONS } from './src/timeZones';
@@ -307,6 +310,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
   const [email, setEmail] = useState('');
   const [birthDate, setBirthDate] = useState('');
   const [mobileNumber, setMobileNumber] = useState('');
+  const [signupSmsConsent, setSignupSmsConsent] = useState<'Y' | 'N' | ''>('');
   const [streetAddress, setStreetAddress] = useState('');
   const [addressLine2, setAddressLine2] = useState('');
   const [city, setCity] = useState('');
@@ -409,6 +413,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
   useEffect(() => {
     if (mode !== 'signup') {
       setHasAcceptedUserAgreement(false);
+      setSignupSmsConsent('');
     }
   }, [mode]);
 
@@ -555,6 +560,11 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
         return;
       }
 
+      if (signupSmsConsent !== 'Y' && signupSmsConsent !== 'N') {
+        setMessage('Please choose Y or N for SMS reminders consent.');
+        return;
+      }
+
       const passwordError = validatePassword(password);
       if (passwordError) {
         setMessage(passwordError);
@@ -570,7 +580,15 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
       const address = '';
 
       setIsSubmitting(true);
-      const result = await createUser(email.trim().toLowerCase(), password, mobileNumber.trim(), fullName, address, birthDate.trim());
+      const result = await createUser(
+        email.trim().toLowerCase(),
+        password,
+        mobileNumber.trim(),
+        fullName,
+        address,
+        birthDate.trim(),
+        signupSmsConsent === 'Y',
+      );
       setIsSubmitting(false);
 
       if (result.error) {
@@ -590,6 +608,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
       setPassword('');
       setConfirmPassword('');
       setMobileNumber('');
+      setSignupSmsConsent('');
       setHasAcceptedUserAgreement(false);
       setSuccessMessage(
         result.message
@@ -828,6 +847,55 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
                     keyboardType="number-pad"
                     maxLength={10}
                   />
+                </View>
+              </View>
+
+              <View style={styles.signupSmsConsentBlock}>
+                <Text style={styles.fieldLabel}>SMS reminders consent *</Text>
+                <Text style={styles.authAgreementText}>
+                  Remind Me This: Would you like to receive reminder text messages for your account?
+                </Text>
+                <Text style={styles.signupSmsConsentHint}>
+                  Reply choice in app: Y for Yes or N for No. Msg frequency varies. Msg and data rates may apply. Reply STOP to cancel, HELP for help.
+                </Text>
+                <View style={styles.signupSmsConsentActions}>
+                  <TouchableOpacity
+                    style={[
+                      styles.signupSmsConsentButton,
+                      signupSmsConsent === 'Y' ? styles.signupSmsConsentButtonSelected : null,
+                    ]}
+                    onPress={() => {
+                      setSignupSmsConsent('Y');
+                      if (message) {
+                        setMessage(null);
+                      }
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[
+                      styles.signupSmsConsentButtonText,
+                      signupSmsConsent === 'Y' ? styles.signupSmsConsentButtonTextSelected : null,
+                    ]}>Y</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.signupSmsConsentButton,
+                      signupSmsConsent === 'N' ? styles.signupSmsConsentButtonSelected : null,
+                    ]}
+                    onPress={() => {
+                      setSignupSmsConsent('N');
+                      if (message) {
+                        setMessage(null);
+                      }
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[
+                      styles.signupSmsConsentButtonText,
+                      signupSmsConsent === 'N' ? styles.signupSmsConsentButtonTextSelected : null,
+                    ]}>N</Text>
+                  </TouchableOpacity>
                 </View>
               </View>
             </>
@@ -1116,6 +1184,11 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [isSendingContactSupport, setIsSendingContactSupport] = useState(false);
   const [deliveryDevice, setDeliveryDevice] = useState(true);
   const [deliveryEmail, setDeliveryEmail] = useState(false);
+  const [deliveryText, setDeliveryText] = useState(false);
+  const [isMobileNumberVerified, setIsMobileNumberVerified] = useState(Boolean(user.mobileNumberVerified));
+  const [showMobileVerificationModal, setShowMobileVerificationModal] = useState(false);
+  const [mobileVerificationCode, setMobileVerificationCode] = useState('');
+  const [isMobileVerificationSubmitting, setIsMobileVerificationSubmitting] = useState(false);
   const [activeAccountAction, setActiveAccountAction] = useState<AccountAction>('profile');
   const activeContacts = useMemo(() => contacts.filter((entry) => !entry.deletedAt), [contacts]);
   const favoriteContacts = useMemo(() => activeContacts.filter((entry) => entry.isFavorite), [activeContacts]);
@@ -1422,6 +1495,10 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   }, [appleCalendarId, appleCalendarName, isAppleConfigured, isAppleLocalSyncSupported]);
 
   useEffect(() => {
+    setIsMobileNumberVerified(Boolean(user.mobileNumberVerified));
+  }, [user.mobileNumberVerified]);
+
+  useEffect(() => {
     (async () => {
       try {
         const settings = await loadReminderSoundSettings(user.id);
@@ -1435,10 +1512,12 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         const delivery = await loadReminderDeliverySettings(user.id);
         setDeliveryDevice(delivery.device);
         setDeliveryEmail(delivery.email);
+        setDeliveryText(delivery.text);
       } catch (error) {
         console.warn('Unable to load account reminder delivery settings', error);
         setDeliveryDevice(true);
         setDeliveryEmail(false);
+        setDeliveryText(false);
       }
 
       try {
@@ -1703,6 +1782,36 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
     setIsConnectingGoogle(true);
     try {
+      let googleAlreadyConnected = false;
+      try {
+        const currentStatus = await getGoogleConnectionStatus(user.id);
+        googleAlreadyConnected = currentStatus.connected === true;
+      } catch {
+        googleAlreadyConnected = false;
+      }
+
+      if (googleAlreadyConnected) {
+        if (saveAsConfigured) {
+          await saveCalendarSyncSettings(buildCalendarSyncSettings({
+            google: {
+              calendarId: normalizedGoogleId,
+              permission: 'write',
+              syncPaused: false,
+            },
+          }), user.id);
+
+          setCalendarSyncProviderDraft('google');
+          setGoogleCalendarId(normalizedGoogleId);
+          setGoogleCalendarIdDraft(normalizedGoogleId);
+          setIsGoogleSyncPaused(false);
+        }
+
+        setIsGoogleConnected(true);
+        setShowCalendarSyncEditor(false);
+        setMessage('Google account is already connected. Calendar ID was updated.');
+        return;
+      }
+
       if (saveAsConfigured) {
         await saveCalendarSyncSettings(buildCalendarSyncSettings({
           google: {
@@ -1820,7 +1929,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         console.warn('Unable to reset Apple calendar state before reconnecting', error);
       }
 
-      setCalendarSyncProviderDraft('none');
+      setCalendarSyncProviderDraft('apple');
       setAppleCalendarId('');
       setAppleCalendarIdDraft('');
       setAppleCalendarName('');
@@ -2308,23 +2417,90 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     }
   };
 
-  const handleDeliveryToggle = async (type: 'device' | 'email') => {
+  const startMobileVerificationFlow = async () => {
+    const normalizedMobile = mobileNumber.trim();
+    if (!normalizedMobile) {
+      setMessage('Add your mobile phone number before enabling text reminders.');
+      return false;
+    }
+
+    const phoneError = validatePhoneNumber(normalizedMobile);
+    if (phoneError) {
+      setMessage(phoneError);
+      return false;
+    }
+
+    const startResult = await startMobileVerification(user.id, normalizedMobile);
+    if (!startResult.success) {
+      setMessage(startResult.error || 'Unable to start mobile verification right now.');
+      return false;
+    }
+
+    setShowMobileVerificationModal(true);
+    setMobileVerificationCode('');
+    setMessage('A verification code was sent by text. Enter it to enable text reminders.');
+    return true;
+  };
+
+  const handleVerifyMobileCode = async () => {
+    const code = mobileVerificationCode.trim();
+    if (!/^\d{6}$/.test(code)) {
+      setMessage('Enter the 6-digit mobile verification code.');
+      return;
+    }
+
+    setIsMobileVerificationSubmitting(true);
+    const verifyResult = await verifyMobileVerificationCode(user.id, code);
+    setIsMobileVerificationSubmitting(false);
+
+    if (!verifyResult.success) {
+      setMessage(verifyResult.error || 'Unable to verify mobile code right now.');
+      return;
+    }
+
+    try {
+      await saveReminderDeliverySettings({
+        device: deliveryDevice,
+        email: deliveryEmail,
+        text: true,
+      }, user.id);
+      setDeliveryText(true);
+      setIsMobileNumberVerified(true);
+      setShowMobileVerificationModal(false);
+      setMobileVerificationCode('');
+      setMessage('Mobile phone validated. Text reminders are now enabled.');
+    } catch (error) {
+      console.warn('Unable to enable text reminders after mobile verification', error);
+      setMessage('Mobile was verified, but text reminders could not be enabled right now.');
+    }
+  };
+
+  const handleDeliveryToggle = async (type: 'device' | 'email' | 'text') => {
     const nextDevice = type === 'device' ? !deliveryDevice : deliveryDevice;
     const nextEmail = type === 'email' ? !deliveryEmail : deliveryEmail;
+    const nextText = type === 'text' ? !deliveryText : deliveryText;
+
+    if (type === 'text' && nextText && !isMobileNumberVerified) {
+      setDeliveryText(false);
+      await startMobileVerificationFlow();
+      return;
+    }
 
     setDeliveryDevice(nextDevice);
     setDeliveryEmail(nextEmail);
+    setDeliveryText(nextText);
 
     try {
       await saveReminderDeliverySettings({
         device: nextDevice,
         email: nextEmail,
-        text: false,
+        text: nextText,
       }, user.id);
     } catch (error) {
       console.warn('Unable to save account reminder delivery settings', error);
       setDeliveryDevice(deliveryDevice);
       setDeliveryEmail(deliveryEmail);
+      setDeliveryText(deliveryText);
       setMessage('Unable to update delivery preference right now.');
     }
   };
@@ -2434,10 +2610,14 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   };
 
   const handleSaveProfile = async () => {
-    if (!deliveryDevice && !deliveryEmail) {
+    if (!deliveryDevice && !deliveryEmail && !deliveryText) {
       setMessage('Please choose a delivery type before saving your details.');
       return;
     }
+
+    const previousMobileDigits = String(user.mobileNumber || '').replace(/\D/g, '').slice(0, 10);
+    const nextMobileDigits = String(mobileNumber || '').replace(/\D/g, '').slice(0, 10);
+    const mobileChanged = previousMobileDigits !== nextMobileDigits;
 
     const birthDateError = validateBirthDate(birthDate);
     if (birthDateError) {
@@ -2478,6 +2658,25 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       }
 
       onUserUpdated(result.user!);
+      setIsMobileNumberVerified(Boolean(result.user?.mobileNumberVerified));
+
+      if (mobileChanged && deliveryText) {
+        try {
+          await saveReminderDeliverySettings({
+            device: deliveryDevice,
+            email: deliveryEmail,
+            text: false,
+          }, user.id);
+          setDeliveryText(false);
+          setIsMobileNumberVerified(false);
+          await startMobileVerificationFlow();
+        } catch (error) {
+          console.warn('Unable to reset text reminders after mobile update', error);
+          setMessage('Mobile phone changed. Text reminders were turned off until verification completes.');
+        }
+        return;
+      }
+
       setMessage('Profile updated successfully.');
     } catch (error) {
       setIsSaving(false);
@@ -2486,7 +2685,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   };
 
   const handleBack = () => {
-    if (!deliveryDevice && !deliveryEmail) {
+    if (!deliveryDevice && !deliveryEmail && !deliveryText) {
       setMessage('Please choose a delivery type before leaving this page.');
       return;
     }
@@ -3408,6 +3607,61 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         </View>
       ) : null}
 
+      {showMobileVerificationModal ? (
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Validate mobile phone</Text>
+            <Text style={styles.deleteHint}>Enter the 6-digit code we sent by text to your mobile phone.</Text>
+
+            <Text style={styles.fieldLabel}>Verification code</Text>
+            <TextInput
+              style={styles.input}
+              value={mobileVerificationCode}
+              onChangeText={(value) => {
+                setMobileVerificationCode(value.replace(/\D/g, '').slice(0, 6));
+                if (message) {
+                  setMessage(null);
+                }
+              }}
+              placeholder="6-digit code"
+              keyboardType="number-pad"
+              maxLength={6}
+            />
+
+            <View style={styles.modalActionsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.primaryButton,
+                  styles.modalActionButton,
+                  (mobileVerificationCode.trim().length !== 6 || isMobileVerificationSubmitting) && styles.primaryButtonDisabled,
+                ]}
+                onPress={() => void handleVerifyMobileCode()}
+                disabled={mobileVerificationCode.trim().length !== 6 || isMobileVerificationSubmitting}
+              >
+                <Text style={styles.primaryButtonText}>{isMobileVerificationSubmitting ? 'Verifying…' : 'Verify'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.secondaryButton, styles.modalActionButton]}
+                onPress={() => {
+                  void startMobileVerificationFlow();
+                }}
+                disabled={isMobileVerificationSubmitting}
+              >
+                <Text style={styles.secondaryButtonText}>Resend code</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={[styles.secondaryButton, { marginTop: 8 }]}
+              onPress={() => setShowMobileVerificationModal(false)}
+              disabled={isMobileVerificationSubmitting}
+            >
+              <Text style={styles.secondaryButtonText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
+
       {showContactsModal ? (
         <View style={styles.contactsStandalonePanel}>
           <View style={styles.accountHeaderRow}>
@@ -3992,7 +4246,87 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         </View>
       ) : null}
 
-      {!showContactsModal ? (
+      {showContactSupportModal ? (
+        <KeyboardAvoidingView
+          style={styles.contactSupportStandalonePanel}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={20}
+        >
+          <View style={styles.accountHeaderRow}>
+            <View style={styles.accountHeaderLeft}>
+              <Image source={require('./assets/icon.png')} style={styles.accountHeaderLogo} resizeMode="cover" />
+              <View style={styles.accountHeaderTextWrap}>
+                <Text style={styles.accountTitle}>Contact Us</Text>
+                <Text style={styles.accountSubtitle}>Send a message to support.</Text>
+              </View>
+            </View>
+            <TouchableOpacity style={styles.secondaryButton} onPress={closeContactSupportModal}>
+              <Text style={styles.secondaryButtonText}>Back to Account</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            style={styles.contactSupportStandaloneForm}
+            contentContainerStyle={styles.contactSupportStandaloneFormContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            <Text style={styles.fieldLabel}>Subject</Text>
+            <TextInput
+              style={styles.input}
+              value={contactSupportSubject}
+              onChangeText={(value) => {
+                setContactSupportSubject(value);
+                if (contactSupportError) {
+                  setContactSupportError(null);
+                }
+              }}
+              placeholder="Subject"
+              maxLength={120}
+            />
+
+            <Text style={styles.fieldLabel}>Message</Text>
+            <TextInput
+              style={[styles.input, styles.contactSupportMessageInput]}
+              value={contactSupportMessage}
+              onChangeText={(value) => {
+                setContactSupportMessage(value.slice(0, 255));
+                if (contactSupportError) {
+                  setContactSupportError(null);
+                }
+              }}
+              placeholder="How can we help?"
+              multiline
+              maxLength={255}
+              textAlignVertical="top"
+            />
+            <Text style={styles.contactsEmptySubtext}>{`${contactSupportMessage.length}/255`}</Text>
+            {contactSupportError ? <Text style={styles.contactSupportErrorText}>{contactSupportError}</Text> : null}
+
+            <View style={styles.modalActionsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.primaryButton,
+                  styles.modalActionButton,
+                  (!contactSupportSubject.trim() || !contactSupportMessage.trim() || isSendingContactSupport) && styles.primaryButtonDisabled,
+                ]}
+                onPress={() => void handleSendContactSupportMessage()}
+                disabled={isSendingContactSupport || !contactSupportSubject.trim() || !contactSupportMessage.trim()}
+              >
+                <Text style={styles.primaryButtonText}>{isSendingContactSupport ? 'Sending...' : 'Send'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.secondaryButton, styles.modalActionButton]}
+                onPress={closeContactSupportModal}
+                disabled={isSendingContactSupport}
+              >
+                <Text style={styles.secondaryButtonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      ) : null}
+
+      {!showContactsModal && !showContactSupportModal ? (
       <View style={styles.accountCard}>
         <View style={styles.accountHeaderRow}>
           <View style={styles.accountHeaderLeft}>
@@ -4168,9 +4502,11 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                     <Text style={styles.preferenceToggleText}>Email</Text>
                   </TouchableOpacity>
 
-                  <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption, styles.preferenceToggleDisabled]} disabled activeOpacity={1}>
-                    <View style={[styles.passwordCheckbox, styles.passwordCheckboxDisabled]} />
-                    <Text style={styles.preferenceToggleDisabledText}>Text</Text>
+                  <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption]} onPress={() => void handleDeliveryToggle('text')} activeOpacity={0.8}>
+                    <View style={styles.passwordCheckbox}>
+                      {deliveryText ? <View style={styles.passwordCheckboxChecked} /> : null}
+                    </View>
+                    <Text style={styles.preferenceToggleText}>Text</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity style={[styles.preferenceToggleRow, styles.deliveryOption, styles.preferenceToggleDisabled]} disabled activeOpacity={1}>
@@ -4178,6 +4514,12 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                     <Text style={styles.preferenceToggleDisabledText}>Voice</Text>
                   </TouchableOpacity>
                 </View>
+
+                <Text style={styles.deliveryVerificationHint}>
+                  {isMobileNumberVerified
+                    ? 'Mobile phone is validated for text reminders.'
+                    : 'Mobile phone is not validated for text reminders. Enabling Text will send a verification code.'}
+                </Text>
 
                 <TouchableOpacity style={styles.preferenceToggleRow} onPress={handleReminderSoundOffToggle} activeOpacity={0.8}>
                   <View style={styles.passwordCheckbox}>
@@ -4515,67 +4857,6 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       </View>
       ) : null}
 
-      {showContactSupportModal ? (
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, styles.contactSupportModalCard]}>
-            <Text style={styles.modalTitle}>Contact Us</Text>
-            <Text style={styles.deleteHint}>Send a message to support.</Text>
-
-            <Text style={styles.fieldLabel}>Subject</Text>
-            <TextInput
-              style={styles.input}
-              value={contactSupportSubject}
-              onChangeText={(value) => {
-                setContactSupportSubject(value);
-                if (contactSupportError) {
-                  setContactSupportError(null);
-                }
-              }}
-              placeholder="Subject"
-              maxLength={120}
-            />
-
-            <Text style={styles.fieldLabel}>Message</Text>
-            <TextInput
-              style={[styles.input, styles.contactSupportMessageInput]}
-              value={contactSupportMessage}
-              onChangeText={(value) => {
-                setContactSupportMessage(value.slice(0, 255));
-                if (contactSupportError) {
-                  setContactSupportError(null);
-                }
-              }}
-              placeholder="How can we help?"
-              multiline
-              maxLength={255}
-              textAlignVertical="top"
-            />
-            <Text style={styles.contactsEmptySubtext}>{`${contactSupportMessage.length}/255`}</Text>
-            {contactSupportError ? <Text style={styles.contactSupportErrorText}>{contactSupportError}</Text> : null}
-
-            <View style={styles.modalActionsRow}>
-              <TouchableOpacity
-                style={[
-                  styles.primaryButton,
-                  styles.modalActionButton,
-                  (!contactSupportSubject.trim() || !contactSupportMessage.trim() || isSendingContactSupport) && styles.primaryButtonDisabled,
-                ]}
-                onPress={() => void handleSendContactSupportMessage()}
-                disabled={isSendingContactSupport || !contactSupportSubject.trim() || !contactSupportMessage.trim()}
-              >
-                <Text style={styles.primaryButtonText}>{isSendingContactSupport ? 'Sending...' : 'Send'}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.secondaryButton, styles.modalActionButton]}
-                onPress={closeContactSupportModal}
-                disabled={isSendingContactSupport}
-              >
-                <Text style={styles.secondaryButtonText}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      ) : null}
     </ScrollView>
   );
 }
@@ -5546,6 +5827,23 @@ const styles = StyleSheet.create({
   contactSupportModalCard: {
     maxWidth: 620,
   },
+  contactSupportStandalonePanel: {
+    width: '100%',
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  contactSupportStandaloneForm: {
+    width: '100%',
+  },
+  contactSupportStandaloneFormContent: {
+    paddingBottom: 24,
+  },
   contactSupportMessageInput: {
     minHeight: 150,
   },
@@ -5711,6 +6009,11 @@ const styles = StyleSheet.create({
   deliveryOption: {
     marginRight: 12,
   },
+  deliveryVerificationHint: {
+    color: '#475569',
+    fontSize: 12,
+    marginBottom: 8,
+  },
   deviceInstructionLinkRow: {
     alignSelf: 'flex-start',
     marginBottom: 8,
@@ -5752,6 +6055,46 @@ const styles = StyleSheet.create({
   },
   authAgreementBlock: {
     marginBottom: 14,
+  },
+  signupSmsConsentBlock: {
+    marginTop: 4,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#d9e2f0',
+    borderRadius: 12,
+    padding: 10,
+    backgroundColor: '#f8fafc',
+  },
+  signupSmsConsentHint: {
+    color: '#475569',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  signupSmsConsentActions: {
+    marginTop: 10,
+    flexDirection: 'row',
+    gap: 8,
+  },
+  signupSmsConsentButton: {
+    minWidth: 56,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#94a3b8',
+    backgroundColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+  signupSmsConsentButtonSelected: {
+    backgroundColor: '#bfdbfe',
+    borderColor: '#3b82f6',
+  },
+  signupSmsConsentButtonText: {
+    color: '#0f172a',
+    fontWeight: '700',
+  },
+  signupSmsConsentButtonTextSelected: {
+    color: '#1d4ed8',
   },
   authAgreementRow: {
     flexDirection: 'row',

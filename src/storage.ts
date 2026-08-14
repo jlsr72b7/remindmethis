@@ -76,6 +76,7 @@ export interface StoredUser {
   email: string;
   password: string;
   mobileNumber?: string;
+  mobileNumberVerified?: boolean;
   fullName?: string;
   address?: string;
   birthDate?: string;
@@ -1424,12 +1425,20 @@ export function validateBirthDate(value: string) {
   return null;
 }
 
-export async function createUser(email: string, password: string, mobileNumber?: string, fullName?: string, address?: string, birthDate?: string): Promise<CreateUserResult> {
+export async function createUser(
+  email: string,
+  password: string,
+  mobileNumber?: string,
+  fullName?: string,
+  address?: string,
+  birthDate?: string,
+  smsTextOptIn?: boolean,
+): Promise<CreateUserResult> {
   if (USE_API_STORAGE) {
     try {
       const response = await apiRequest<{ user: StoredUser; verificationRequired?: boolean; message?: string }>('/auth/signup', {
         method: 'POST',
-        body: JSON.stringify({ email, password, mobileNumber, fullName, address, birthDate }),
+        body: JSON.stringify({ email, password, mobileNumber, fullName, address, birthDate, smsTextOptIn: smsTextOptIn === true }),
       });
       return {
         user: response.user,
@@ -1466,6 +1475,11 @@ export async function createUser(email: string, password: string, mobileNumber?:
 
   const nextUsers = [...users, user];
   await AsyncStorage.setItem(USERS_KEY, JSON.stringify(nextUsers));
+  await saveReminderDeliverySettings({
+    device: true,
+    email: false,
+    text: smsTextOptIn === true,
+  }, user.id);
   return { user };
 }
 
@@ -1672,6 +1686,44 @@ export async function updateUserProfile(userId: string, updates: Partial<Pick<St
   users[index] = updatedUser;
   await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
   return { user: updatedUser };
+}
+
+export async function startMobileVerification(userId: string, mobileNumber?: string): Promise<{ success: boolean; error?: string }> {
+  if (USE_API_STORAGE) {
+    try {
+      await apiRequest<{ success: boolean }>(`/users/${encodeURIComponent(userId)}/mobile-verification/start`, {
+        method: 'POST',
+        body: JSON.stringify({ mobileNumber }),
+      });
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unable to start mobile verification.',
+      };
+    }
+  }
+
+  return { success: false, error: 'Mobile verification requires API storage.' };
+}
+
+export async function verifyMobileVerificationCode(userId: string, code: string): Promise<{ success: boolean; error?: string }> {
+  if (USE_API_STORAGE) {
+    try {
+      await apiRequest<{ success: boolean }>(`/users/${encodeURIComponent(userId)}/mobile-verification/verify`, {
+        method: 'POST',
+        body: JSON.stringify({ code }),
+      });
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unable to verify mobile code.',
+      };
+    }
+  }
+
+  return { success: false, error: 'Mobile verification requires API storage.' };
 }
 
 export async function changePassword(userId: string, currentPassword: string, newPassword: string) {

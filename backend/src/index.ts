@@ -255,6 +255,20 @@ const smsProvider: SmsProvider = (() => {
   return new NoOpSmsProvider();
 })();
 
+const normalizePhoneNumberForComparison = (value: string) => String(value || '').replace(/\D/g, '').slice(0, 10);
+
+const isMobileNumberVerified = (user: {
+  mobileNumber: string | null;
+  mobileNumberVerifiedAt: Date | null;
+}) => {
+  const normalizedMobile = normalizePhoneNumberForComparison(String(user.mobileNumber || ''));
+  if (!normalizedMobile) {
+    return false;
+  }
+
+  return Boolean(user.mobileNumberVerifiedAt);
+};
+
 const sendVerificationEmail = async (email: string, token: string, req?: Request) => {
   const verifyUrl = `${resolveVerificationBaseUrl(req)}/auth/verify-email?token=${encodeURIComponent(token)}`;
   const subject = 'Verify your Remind Me This account';
@@ -1300,14 +1314,25 @@ app.post('/admin/test-reminder-sms', async (req, res) => {
 app.get('/users/:userId/reminder-delivery-settings', async (req, res) => {
   try {
     const { userId } = req.params;
-    const settings = await prisma.reminderDeliverySetting.findUnique({
+    const [settings, user] = await Promise.all([
+      prisma.reminderDeliverySetting.findUnique({
       where: { userId },
-    });
+      }),
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          mobileNumber: true,
+          mobileNumberVerifiedAt: true,
+        },
+      }),
+    ]);
+
+    const textAllowed = user ? isMobileNumberVerified(user) : false;
 
     const normalized = normalizeDeliverySettings({
       deviceEnabled: settings?.deviceEnabled,
       emailEnabled: settings?.emailEnabled,
-      textEnabled: settings?.textEnabled,
+      textEnabled: settings?.textEnabled && textAllowed,
     });
 
     return res.json({
@@ -1315,6 +1340,10 @@ app.get('/users/:userId/reminder-delivery-settings', async (req, res) => {
         device: normalized.deviceEnabled,
         email: normalized.emailEnabled,
         text: normalized.textEnabled,
+      },
+      mobileVerification: {
+        requiredForText: true,
+        verified: textAllowed,
       },
     });
   } catch (error) {
@@ -1328,11 +1357,41 @@ app.put('/users/:userId/reminder-delivery-settings', async (req, res) => {
     const { userId } = req.params;
     const { device, email, text } = req.body ?? {};
 
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        mobileNumber: true,
+        mobileNumberVerifiedAt: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
     const normalized = normalizeDeliverySettings({
       deviceEnabled: typeof device === 'boolean' ? device : undefined,
       emailEnabled: typeof email === 'boolean' ? email : undefined,
       textEnabled: typeof text === 'boolean' ? text : undefined,
     });
+
+    if (normalized.textEnabled) {
+      const normalizedMobile = normalizePhoneNumberForComparison(String(user.mobileNumber || ''));
+      if (!normalizedMobile) {
+        return res.status(400).json({
+          error: 'mobile number is required before enabling text reminders',
+          requiresMobileNumber: true,
+        });
+      }
+
+      if (!isMobileNumberVerified(user)) {
+        return res.status(409).json({
+          error: 'mobile number must be validated before enabling text reminders',
+          requiresMobileVerification: true,
+        });
+      }
+    }
 
     await prisma.reminderDeliverySetting.upsert({
       where: { userId },
@@ -1377,9 +1436,129 @@ app.post('/users/:userId/reminder-queue/sync', async (req, res) => {
   }
 });
 
+app.post('/users/:userId/mobile-verification/start', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const mobileNumberInput = String(req.body?.mobileNumber || '').trim();
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        mobileNumber: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    const targetMobile = mobileNumberInput || String(user.mobileNumber || '').trim();
+    const normalizedMobile = normalizePhoneNumberForComparison(targetMobile);
+    if (normalizedMobile.length !== 10) {
+      return res.status(400).json({ error: 'valid mobile number is required for verification' });
+    }
+
+    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const verificationExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        mobileNumber: targetMobile,
+        mobileNumberVerifiedAt: null,
+        mobileVerificationCode: verificationCode,
+        mobileVerificationCodeExpiresAt: verificationExpiresAt,
+      },
+    });
+
+    await prisma.reminderDeliverySetting.upsert({
+      where: { userId },
+      create: {
+        userId,
+        deviceEnabled: true,
+        emailEnabled: false,
+        textEnabled: false,
+      },
+      update: {
+        textEnabled: false,
+      },
+    });
+
+    await smsProvider.sendText(targetMobile, [
+      'Remind Me This verification code: ' + verificationCode,
+      'Enter this code in the app to validate your mobile phone for text reminders.',
+      'Code expires in 10 minutes.',
+      'Reply STOP to opt out, HELP for help.',
+    ].join('\n'));
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('mobile verification start failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/users/:userId/mobile-verification/verify', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const code = String(req.body?.code || '').trim();
+    if (!/^\d{6}$/.test(code)) {
+      return res.status(400).json({ error: 'verification code must be 6 digits' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        mobileVerificationCode: true,
+        mobileVerificationCodeExpiresAt: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    if (!user.mobileVerificationCode || !user.mobileVerificationCodeExpiresAt) {
+      return res.status(409).json({ error: 'verification has not been started' });
+    }
+
+    if (user.mobileVerificationCode !== code) {
+      return res.status(400).json({ error: 'invalid verification code' });
+    }
+
+    if (user.mobileVerificationCodeExpiresAt.getTime() < Date.now()) {
+      return res.status(400).json({ error: 'verification code has expired' });
+    }
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        mobileNumberVerifiedAt: new Date(),
+        mobileVerificationCode: null,
+        mobileVerificationCodeExpiresAt: null,
+      },
+    });
+
+    return res.json({ success: true, mobileVerified: true });
+  } catch (error) {
+    console.error('mobile verification complete failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
 app.post('/auth/signup', async (req, res) => {
   try {
-    const { email, password, mobileNumber, fullName, address, birthDate } = req.body ?? {};
+    const {
+      email,
+      password,
+      mobileNumber,
+      fullName,
+      address,
+      birthDate,
+      smsTextOptIn,
+    } = req.body ?? {};
 
     if (!email || !password) {
       return res.status(400).json({ error: 'email and password are required' });
@@ -1408,6 +1587,19 @@ app.post('/auth/signup', async (req, res) => {
       },
     });
 
+    await prisma.reminderDeliverySetting.upsert({
+      where: { userId: user.id },
+      create: {
+        userId: user.id,
+        deviceEnabled: true,
+        emailEnabled: false,
+        textEnabled: smsTextOptIn === true,
+      },
+      update: {
+        textEnabled: smsTextOptIn === true,
+      },
+    });
+
     try {
       await sendVerificationEmail(user.email, verificationToken, req);
     } catch (mailError) {
@@ -1422,6 +1614,7 @@ app.post('/auth/signup', async (req, res) => {
         id: user.id,
         email: user.email,
         mobileNumber: user.mobileNumber,
+        mobileNumberVerified: false,
         fullName: user.fullName,
         address: user.address,
         birthDate: user.birthDate,
@@ -1549,6 +1742,7 @@ app.post('/auth/signin', async (req, res) => {
         id: user.id,
         email: user.email,
         mobileNumber: user.mobileNumber,
+        mobileNumberVerified: isMobileNumberVerified(user),
         fullName: user.fullName,
         address: user.address,
         birthDate: user.birthDate,
@@ -3100,6 +3294,7 @@ app.get('/users/:userId', async (req, res) => {
         id: user.id,
         email: user.email,
         mobileNumber: user.mobileNumber,
+        mobileNumberVerified: isMobileNumberVerified(user),
         fullName: user.fullName,
         address: user.address,
         birthDate: user.birthDate,
@@ -3116,24 +3311,64 @@ app.patch('/users/:userId/profile', async (req, res) => {
     const { userId } = req.params;
     const { mobileNumber, fullName, address, birthDate } = req.body ?? {};
 
+    const existingUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        mobileNumber: true,
+      },
+    });
+
+    if (!existingUser) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    const nextMobileNumber = mobileNumber === undefined ? undefined : (mobileNumber ? String(mobileNumber) : null);
+    const previousMobile = normalizePhoneNumberForComparison(String(existingUser.mobileNumber || ''));
+    const nextMobile = nextMobileNumber === undefined
+      ? previousMobile
+      : normalizePhoneNumberForComparison(String(nextMobileNumber || ''));
+    const mobileChanged = nextMobileNumber !== undefined && previousMobile !== nextMobile;
+
     const user = await prisma.user.update({
       where: { id: userId },
       data: {
-        mobileNumber: mobileNumber === undefined ? undefined : (mobileNumber ? String(mobileNumber) : null),
+        mobileNumber: nextMobileNumber,
+        mobileNumberVerifiedAt: mobileChanged ? null : undefined,
+        mobileVerificationCode: mobileChanged ? null : undefined,
+        mobileVerificationCodeExpiresAt: mobileChanged ? null : undefined,
         fullName: fullName === undefined ? undefined : (fullName ? String(fullName) : null),
         address: address === undefined ? undefined : (address ? String(address) : null),
         birthDate: birthDate === undefined ? undefined : (birthDate ? String(birthDate) : null),
       },
     });
 
+    if (mobileChanged) {
+      await prisma.reminderDeliverySetting.upsert({
+        where: { userId },
+        create: {
+          userId,
+          deviceEnabled: true,
+          emailEnabled: false,
+          textEnabled: false,
+        },
+        update: {
+          textEnabled: false,
+        },
+      });
+    }
+
     return res.json({
       user: {
         id: user.id,
         email: user.email,
         mobileNumber: user.mobileNumber,
+        mobileNumberVerified: isMobileNumberVerified(user),
         fullName: user.fullName,
         address: user.address,
         birthDate: user.birthDate,
+      },
+      mobileVerification: {
+        required: mobileChanged,
       },
     });
   } catch (error) {

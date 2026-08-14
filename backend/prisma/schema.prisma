@@ -16,6 +16,9 @@ model User {
   emailVerificationToken String? @unique
   emailVerificationExpiresAt DateTime?
   mobileNumber String?
+  mobileNumberVerifiedAt DateTime?
+  mobileVerificationCode String?
+  mobileVerificationCodeExpiresAt DateTime?
   fullName     String?
   address      String?
   birthDate    String?

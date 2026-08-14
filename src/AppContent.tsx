@@ -35,13 +35,21 @@ import {
   type ReminderDefaultTimeSettings,
   loadReminderSoundSettings,
   saveEvents,
+  requestNotificationPermission,
+  sendShareEmailNotification,
   sendReminderEmailNotification,
   sendReminderSmsNotification,
   subscribeApiStorageStatus,
+  isApiStorageEnabled,
   validateEmail,
   validatePhoneNumber,
 } from './storage';
-import { clearScheduledReminders, playReminderPing, scheduleReminder } from './notifications';
+import {
+  clearScheduledReminders,
+  getNotificationDiagnostics,
+  playReminderPing,
+  scheduleReminder,
+} from './notifications';
 import { getDeviceTimeZone } from './timeZones';
 import TimePickerModal from './TimePickerModal';
 import { EventLocationAddress, ReminderFrequency, SpecialDateEvent, VariableReminderEntry } from './types';
@@ -56,6 +64,12 @@ type ReminderModeValue = 'none' | 'default' | 'static' | 'variable';
 type TimePickerTarget = 'event-start' | 'event-end' | 'static-reminder' | 'pending-reminder';
 
 const DEVICE_TIME_ZONE = getDeviceTimeZone();
+const IOS_SCHEDULE_LIMIT = 60;
+const SHOW_NOTIFICATION_DIAGNOSTICS = __DEV__ || (
+  typeof process !== 'undefined'
+  && !!process.env
+  && process.env.EXPO_PUBLIC_SHOW_NOTIFICATION_DIAGNOSTICS === 'true'
+);
 const SHARE_ACCEPT_BASE_URL = (typeof process !== 'undefined' && process.env && process.env.EXPO_PUBLIC_API_BASE_URL
   ? process.env.EXPO_PUBLIC_API_BASE_URL
   : 'http://localhost:4000').replace(/\/$/, '');
@@ -1727,8 +1741,10 @@ const normalizeShareContactsSnapshot = (raw: string | null): { contacts: ShareCo
 };
 
 export default function AppContent({ userId, userEmail, defaultReminderTimeZone }: AppContentProps) {
+  const apiStorageEnabled = isApiStorageEnabled();
   const effectiveReminderTimeZone = defaultReminderTimeZone || DEVICE_TIME_ZONE;
   const [events, setEvents] = useState<SpecialDateEvent[]>([]);
+  const [hasLoadedInitialEvents, setHasLoadedInitialEvents] = useState(false);
   const [form, setForm] = useState(() => getResetFormState(effectiveReminderTimeZone));
   const [hasSelectedEventType, setHasSelectedEventType] = useState(false);
   const [isEventTypePickerVisible, setIsEventTypePickerVisible] = useState(true);
@@ -2177,6 +2193,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
   useEffect(() => {
     (async () => {
+      setHasLoadedInitialEvents(false);
+
       try {
         const stored = await loadEvents(userId);
         const repaired = repairLegacyReminderTimes(stored);
@@ -2187,6 +2205,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       } catch (error) {
         console.warn('Initial event load failed', error);
         setEvents([]);
+      } finally {
+        setHasLoadedInitialEvents(true);
       }
 
       try {
@@ -2201,6 +2221,13 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         setReminderDeliveryDeviceEnabled(deliverySettings.device);
         setReminderDeliveryEmailEnabled(deliverySettings.email);
         setReminderDeliveryTextEnabled(deliverySettings.text);
+
+        if (deliverySettings.device) {
+          const permissionGranted = await requestNotificationPermission();
+          if (!permissionGranted) {
+            setApiStorageStatusMessage('iOS notification permission is not enabled, so reminders will only appear inside the app until you allow notifications in Settings.');
+          }
+        }
       } catch (error) {
         console.warn('Reminder delivery settings load failed', error);
         setReminderDeliveryDeviceEnabled(true);
@@ -2431,7 +2458,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           setApiStorageStatusMessage('Reminder delivery triggered, but saving reminder state failed. It may retry after refresh.');
         }
 
-        if (reminderDeliveryTextEnabled) {
+        if (!apiStorageEnabled && reminderDeliveryTextEnabled) {
           void sendReminderSmsNotification(userId, {
             eventId: dueReminder.event.id,
             eventTitle: dueReminder.event.title,
@@ -2442,7 +2469,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           });
         }
 
-        if (reminderDeliveryEmailEnabled) {
+        if (!apiStorageEnabled && reminderDeliveryEmailEnabled) {
           void sendReminderEmailNotification(userId, {
             eventId: dueReminder.event.id,
             eventTitle: dueReminder.event.title,
@@ -2712,6 +2739,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     let cancelled = false;
 
     const syncScheduledDeviceReminders = async () => {
+      if (!hasLoadedInitialEvents) {
+        return;
+      }
+
       if (!reminderDeliveryDeviceEnabled) {
         await clearScheduledReminders();
         return;
@@ -2735,13 +2766,24 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         scheduleQueue.map((item) => [`${item.title}|${item.people}|${item.date.getTime()}`, item]),
       ).values()].sort((left, right) => left.date.getTime() - right.date.getTime());
 
+      const prioritizedQueue = Platform.OS === 'ios'
+        ? dedupedQueue.slice(0, IOS_SCHEDULE_LIMIT)
+        : dedupedQueue;
+
       await clearScheduledReminders();
 
-      if (!dedupedQueue.length || cancelled) {
+      if (!prioritizedQueue.length || cancelled) {
         return;
       }
 
-      const schedulingResults = await Promise.allSettled(dedupedQueue.map((item) => scheduleReminder(
+      if (Platform.OS === 'ios' && dedupedQueue.length > prioritizedQueue.length) {
+        const queueLimitMessage = `iOS can keep at most 64 pending notifications. Scheduling the next ${prioritizedQueue.length} soonest reminders.`;
+        if (SHOW_NOTIFICATION_DIAGNOSTICS) {
+          setApiStorageStatusMessage(queueLimitMessage);
+        }
+      }
+
+      const schedulingResults = await Promise.allSettled(prioritizedQueue.map((item) => scheduleReminder(
         'Calendar Reminder',
         `${item.title} for ${item.people}`,
         item.date,
@@ -2758,6 +2800,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       if (failedSchedules.length) {
         setApiStorageStatusMessage('Some device reminders could not be scheduled. Check iOS Notifications settings for Remind Me This.');
       }
+
+      if (SHOW_NOTIFICATION_DIAGNOSTICS) {
+        const diagnostics = await getNotificationDiagnostics();
+        console.log('notification diagnostics (post-sync)', diagnostics);
+      }
     };
 
     void syncScheduledDeviceReminders();
@@ -2765,7 +2812,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     return () => {
       cancelled = true;
     };
-  }, [events, reminderDeliveryDeviceEnabled]);
+  }, [events, hasLoadedInitialEvents, reminderDeliveryDeviceEnabled]);
 
   const saveCurrentEvent = async () => {
     if (isSavingEvent) {
@@ -3793,7 +3840,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
       let deliveredToRecipient = false;
 
-      if (normalizedEmail && validateEmail(normalizedEmail)) {
+      if (!matchedRecipientUserId && normalizedEmail && validateEmail(normalizedEmail)) {
         if (sentEmails.has(normalizedEmail)) {
           deliveryErrors.push(`Skipped duplicate email for ${recipient.label}.`);
         } else {
@@ -3816,7 +3863,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         }
       }
 
-      if (normalizedRecipientPhone && !validatePhoneNumber(recipient.phone || '')) {
+      if (!matchedRecipientUserId && normalizedRecipientPhone && validatePhoneNumber(recipient.phone || '')) {
         if (sentPhones.has(normalizedRecipientPhone)) {
           deliveryErrors.push(`Skipped duplicate phone for ${recipient.label}.`);
         } else {
@@ -3869,15 +3916,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       return;
     }
 
-    const resultNotes = [
-      successfulDeliveries.length ? successfulDeliveries.join('\n') : null,
-      inviteRecipients.size ? 'Registered app users were routed through in-app popup invites.' : null,
-      deliveryErrors.length ? deliveryErrors.join(' ') : null,
-      successfulDeliveries.some((entry) => entry.startsWith('Text to ')) ? 'Complete text sending from the opened message composer.' : null,
-    ].filter(Boolean).join('\n');
-
     setIsSendingShare(false);
-    Alert.alert('Share sent', resultNotes);
+    Alert.alert('Share sent', 'Your event has been shared');
     cancelShareFlow();
   };
 
@@ -5952,18 +5992,22 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           <Text style={styles.preferenceToggleText}>Share Event With Others</Text>
         </TouchableOpacity>
         <Text style={styles.label}>Reminder Creation Mode</Text>
-        <View style={styles.row}>
+          <View style={[styles.row, styles.reminderModeRow]}>
           {([
             { value: 'none' as ReminderModeValue, label: 'None' },
             { value: 'default' as ReminderModeValue, label: 'Default' },
-            { value: 'static' as ReminderModeValue, label: 'Recurring' },
+              { value: 'static' as ReminderModeValue, label: 'Recur' },
             { value: 'variable' as ReminderModeValue, label: 'Custom' },
           ]).map((option) => {
             const isSelected = form.reminderMode === option.value;
             return (
               <Pressable
                 key={option.value}
-                style={[styles.frequencyOption, isSelected ? styles.frequencyOptionSelected : styles.frequencyOptionUnselected]}
+                  style={[
+                    styles.frequencyOption,
+                    styles.reminderModeOption,
+                    isSelected ? styles.frequencyOptionSelected : styles.frequencyOptionUnselected,
+                  ]}
                 onPress={() => {
                   const now = getDefaultDate();
                   const isFirstReminderModeSelection = isNoReminderMode(form.reminderMode) && isReminderTimeZoneMode(option.value);
@@ -6008,7 +6052,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                 onHoverOut={() => setHoveredReminderMode((current) => (current === option.value ? null : current))}
                 disabled={isSelected && option.value !== 'default'}
               >
-                <Text style={[styles.frequencyOptionText, isSelected ? styles.frequencyOptionTextSelected : styles.frequencyOptionTextUnselected]}>
+                <Text
+                  style={[
+                    styles.frequencyOptionText,
+                    styles.reminderModeOptionText,
+                    isSelected ? styles.frequencyOptionTextSelected : styles.frequencyOptionTextUnselected,
+                  ]}
+                  numberOfLines={1}
+                >
                   {option.label}
                 </Text>
               </Pressable>
@@ -6092,7 +6143,17 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   }}>
                     <Text style={styles.variableReminderNav}>←</Text>
                   </TouchableOpacity>
-                  <Text style={styles.variableReminderMonth}>{staticReminderMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</Text>
+                  <View style={styles.variableReminderMonthYearWrap}>
+                    <Text style={styles.variableReminderYear}>{staticReminderMonth.toLocaleString('default', { year: 'numeric' })}</Text>
+                    <Text
+                      style={styles.variableReminderMonth}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.72}
+                    >
+                      {staticReminderMonth.toLocaleString('default', { month: 'long' })}
+                    </Text>
+                  </View>
                   <TouchableOpacity onPress={() => {
                     setHasTouchedStaticReminderSchedule(true);
                     setStaticReminderMonth(new Date(staticReminderMonth.getFullYear(), staticReminderMonth.getMonth() + 1, 1));
@@ -6101,8 +6162,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   </TouchableOpacity>
                 </View>
                 <View style={styles.weekRow}>
-                  {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => (
-                    <Text key={day} style={styles.weekDay}>{day}</Text>
+                  {[
+                    { key: 'sun', label: 'S' },
+                    { key: 'mon', label: 'M' },
+                    { key: 'tue', label: 'T' },
+                    { key: 'wed', label: 'W' },
+                    { key: 'thu', label: 'T' },
+                    { key: 'fri', label: 'F' },
+                    { key: 'sat', label: 'S' },
+                  ].map((day) => (
+                    <Text key={day.key} style={styles.weekDay}>{day.label}</Text>
                   ))}
                 </View>
                 <View style={styles.calendarGrid}>
@@ -6146,8 +6215,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                 </TouchableOpacity>
 
                 <TouchableOpacity style={styles.primaryButton} onPress={addPendingVariableReminder}>
-                  <Text style={styles.primaryButtonText}>Add Reminder(s)</Text>
+                  <Text style={styles.addReminderButtonText}>{`Add\nReminder(s)`}</Text>
                 </TouchableOpacity>
+                <Text style={styles.reminderActionHint}>
+                  (Choose a time,{`\n`}click Add Reminder(s) to add to reminder list.)
+                </Text>
               </View>
             </View>
           </>
@@ -6162,14 +6234,32 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   <TouchableOpacity onPress={() => setPendingReminderMonth(new Date(pendingReminderMonth.getFullYear(), pendingReminderMonth.getMonth() - 1, 1))}>
                     <Text style={styles.variableReminderNav}>←</Text>
                   </TouchableOpacity>
-                  <Text style={styles.variableReminderMonth}>{pendingReminderMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</Text>
+                  <View style={styles.variableReminderMonthYearWrap}>
+                    <Text style={styles.variableReminderYear}>{pendingReminderMonth.toLocaleString('default', { year: 'numeric' })}</Text>
+                    <Text
+                      style={styles.variableReminderMonth}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.72}
+                    >
+                      {pendingReminderMonth.toLocaleString('default', { month: 'long' })}
+                    </Text>
+                  </View>
                   <TouchableOpacity onPress={() => setPendingReminderMonth(new Date(pendingReminderMonth.getFullYear(), pendingReminderMonth.getMonth() + 1, 1))}>
                     <Text style={styles.variableReminderNav}>→</Text>
                   </TouchableOpacity>
                 </View>
                 <View style={styles.weekRow}>
-                  {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => (
-                    <Text key={day} style={styles.weekDay}>{day}</Text>
+                  {[
+                    { key: 'sun', label: 'S' },
+                    { key: 'mon', label: 'M' },
+                    { key: 'tue', label: 'T' },
+                    { key: 'wed', label: 'W' },
+                    { key: 'thu', label: 'T' },
+                    { key: 'fri', label: 'F' },
+                    { key: 'sat', label: 'S' },
+                  ].map((day) => (
+                    <Text key={day.key} style={styles.weekDay}>{day.label}</Text>
                   ))}
                 </View>
                 <View style={styles.calendarGrid}>
@@ -6211,8 +6301,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   <Text style={styles.timeValueButtonText}>{formatTimeLabel(pendingReminderDateTime)}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.primaryButton} onPress={addPendingVariableReminder}>
-                  <Text style={styles.primaryButtonText}>Add Reminder(s)</Text>
+                  <Text style={styles.addReminderButtonText}>{`Add\nReminder(s)`}</Text>
                 </TouchableOpacity>
+                <Text style={styles.reminderActionHint}>
+                  (Choose a time,{`\n`}click Add Reminder(s) to add to reminder list.)
+                </Text>
               </View>
             </View>
 
@@ -6810,11 +6903,11 @@ const styles = StyleSheet.create({
   },
   variableReminderLayout: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 10,
     marginBottom: 8,
   },
   variableReminderCalendarCard: {
-    flex: 1,
+    flex: 1.2,
     borderWidth: 1,
     borderColor: '#d9e2f0',
     borderRadius: 12,
@@ -6822,11 +6915,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   variableReminderClockCard: {
-    flex: 1,
+    flex: 0.8,
     borderWidth: 1,
     borderColor: '#d9e2f0',
     borderRadius: 12,
-    padding: 10,
+    padding: 9,
     backgroundColor: '#fff',
   },
   variableReminderHeader: {
@@ -6835,14 +6928,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 8,
   },
+  variableReminderMonthYearWrap: {
+    flex: 1,
+    minWidth: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  variableReminderYear: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: '#6b7280',
+    fontWeight: '600',
+  },
   variableReminderMonth: {
+    fontSize: 16,
+    lineHeight: 20,
     fontWeight: '700',
     color: '#111827',
   },
   variableReminderNav: {
     fontSize: 18,
     color: '#2563eb',
-    paddingHorizontal: 6,
+    paddingHorizontal: 8,
   },
   picker: {
     color: '#111827',
@@ -6857,12 +6965,21 @@ const styles = StyleSheet.create({
     gap: 6,
     marginBottom: 8,
   },
+  reminderModeRow: {
+    flexWrap: 'nowrap',
+  },
   frequencyOption: {
     borderRadius: 999,
     paddingHorizontal: 12,
     paddingVertical: 8,
     marginRight: 6,
     marginBottom: 6,
+  },
+  reminderModeOption: {
+    flex: 1,
+    marginRight: 0,
+    alignItems: 'center',
+    paddingHorizontal: Platform.OS === 'ios' ? 8 : 12,
   },
   frequencyOptionSelected: {
     backgroundColor: '#2563eb',
@@ -6874,6 +6991,9 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     textTransform: 'capitalize',
+  },
+  reminderModeOptionText: {
+    fontSize: Platform.OS === 'ios' ? 12 : 13,
   },
   frequencyOptionTextSelected: {
     color: '#fff',
@@ -6892,6 +7012,23 @@ const styles = StyleSheet.create({
   primaryButtonText: {
     color: '#fff',
     fontWeight: '700',
+  },
+  addReminderButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 11,
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  reminderActionHint: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginBottom: 6,
+    width: '100%',
+    alignSelf: 'stretch',
+    flexShrink: 1,
+    flexWrap: 'wrap',
+    lineHeight: 16,
   },
   deleteAllRemindersButton: {
     backgroundColor: '#dc2626',
