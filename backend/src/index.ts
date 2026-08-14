@@ -274,8 +274,8 @@ const getSafeTimeZone = (value?: string) => {
 const getEventDateTimeLabels = (eventDateTime: string, eventAllDay: boolean, eventTimeZone?: string) => {
   const eventAt = new Date(eventDateTime);
   const safeTimeZone = getSafeTimeZone(eventTimeZone);
-  const dateOptions = safeTimeZone ? { timeZone: safeTimeZone } : undefined;
-  const timeOptions = safeTimeZone
+  const dateOptions: Intl.DateTimeFormatOptions | undefined = safeTimeZone ? { timeZone: safeTimeZone } : undefined;
+  const timeOptions: Intl.DateTimeFormatOptions = safeTimeZone
     ? { hour: 'numeric', minute: '2-digit', timeZone: safeTimeZone }
     : { hour: 'numeric', minute: '2-digit' };
 
