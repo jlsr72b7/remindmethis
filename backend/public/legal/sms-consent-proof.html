@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Remind Me This - SMS CTA and Opt-In Proof</title>
+    <style>
+      :root {
+        --bg: #f4f7fb;
+        --card: #ffffff;
+        --text: #0f172a;
+        --muted: #475569;
+        --line: #d9e2f0;
+        --accent: #1d4ed8;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .wrap {
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 24px 16px 40px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 18px;
+        margin-bottom: 14px;
+      }
+      h1 {
+        margin: 0 0 8px 0;
+        font-size: 28px;
+      }
+      h2 {
+        margin: 0 0 8px 0;
+        font-size: 20px;
+      }
+      p,
+      li {
+        font-size: 15px;
+        line-height: 1.5;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .cta {
+        border-left: 4px solid var(--accent);
+        padding: 10px 12px;
+        background: #eff6ff;
+        border-radius: 8px;
+        margin-top: 8px;
+      }
+      .img-grid {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+      .img-card {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 8px;
+        background: #fff;
+      }
+      img {
+        width: 100%;
+        height: auto;
+        border-radius: 8px;
+        border: 1px solid #cbd5e1;
+      }
+      code {
+        background: #f1f5f9;
+        border: 1px solid #d9e2f0;
+        border-radius: 6px;
+        padding: 1px 6px;
+      }
+      a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Remind Me This SMS CTA and Opt-In Proof</h1>
+        <p class="muted">
+          This page is publicly hosted for campaign verification and demonstrates the exact SMS opt-in flow
+          shown to users during app registration.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Where users sign up</h2>
+        <p>
+          Users create an account inside the iOS app named <strong>Remind Me This</strong>.
+        </p>
+        <p>
+          The sign-up flow is not behind a website login page. The CTA is shown in-app at account creation.
+          This page and the screenshots below are provided as reviewer-accessible proof.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Exact SMS CTA shown to users</h2>
+        <div class="cta">
+          <p><strong>SMS reminders consent *</strong></p>
+          <p>
+            Reply choice in app: Y for Yes or N for No. Msg frequency varies. Msg and data rates may apply.
+            Reply STOP to cancel, HELP for help.
+          </p>
+        </div>
+        <p>
+          Consent is explicit and optional. Users must actively choose <strong>Y</strong> or <strong>N</strong>.
+          No pre-checked consent is used.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Proof screenshots (public)</h2>
+        <p class="muted">
+          Replace these image files with current sign-up screenshots from production-like app flow.
+        </p>
+        <div class="img-grid">
+          <div class="img-card">
+            <p><strong>Step 1 - Registration screen</strong></p>
+            <img src="/legal/proof-signup-screen.png" alt="Registration screen with account fields" />
+          </div>
+          <div class="img-card">
+            <p><strong>Step 2 - SMS consent choice</strong></p>
+            <img src="/legal/proof-sms-consent.png" alt="SMS consent section showing Y and N options" />
+          </div>
+          <div class="img-card">
+            <p><strong>Step 3 - Terms acceptance area</strong></p>
+            <img src="/legal/proof-terms-acceptance.png" alt="Terms acceptance control near account creation" />
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Related policy links</h2>
+        <ul>
+          <li><a href="/legal/privacy-policy">Privacy Policy</a></li>
+          <li><a href="/legal/terms-of-service">Terms of Service</a></li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Reviewer note</h2>
+        <p>
+          If additional evidence is needed, contact support at
+          <a href="mailto:reminderagentbot@gmail.com">reminderagentbot@gmail.com</a>.
+        </p>
+      </div>
+    </div>
+  </body>
+</html>

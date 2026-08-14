@@ -39,6 +39,7 @@ const userAgreementFileNames = [
 ];
 const privacyPolicyFileName = 'privacy-policy.html';
 const termsOfServiceFileName = 'terms-of-service.html';
+const smsConsentProofFileName = 'sms-consent-proof.html';
 
 const smtpHost = process.env.SMTP_HOST;
 const smtpPort = Number(process.env.SMTP_PORT || 587);
@@ -149,6 +150,15 @@ const resolvePrivacyPolicyFilePath = () => {
 
 const resolveTermsOfServiceFilePath = () => {
   const candidatePath = path.join(legalDocumentsDir, termsOfServiceFileName);
+  if (fs.existsSync(candidatePath)) {
+    return candidatePath;
+  }
+
+  return null;
+};
+
+const resolveSmsConsentProofFilePath = () => {
+  const candidatePath = path.join(legalDocumentsDir, smsConsentProofFileName);
   if (fs.existsSync(candidatePath)) {
     return candidatePath;
   }
@@ -1096,6 +1106,30 @@ app.get('/legal/terms-of-service', (_req, res) => {
   }
 
   return res.sendFile(termsPath);
+});
+
+app.get('/legal/sms-consent-proof', (_req, res) => {
+  const proofPath = resolveSmsConsentProofFilePath();
+  if (!proofPath) {
+    return res.status(404).json({
+      error: 'sms consent proof file not found',
+      expectedPath: path.join('backend', 'public', 'legal', smsConsentProofFileName),
+    });
+  }
+
+  return res.sendFile(proofPath);
+});
+
+app.get('/legal/cta-proof', (_req, res) => {
+  const proofPath = resolveSmsConsentProofFilePath();
+  if (!proofPath) {
+    return res.status(404).json({
+      error: 'sms consent proof file not found',
+      expectedPath: path.join('backend', 'public', 'legal', smsConsentProofFileName),
+    });
+  }
+
+  return res.sendFile(proofPath);
 });
 
 const mapDatabaseErrorToResponse = (error: unknown) => {
