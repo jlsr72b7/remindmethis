@@ -4,6 +4,7 @@ import {
   Alert,
   Animated,
   Button,
+  Dimensions,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -1909,8 +1910,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const [apiStorageStatusMessage, setApiStorageStatusMessage] = useState<string | null>(null);
   const [reminderDeliveryDeviceEnabled, setReminderDeliveryDeviceEnabled] = useState(true);
-  const nextEventTickerX = useRef(new Animated.Value(0)).current;
-  const nextReminderTickerX = useRef(new Animated.Value(0)).current;
+  const tickerStartX = Dimensions.get('window').width;
+  const nextEventTickerX = useRef(new Animated.Value(tickerStartX)).current;
+  const nextReminderTickerX = useRef(new Animated.Value(tickerStartX)).current;
   const [reminderDeliveryEmailEnabled, setReminderDeliveryEmailEnabled] = useState(false);
   const [reminderDeliveryTextEnabled, setReminderDeliveryTextEnabled] = useState(false);
   const [reminderSoundEnabled, setReminderSoundEnabled] = useState(true);
@@ -4907,7 +4909,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         }),
         Animated.delay(50),
         Animated.timing(nextEventTickerX, {
-          toValue: 0,
+          toValue: tickerStartX,
           duration: 0,
           useNativeDriver: true,
         }),
@@ -4923,7 +4925,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         }),
         Animated.delay(50),
         Animated.timing(nextReminderTickerX, {
-          toValue: 0,
+          toValue: tickerStartX,
           duration: 0,
           useNativeDriver: true,
         }),
