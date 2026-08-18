@@ -1086,6 +1086,7 @@ interface AccountScreenProps {
   returnToLanding?: boolean;
   onInitialActionHandled?: () => void;
   onBackToLanding?: () => void;
+  onContactBirthdaysImported?: (imports: { contactName: string; birthDate: string }[]) => void;
 }
 
 interface AccountContact {
@@ -1161,6 +1162,7 @@ function AccountScreen({
   returnToLanding,
   onInitialActionHandled,
   onBackToLanding,
+  onContactBirthdaysImported,
 }: AccountScreenProps) {
   const initialNameParts = useMemo(() => splitNameParts(user.fullName || ''), [user.fullName]);
   const initialAddressParts = useMemo(() => parseAddressParts(user.address || ''), [user.address]);
@@ -3319,6 +3321,14 @@ function AccountScreen({
     });
 
     await persistContactsSnapshot(nextContacts, contactGroups);
+
+    const birthdayImports = filteredContacts
+      .filter((entry) => Boolean(entry.birthDate))
+      .map((entry) => ({ contactName: getContactDisplayName(entry), birthDate: entry.birthDate }));
+    if (birthdayImports.length) {
+      onContactBirthdaysImported?.(birthdayImports);
+    }
+
     const duplicateCount = selectedContacts.length - filteredContacts.length;
     if (duplicateCount > 0) {
       setContactsMessage(filteredContacts.length === 1
@@ -3330,7 +3340,7 @@ function AccountScreen({
     setContactsMessage(filteredContacts.length === 1
       ? `Imported ${getContactDisplayName(filteredContacts[0])}.`
       : `Imported ${filteredContacts.length} iPhone contacts.`);
-  }, [activeContactEmails, activeContactPhones, contactGroups, contacts, persistContactsSnapshot]);
+  }, [activeContactEmails, activeContactPhones, contactGroups, contacts, onContactBirthdaysImported, persistContactsSnapshot]);
 
   const loadDeviceContactsForImport = useCallback(async () => {
     if (Platform.OS === 'web') {
@@ -5640,6 +5650,7 @@ export default function App() {
   const [showTitleScreen, setShowTitleScreen] = useState(true);
   const [migrationSummary, setMigrationSummary] = useState<string | null>(null);
   const [accountReminderTimeZone, setAccountReminderTimeZone] = useState(getDeviceTimeZone());
+  const [pendingBirthdayImports, setPendingBirthdayImports] = useState<{ contactName: string; birthDate: string }[]>([]);
   const [biometricUnlockState, setBiometricUnlockState] = useState<'checking' | 'ready' | 'unsupported' | 'failed'>('checking');
   const titleScreenScale = useRef(new Animated.Value(0.6)).current;
   const titleScreenOpacity = useRef(new Animated.Value(0)).current;
@@ -6092,6 +6103,9 @@ export default function App() {
           setShowAccount(false);
           setAuthMode('signin');
         }}
+        onContactBirthdaysImported={(imports) => {
+          setPendingBirthdayImports((current) => [...current, ...imports]);
+        }}
       />
     );
   } else {
@@ -6122,6 +6136,8 @@ export default function App() {
           userId={currentUser.id}
           userEmail={currentUser.email}
           defaultReminderTimeZone={accountReminderTimeZone}
+          pendingBirthdayImports={pendingBirthdayImports}
+          onBirthdayImportsProcessed={() => setPendingBirthdayImports([])}
           onOpenContacts={() => {
             setRequestedAccountAction('contacts');
             setShouldReturnToLandingFromAccount(true);

@@ -1736,12 +1736,19 @@ const getReminderCandidates = (event: SpecialDateEvent): ReminderCandidate[] => 
   ));
 };
 
+export interface ContactBirthdayImport {
+  contactName: string;
+  birthDate: string;
+}
+
 interface AppContentProps {
   userId?: string;
   userEmail?: string;
   defaultReminderTimeZone?: string;
   onOpenContacts?: () => void;
   onOpenCalendarSync?: () => void;
+  pendingBirthdayImports?: ContactBirthdayImport[];
+  onBirthdayImportsProcessed?: () => void;
 }
 
 interface ShareContact {
@@ -1842,7 +1849,7 @@ const normalizeShareContactsSnapshot = (raw: string | null): { contacts: ShareCo
   }
 };
 
-export default function AppContent({ userId, userEmail, defaultReminderTimeZone, onOpenContacts, onOpenCalendarSync }: AppContentProps) {
+export default function AppContent({ userId, userEmail, defaultReminderTimeZone, onOpenContacts, onOpenCalendarSync, pendingBirthdayImports, onBirthdayImportsProcessed }: AppContentProps) {
   const apiStorageEnabled = isApiStorageEnabled();
   const effectiveReminderTimeZone = defaultReminderTimeZone || DEVICE_TIME_ZONE;
   const [events, setEvents] = useState<SpecialDateEvent[]>([]);
@@ -1913,6 +1920,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const tickerStartX = Dimensions.get('window').width;
   const nextEventTickerX = useRef(new Animated.Value(tickerStartX)).current;
   const nextReminderTickerX = useRef(new Animated.Value(tickerStartX)).current;
+  const [nextEventTickerTextWidth, setNextEventTickerTextWidth] = useState(0);
+  const [nextReminderTickerTextWidth, setNextReminderTickerTextWidth] = useState(0);
   const [reminderDeliveryEmailEnabled, setReminderDeliveryEmailEnabled] = useState(false);
   const [reminderDeliveryTextEnabled, setReminderDeliveryTextEnabled] = useState(false);
   const [reminderSoundEnabled, setReminderSoundEnabled] = useState(true);
@@ -1952,6 +1961,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     reminderPage: 0,
   });
   const refreshInFlightRef = useRef(false);
+  const eventsRef = useRef(events);
+  const isProcessingBirthdayImportsRef = useRef(false);
+
+  useEffect(() => {
+    eventsRef.current = events;
+  }, [events]);
 
   const shareSelectableContacts = useMemo(
     () => shareContacts.filter((contact) => !contact.deletedAt),
@@ -2363,6 +2378,103 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
     })();
   }, [repairLegacyReminderTimes, userId]);
+
+  useEffect(() => {
+    if (!hasLoadedInitialEvents || !pendingBirthdayImports || !pendingBirthdayImports.length) {
+      return;
+    }
+
+    if (isProcessingBirthdayImportsRef.current) {
+      return;
+    }
+    isProcessingBirthdayImportsRef.current = true;
+
+    (async () => {
+      const createdEvents: SpecialDateEvent[] = [];
+      let workingEvents = eventsRef.current;
+
+      for (const entry of pendingBirthdayImports) {
+        const contactName = String(entry.contactName || '').trim();
+        const birthDateMatch = String(entry.birthDate || '').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+        if (!contactName || !birthDateMatch) {
+          continue;
+        }
+
+        const [, monthStr, dayStr, yearStr] = birthDateMatch;
+        const birthDate = new Date(Number(yearStr), Number(monthStr) - 1, Number(dayStr));
+        if (Number.isNaN(birthDate.getTime())) {
+          continue;
+        }
+        birthDate.setHours(0, 0, 0, 0);
+
+        const eventDateValue = getNextAnnualOccurrenceDate(birthDate, true);
+
+        const duplicateCandidate = {
+          title: 'Birthday',
+          people: contactName,
+          eventDateTime: eventDateValue,
+          eventAllDay: true,
+        };
+        const isDuplicate = workingEvents.some((event) => isTrueDuplicateEvent(event, duplicateCandidate))
+          || createdEvents.some((event) => isTrueDuplicateEvent(event, duplicateCandidate));
+
+        if (isDuplicate) {
+          continue;
+        }
+
+        const reminderAnchorDate = getDefaultReminderAnchorDate(eventDateValue, true, true);
+        const defaultReminderDrafts = buildDefaultReminderDrafts(
+          reminderAnchorDate,
+          '',
+          contactName,
+          'Birthday',
+          defaultReminderTime,
+        );
+
+        const variableReminderEntries: VariableReminderEntry[] = defaultReminderDrafts.map((item) => ({
+          id: item.id,
+          reminderDateTime: item.reminderDateTime,
+          notes: '',
+        }));
+
+        const primaryReminderDateTime = variableReminderEntries[0]?.reminderDateTime
+          || convertWallDateInTimeZoneToUtcIso(eventDateValue, effectiveReminderTimeZone);
+
+        const newEvent: SpecialDateEvent = {
+          id: createEventId(),
+          title: 'Birthday',
+          people: contactName,
+          ageAsOfToday: eventDateValue.getFullYear() - Number(yearStr),
+          eventDateTime: eventDateValue.toISOString(),
+          reminderDateTime: primaryReminderDateTime,
+          eventAllDay: true,
+          reminderAllDay: true,
+          reminderTimeZone: effectiveReminderTimeZone,
+          frequency: 'yearly',
+          reminderMode: 'default',
+          notified: false,
+          ...(variableReminderEntries.length ? { variableReminders: variableReminderEntries } : {}),
+        };
+
+        createdEvents.push(newEvent);
+        workingEvents = [newEvent, ...workingEvents];
+
+        await scheduleEventDeviceReminders('Birthday', contactName, 'default', primaryReminderDateTime, variableReminderEntries);
+      }
+
+      if (createdEvents.length) {
+        const updated = [...createdEvents, ...eventsRef.current];
+        setEvents(updated);
+        await saveEvents(updated, userId);
+        const reloaded = await loadEvents(userId);
+        setEvents(reloaded);
+        void autoPushGoogleCalendarIfConfigured();
+      }
+
+      isProcessingBirthdayImportsRef.current = false;
+      onBirthdayImportsProcessed?.();
+    })();
+  }, [hasLoadedInitialEvents, pendingBirthdayImports, userId, defaultReminderTime, effectiveReminderTimeZone, onBirthdayImportsProcessed]);
 
   useEffect(() => {
     const unsubscribe = subscribeApiStorageStatus((message) => {
@@ -4900,11 +5012,20 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   }, [currentView]);
 
   useEffect(() => {
+    const TICKER_SPEED_PX_PER_SEC = 65;
+    const TICKER_END_BUFFER = 20;
+
+    const nextEventEndX = -((nextEventTickerTextWidth || 300) + TICKER_END_BUFFER);
+    const nextEventDuration = ((tickerStartX - nextEventEndX) / TICKER_SPEED_PX_PER_SEC) * 1000;
+
+    const nextReminderEndX = -((nextReminderTickerTextWidth || 300) + TICKER_END_BUFFER);
+    const nextReminderDuration = ((tickerStartX - nextReminderEndX) / TICKER_SPEED_PX_PER_SEC) * 1000;
+
     const nextEventAnimation = Animated.loop(
       Animated.sequence([
         Animated.timing(nextEventTickerX, {
-          toValue: -820,
-          duration: 12000,
+          toValue: nextEventEndX,
+          duration: nextEventDuration,
           useNativeDriver: true,
         }),
         Animated.delay(50),
@@ -4919,8 +5040,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     const nextReminderAnimation = Animated.loop(
       Animated.sequence([
         Animated.timing(nextReminderTickerX, {
-          toValue: -820,
-          duration: 12000,
+          toValue: nextReminderEndX,
+          duration: nextReminderDuration,
           useNativeDriver: true,
         }),
         Animated.delay(50),
@@ -4939,7 +5060,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       nextEventAnimation.stop();
       nextReminderAnimation.stop();
     };
-  }, [landingTickerVersion, nextEventTickerX, nextReminderTickerX]);
+  }, [landingTickerVersion, nextEventTickerX, nextReminderTickerX, nextEventTickerTextWidth, nextReminderTickerTextWidth, tickerStartX]);
 
   const renderLandingView = () => (
     <ScrollView contentContainerStyle={styles.container}>
@@ -5024,7 +5145,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         <Text style={styles.landingTickerTitle}>Next Event</Text>
         <View style={styles.landingTickerWrap}>
           <Animated.View key={`next-event-ticker-${landingTickerVersion}`} style={[styles.landingTickerRow, { transform: [{ translateX: nextEventTickerX }] }]}>
-            <Text style={styles.landingTickerText}>{nextEventTickerMessage}</Text>
+            <Text
+              style={styles.landingTickerText}
+              onLayout={(event) => setNextEventTickerTextWidth(event.nativeEvent.layout.width)}
+            >
+              {nextEventTickerMessage}
+            </Text>
           </Animated.View>
         </View>
       </View>
@@ -5033,7 +5159,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         <Text style={styles.landingTickerTitle}>Next Reminder</Text>
         <View style={styles.landingTickerWrap}>
           <Animated.View key={`next-reminder-ticker-${landingTickerVersion}`} style={[styles.landingTickerRow, { transform: [{ translateX: nextReminderTickerX }] }]}>
-            <Text style={styles.landingTickerText}>{nextReminderTickerMessage}</Text>
+            <Text
+              style={styles.landingTickerText}
+              onLayout={(event) => setNextReminderTickerTextWidth(event.nativeEvent.layout.width)}
+            >
+              {nextReminderTickerMessage}
+            </Text>
           </Animated.View>
         </View>
       </View>
@@ -5044,26 +5175,30 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <View style={styles.manageEventsHeaderRow}>
         <Text style={styles.manageEventsTitle}>Manage Events</Text>
-        <TouchableOpacity style={[styles.floatingActionButton, styles.floatingActionSecondaryButton]} onPress={() => setCurrentView('landing')} activeOpacity={0.8}>
-          <Text style={styles.floatingActionSecondaryText}>Back</Text>
-        </TouchableOpacity>
       </View>
       <Text style={styles.subtitle}>Review and organize your saved events.</Text>
 
-      <View style={styles.viewControlsRow}>
+      <View style={[styles.viewControlsRow, styles.viewControlsRowCentered]}>
         {([
           { key: 'summary', label: 'Summary' },
           { key: 'calendar', label: 'Calendar' },
         ] as const).map((tab) => (
           <TouchableOpacity
             key={tab.key}
-            style={[styles.toggleButton, savedEventsView === tab.key && styles.toggleButtonActive]}
+            style={[styles.toggleButton, styles.viewControlsCompactButton, savedEventsView === tab.key && styles.toggleButtonActive]}
             onPress={() => setSavedEventsView(tab.key)}
             activeOpacity={0.8}
           >
             <Text style={styles.toggleButtonText}>{tab.label}</Text>
           </TouchableOpacity>
         ))}
+        <TouchableOpacity
+          style={[styles.toggleButton, styles.viewControlsCompactButton]}
+          onPress={() => setCurrentView('landing')}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.toggleButtonText}>Back</Text>
+        </TouchableOpacity>
       </View>
 
       {(isSavedEventsTypeFilterVisible || isSavedEventsSubtypeFilterVisible) ? (
@@ -5074,28 +5209,28 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         <Text style={styles.viewLabel}>Filter</Text>
         <View style={styles.viewControlsGroup}>
           <TouchableOpacity
-            style={[styles.toggleButton, savedEventsFilterType !== 'all' && styles.toggleButtonActive]}
+            style={styles.filterLinkButton}
             onPress={() => {
               setIsSavedEventsSubtypeFilterVisible(false);
               setIsSavedEventsTypeFilterVisible((current) => !current);
             }}
-            activeOpacity={0.8}
+            activeOpacity={0.6}
           >
-            <Text style={styles.toggleButtonText}>
+            <Text style={[styles.filterLinkText, savedEventsFilterType !== 'all' && styles.filterLinkTextActive]}>
               Event: {savedEventTypeOptions.find((option) => option.value === savedEventsFilterType)?.label || 'All'}
             </Text>
           </TouchableOpacity>
 
           {shouldShowSavedEventsSubtypeFilter ? (
             <TouchableOpacity
-              style={[styles.toggleButton, savedEventsFilterSubtype !== 'all' && styles.toggleButtonActive]}
+              style={styles.filterLinkButton}
               onPress={() => {
                 setIsSavedEventsTypeFilterVisible(false);
                 setIsSavedEventsSubtypeFilterVisible((current) => !current);
               }}
-              activeOpacity={0.8}
+              activeOpacity={0.6}
             >
-              <Text style={styles.toggleButtonText}>Subtype: {selectedSavedEventsSubtypeLabel || 'All'}</Text>
+              <Text style={[styles.filterLinkText, savedEventsFilterSubtype !== 'all' && styles.filterLinkTextActive]}>Subtype: {selectedSavedEventsSubtypeLabel || 'All'}</Text>
             </TouchableOpacity>
           ) : null}
         </View>
@@ -6873,11 +7008,31 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     justifyContent: 'flex-end',
   },
+  viewControlsRowCentered: {
+    justifyContent: 'center',
+  },
+  viewControlsCompactButton: {
+    width: 104,
+    minWidth: 0,
+    paddingHorizontal: 8,
+  },
+  filterLinkButton: {
+    paddingVertical: 4,
+  },
+  filterLinkText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  filterLinkTextActive: {
+    color: '#2563eb',
+  },
   savedEventsFilterRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     flexWrap: 'nowrap',
+    marginTop: 16,
   },
   viewLabel: {
     color: '#475569',
