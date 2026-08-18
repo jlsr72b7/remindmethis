@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Alert,
+  Animated,
   Button,
   KeyboardAvoidingView,
   Linking,
@@ -35,7 +36,6 @@ import {
   type ReminderDefaultTimeSettings,
   loadReminderSoundSettings,
   saveEvents,
-  requestNotificationPermission,
   sendShareEmailNotification,
   sendReminderEmailNotification,
   sendReminderSmsNotification,
@@ -48,6 +48,7 @@ import {
   clearScheduledReminders,
   getNotificationDiagnostics,
   playReminderPing,
+  requestNotificationPermission,
   scheduleReminder,
 } from './notifications';
 import { getDeviceTimeZone } from './timeZones';
@@ -62,6 +63,44 @@ type WorkSubtypeValue = 'meeting' | 'review' | 'conference' | 'demo' | 'workshop
 type SchoolSubtypeValue = 'quiz' | 'test' | 'paper-due' | 'project-due' | 'class-presentation' | 'other';
 type ReminderModeValue = 'none' | 'default' | 'static' | 'variable';
 type TimePickerTarget = 'event-start' | 'event-end' | 'static-reminder' | 'pending-reminder';
+type SavedEventsFilterType = EventTypeValue | 'all';
+type ReminderCandidate = {
+  event: SpecialDateEvent;
+  entry: VariableReminderEntry | null;
+  reminderDateTime: string;
+  entryId: string | null;
+};
+
+interface EventFormState {
+  eventType: EventTypeValue;
+  partySubtype: PartySubtypeValue;
+  medicalSubtype: MedicalSubtypeValue;
+  dentalSubtype: DentalSubtypeValue;
+  workSubtype: WorkSubtypeValue;
+  schoolSubtype: SchoolSubtypeValue;
+  shareAfterSave: boolean;
+  eventLocationEnabled: boolean;
+  eventLocationPlaceId: string;
+  eventLocationFormattedAddress: string;
+  eventLocationLine1: string;
+  eventLocationLine2: string;
+  eventLocationCity: string;
+  eventLocationState: string;
+  eventLocationZip: string;
+  eventLocationPhone: string;
+  customType: string;
+  ageAsOfToday: string;
+  people: string;
+  notes: string;
+  frequency: ReminderFrequency;
+  reminderMode: ReminderModeValue;
+  eventDateTime: Date;
+  eventEndDateTime: Date | null;
+  eventAllDay: boolean;
+  reminderDateTime: Date;
+  reminderAllDay: boolean;
+  reminderTimeZone: string;
+}
 
 const DEVICE_TIME_ZONE = getDeviceTimeZone();
 const IOS_SCHEDULE_LIMIT = 60;
@@ -306,7 +345,7 @@ const getSubtypeFieldLabel = (eventType: EventTypeValue) => {
   }
 };
 
-const getSubtypeDisplayLabel = (form: ReturnType<typeof getResetFormState>) => {
+const getSubtypeDisplayLabel = (form: EventFormState) => {
   switch (form.eventType) {
     case 'party':
       return partySubtypeLabels[form.partySubtype];
@@ -324,7 +363,7 @@ const getSubtypeDisplayLabel = (form: ReturnType<typeof getResetFormState>) => {
 };
 
 const getSubtypeValueForEventType = (
-  form: ReturnType<typeof getResetFormState>,
+  form: EventFormState,
   eventType: EventTypeValue,
 ) => {
   switch (eventType) {
@@ -358,7 +397,7 @@ const getDefaultEndDate = (startDate: Date) => {
 
 const createEventId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-const createDefaultForm = (reminderTimeZone: string) => {
+const createDefaultForm = (reminderTimeZone: string): EventFormState => {
   const defaultEventDateTime = getDefaultDate();
   return {
     eventType: 'birthday' as EventTypeValue,
@@ -386,20 +425,20 @@ const createDefaultForm = (reminderTimeZone: string) => {
     eventDateTime: defaultEventDateTime,
     eventEndDateTime: getDefaultEndDate(defaultEventDateTime),
     eventAllDay: false,
-    reminderDateTime: new Date(defaultEventDateTime),
+    reminderDateTime: new Date(0),
     reminderAllDay: false,
     reminderTimeZone,
   };
 };
 
-const getResetFormState = (reminderTimeZone: string) => {
+const getResetFormState = (reminderTimeZone: string): EventFormState => {
   const now = new Date();
-  now.setSeconds(0, 0, 0);
+  now.setSeconds(0);
   return {
     ...createDefaultForm(reminderTimeZone),
     eventDateTime: new Date(now),
     eventEndDateTime: getDefaultEndDate(new Date(now)),
-    reminderDateTime: new Date(now),
+    reminderDateTime: new Date(0),
   };
 };
 
@@ -583,7 +622,10 @@ const formatReminderTimeLabel = (hour: number, minute: number) => {
 };
 
 const formatPhoneNumberInput = (value: string) => {
-  const digits = value.replace(/\D/g, '').slice(0, 10);
+  const rawDigits = String(value || '').replace(/\D/g, '');
+  const digits = rawDigits.length === 11 && rawDigits.startsWith('1')
+    ? rawDigits.slice(1)
+    : rawDigits.slice(0, 10);
 
   if (!digits) {
     return '';
@@ -710,7 +752,7 @@ const buildDefaultReminderDrafts = (
   people: string,
   title: string,
   reminderTime: { hour: number; minute: number },
-) => {
+): SpecialDateEvent[] => {
   const now = Date.now();
   const sourceDate = new Date(eventDateTime);
   const reminderSpecs = [
@@ -744,10 +786,14 @@ const buildDefaultReminderDrafts = (
     return reminderDate;
   };
 
-  const reminders = reminderSpecs
+  const reminders: Array<SpecialDateEvent | null> = reminderSpecs
     .map((spec) => {
       const reminderDateTime = createReminderDate(spec.kind);
-      return reminderDateTime.getTime() >= now ? {
+      if (reminderDateTime.getTime() < now) {
+        return null;
+      }
+
+      return {
         id: `default-${spec.idPrefix}-${reminderDateTime.getTime()}`,
         title: title || 'Reminder',
         people: people || 'You',
@@ -756,16 +802,17 @@ const buildDefaultReminderDrafts = (
         eventAllDay: false,
         reminderAllDay: false,
         frequency: 'once' as ReminderFrequency,
-        notes,
+        notes: notes || '',
         notified: false,
-      } : null;
-    })
-    .filter((item): item is SpecialDateEvent => item !== null);
+      } satisfies SpecialDateEvent;
+    });
 
-  return reminders.sort((left, right) => new Date(left.reminderDateTime).getTime() - new Date(right.reminderDateTime).getTime());
+  return reminders
+    .filter((item): item is SpecialDateEvent => item !== null)
+    .sort((left, right) => new Date(left.reminderDateTime).getTime() - new Date(right.reminderDateTime).getTime());
 };
 
-const getEventFormState = (event: SpecialDateEvent) => {
+const getEventFormState = (event: SpecialDateEvent): EventFormState => {
   const normalizedTitle = event.title.toLowerCase().trim();
   const eventLocation = event.eventLocation;
   const hasEventLocation = Boolean(
@@ -781,11 +828,13 @@ const getEventFormState = (event: SpecialDateEvent) => {
     ),
   );
 
-  const baseState = {
-    partySubtype: 'birthday' as PartySubtypeValue,
-    medicalSubtype: 'appointment' as MedicalSubtypeValue,
-    dentalSubtype: 'cleaning' as DentalSubtypeValue,
-    workSubtype: 'meeting' as WorkSubtypeValue,
+  const baseState: EventFormState = {
+    eventType: 'birthday',
+    partySubtype: 'birthday',
+    schoolSubtype: 'quiz',
+    medicalSubtype: 'appointment',
+    dentalSubtype: 'cleaning',
+    workSubtype: 'meeting',
     shareAfterSave: false,
     eventLocationEnabled: hasEventLocation,
     eventLocationPlaceId: eventLocation?.placeId || '',
@@ -797,37 +846,48 @@ const getEventFormState = (event: SpecialDateEvent) => {
     eventLocationZip: eventLocation?.zip || '',
     eventLocationPhone: formatPhoneNumberInput(eventLocation?.phone || ''),
     customType: '',
+    ageAsOfToday: '',
+    people: '',
+    notes: '',
+    frequency: 'monthly',
+    reminderMode: 'none',
+    eventDateTime: new Date(),
+    eventEndDateTime: new Date(),
+    eventAllDay: false,
+    reminderDateTime: new Date(),
+    reminderAllDay: false,
+    reminderTimeZone: event.reminderTimeZone || getDeviceTimeZone(),
   };
 
   if (normalizedTitle === 'birthday') {
-    return { eventType: 'birthday' as EventTypeValue, ...baseState };
+    return { ...baseState, eventType: 'birthday' };
   }
 
   if (normalizedTitle.endsWith(' party')) {
     const baseLabel = normalizedTitle.slice(0, -' party'.length);
     if (baseLabel === 'birthday') {
-      return { eventType: 'party' as EventTypeValue, ...baseState, partySubtype: 'birthday' as PartySubtypeValue };
+      return { ...baseState, eventType: 'party' as EventTypeValue, partySubtype: 'birthday' as PartySubtypeValue };
     }
 
     if (baseLabel === 'anniversary') {
-      return { eventType: 'party' as EventTypeValue, ...baseState, partySubtype: 'anniversary' as PartySubtypeValue };
+      return { ...baseState, eventType: 'party' as EventTypeValue, partySubtype: 'anniversary' as PartySubtypeValue };
     }
 
     if (baseLabel === 'retirement') {
-      return { eventType: 'party' as EventTypeValue, ...baseState, partySubtype: 'retirement' as PartySubtypeValue };
+      return { ...baseState, eventType: 'party' as EventTypeValue, partySubtype: 'retirement' as PartySubtypeValue };
     }
 
     if (baseLabel === 'engagement') {
-      return { eventType: 'party' as EventTypeValue, ...baseState, partySubtype: 'engagement' as PartySubtypeValue };
+      return { ...baseState, eventType: 'party' as EventTypeValue, partySubtype: 'engagement' as PartySubtypeValue };
     }
 
     if (baseLabel === 'holiday') {
-      return { eventType: 'party' as EventTypeValue, ...baseState, partySubtype: 'holiday' as PartySubtypeValue };
+      return { ...baseState, eventType: 'party' as EventTypeValue, partySubtype: 'holiday' as PartySubtypeValue };
     }
   }
 
   if (normalizedTitle === 'doctors appointment' || normalizedTitle === 'medical appointment') {
-    return { eventType: 'medical' as EventTypeValue, ...baseState, medicalSubtype: 'appointment' as MedicalSubtypeValue };
+    return { ...baseState, eventType: 'medical' as EventTypeValue, medicalSubtype: 'appointment' as MedicalSubtypeValue };
   }
 
   if (normalizedTitle.startsWith('medical ')) {
@@ -842,8 +902,8 @@ const getEventFormState = (event: SpecialDateEvent) => {
 
     if (medicalSubtypeMap[medicalLabel]) {
       return {
-        eventType: 'medical' as EventTypeValue,
         ...baseState,
+        eventType: 'medical' as EventTypeValue,
         medicalSubtype: medicalSubtypeMap[medicalLabel],
       };
     }
@@ -859,14 +919,14 @@ const getEventFormState = (event: SpecialDateEvent) => {
 
   if (standaloneMedicalSubtypeMap[normalizedTitle]) {
     return {
-      eventType: 'medical' as EventTypeValue,
       ...baseState,
+      eventType: 'medical' as EventTypeValue,
       medicalSubtype: standaloneMedicalSubtypeMap[normalizedTitle],
     };
   }
 
   if (normalizedTitle === 'dental') {
-    return { eventType: 'dental' as EventTypeValue, ...baseState, dentalSubtype: 'other' as DentalSubtypeValue };
+    return { ...baseState, eventType: 'dental' as EventTypeValue, dentalSubtype: 'other' as DentalSubtypeValue };
   }
 
   if (normalizedTitle.startsWith('dental ')) {
@@ -886,8 +946,8 @@ const getEventFormState = (event: SpecialDateEvent) => {
 
     if (dentalSubtypeMap[dentalLabel]) {
       return {
-        eventType: 'dental' as EventTypeValue,
         ...baseState,
+        eventType: 'dental' as EventTypeValue,
         dentalSubtype: dentalSubtypeMap[dentalLabel],
       };
     }
@@ -908,14 +968,14 @@ const getEventFormState = (event: SpecialDateEvent) => {
 
   if (standaloneDentalSubtypeMap[normalizedTitle]) {
     return {
-      eventType: 'dental' as EventTypeValue,
       ...baseState,
+      eventType: 'dental' as EventTypeValue,
       dentalSubtype: standaloneDentalSubtypeMap[normalizedTitle],
     };
   }
 
   if (normalizedTitle === 'work') {
-    return { eventType: 'work' as EventTypeValue, ...baseState, workSubtype: 'other' as WorkSubtypeValue };
+    return { ...baseState, eventType: 'work' as EventTypeValue, workSubtype: 'other' as WorkSubtypeValue };
   }
 
   if (normalizedTitle.startsWith('work ')) {
@@ -932,8 +992,8 @@ const getEventFormState = (event: SpecialDateEvent) => {
 
     if (workSubtypeMap[workLabel]) {
       return {
-        eventType: 'work' as EventTypeValue,
         ...baseState,
+        eventType: 'work' as EventTypeValue,
         workSubtype: workSubtypeMap[workLabel],
       };
     }
@@ -951,9 +1011,48 @@ const getEventFormState = (event: SpecialDateEvent) => {
 
   if (standaloneWorkSubtypeMap[normalizedTitle]) {
     return {
-      eventType: 'work' as EventTypeValue,
       ...baseState,
+      eventType: 'work' as EventTypeValue,
       workSubtype: standaloneWorkSubtypeMap[normalizedTitle],
+    };
+  }
+
+  if (normalizedTitle === 'school') {
+    return { ...baseState, eventType: 'school' as EventTypeValue, schoolSubtype: 'other' as SchoolSubtypeValue };
+  }
+
+  if (normalizedTitle.startsWith('school ')) {
+    const schoolLabel = normalizedTitle.slice('school '.length).trim();
+    const schoolSubtypeMap: Record<string, SchoolSubtypeValue> = {
+      quiz: 'quiz',
+      test: 'test',
+      'paper due': 'paper-due',
+      'project due': 'project-due',
+      'class presentation': 'class-presentation',
+    };
+
+    if (schoolSubtypeMap[schoolLabel]) {
+      return {
+        ...baseState,
+        eventType: 'school' as EventTypeValue,
+        schoolSubtype: schoolSubtypeMap[schoolLabel],
+      };
+    }
+  }
+
+  const standaloneSchoolSubtypeMap: Record<string, SchoolSubtypeValue> = {
+    quiz: 'quiz',
+    test: 'test',
+    'paper due': 'paper-due',
+    'project due': 'project-due',
+    'class presentation': 'class-presentation',
+  };
+
+  if (standaloneSchoolSubtypeMap[normalizedTitle]) {
+    return {
+      ...baseState,
+      eventType: 'school' as EventTypeValue,
+      schoolSubtype: standaloneSchoolSubtypeMap[normalizedTitle],
     };
   }
 
@@ -964,14 +1063,14 @@ const getEventFormState = (event: SpecialDateEvent) => {
     };
 
     return {
-      eventType: eventTypeMap[normalizedTitle],
       ...baseState,
+      eventType: eventTypeMap[normalizedTitle],
     };
   }
 
   return {
-    eventType: 'other' as EventTypeValue,
     ...baseState,
+    eventType: 'other' as EventTypeValue,
     customType: event.title,
   };
 };
@@ -1594,7 +1693,7 @@ const dedupeDateOccurrences = (occurrences: Date[]) => {
     });
 };
 
-const getReminderCandidates = (event: SpecialDateEvent) => {
+const getReminderCandidates = (event: SpecialDateEvent): ReminderCandidate[] => {
   const reminderMode = getReminderModeValue(event);
   if (reminderMode === 'none') {
     return [];
@@ -1622,7 +1721,7 @@ const getReminderCandidates = (event: SpecialDateEvent) => {
     return variableCandidates.length ? variableCandidates : [staticCandidate];
   }
 
-  const candidatesByTime = new Map<number, typeof staticCandidate>();
+  const candidatesByTime = new Map<number, ReminderCandidate>();
   [staticCandidate, ...variableCandidates].forEach((candidate) => {
     const time = new Date(candidate.reminderDateTime).getTime();
     const existing = candidatesByTime.get(time);
@@ -1640,6 +1739,8 @@ interface AppContentProps {
   userId?: string;
   userEmail?: string;
   defaultReminderTimeZone?: string;
+  onOpenContacts?: () => void;
+  onOpenCalendarSync?: () => void;
 }
 
 interface ShareContact {
@@ -1740,14 +1841,14 @@ const normalizeShareContactsSnapshot = (raw: string | null): { contacts: ShareCo
   }
 };
 
-export default function AppContent({ userId, userEmail, defaultReminderTimeZone }: AppContentProps) {
+export default function AppContent({ userId, userEmail, defaultReminderTimeZone, onOpenContacts, onOpenCalendarSync }: AppContentProps) {
   const apiStorageEnabled = isApiStorageEnabled();
   const effectiveReminderTimeZone = defaultReminderTimeZone || DEVICE_TIME_ZONE;
   const [events, setEvents] = useState<SpecialDateEvent[]>([]);
   const [hasLoadedInitialEvents, setHasLoadedInitialEvents] = useState(false);
   const [form, setForm] = useState(() => getResetFormState(effectiveReminderTimeZone));
   const [hasSelectedEventType, setHasSelectedEventType] = useState(false);
-  const [isEventTypePickerVisible, setIsEventTypePickerVisible] = useState(true);
+  const [isEventTypePickerVisible, setIsEventTypePickerVisible] = useState(false);
   const [eventTypeDraft, setEventTypeDraft] = useState<EventTypeValue | ''>('');
   const [hasSelectedSubtype, setHasSelectedSubtype] = useState(false);
   const [isSubtypePickerVisible, setIsSubtypePickerVisible] = useState(false);
@@ -1768,16 +1869,27 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const [isDeletingConfirmedItem, setIsDeletingConfirmedItem] = useState(false);
   const [isDeletingConfirmedEvent, setIsDeletingConfirmedEvent] = useState(false);
   const [remindersForEventId, setRemindersForEventId] = useState<string | null>(null);
-  const [currentView, setCurrentView] = useState<'landing' | 'create' | 'share'>('landing');
+  const [currentView, setCurrentView] = useState<'landing' | 'create' | 'share' | 'manage-events' | 'manage-reminders'>('landing');
+  const [landingTickerVersion, setLandingTickerVersion] = useState(0);
+  const previousViewRef = useRef(currentView);
   const [viewVersion, setViewVersion] = useState(0);
   const [pendingVariableReminders, setPendingVariableReminders] = useState<SpecialDateEvent[]>([]);
   const [seededVariableDraftIds, setSeededVariableDraftIds] = useState<string[]>([]);
-  const [pendingReminderDateTime, setPendingReminderDateTime] = useState<Date>(getDefaultDate());
+  const [pendingReminderDateTime, setPendingReminderDateTime] = useState<Date>(new Date(0));
   const [pendingReminderMonth, setPendingReminderMonth] = useState<Date>(getDefaultDate());
   const [staticReminderMonth, setStaticReminderMonth] = useState<Date>(getDefaultDate());
+  const [isStaticReminderTimeSelected, setIsStaticReminderTimeSelected] = useState(false);
+  const [isVariableReminderTimeSelected, setIsVariableReminderTimeSelected] = useState(false);
+  const [isReminderAddedFlash, setIsReminderAddedFlash] = useState(false);
   const [hasTouchedStaticReminderSchedule, setHasTouchedStaticReminderSchedule] = useState(false);
   const [savedEventsView, setSavedEventsView] = useState<'list' | 'calendar' | 'summary'>('summary');
   const [savedRemindersView, setSavedRemindersView] = useState<'list' | 'calendar' | 'summary'>('summary');
+  const [isManageEventsVisible, setIsManageEventsVisible] = useState(false);
+  const [isManageRemindersVisible, setIsManageRemindersVisible] = useState(false);
+  const [savedEventsFilterType, setSavedEventsFilterType] = useState<SavedEventsFilterType>('all');
+  const [savedEventsFilterSubtype, setSavedEventsFilterSubtype] = useState<string>('all');
+  const [isSavedEventsTypeFilterVisible, setIsSavedEventsTypeFilterVisible] = useState(false);
+  const [isSavedEventsSubtypeFilterVisible, setIsSavedEventsSubtypeFilterVisible] = useState(false);
   const [savedEventsSummaryPage, setSavedEventsSummaryPage] = useState(0);
   const [savedRemindersSummaryPage, setSavedRemindersSummaryPage] = useState(0);
   const [selectedCalendarDate, setSelectedCalendarDate] = useState<Date | null>(null);
@@ -1797,6 +1909,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const [apiStorageStatusMessage, setApiStorageStatusMessage] = useState<string | null>(null);
   const [reminderDeliveryDeviceEnabled, setReminderDeliveryDeviceEnabled] = useState(true);
+  const nextEventTickerX = useRef(new Animated.Value(0)).current;
+  const nextReminderTickerX = useRef(new Animated.Value(0)).current;
   const [reminderDeliveryEmailEnabled, setReminderDeliveryEmailEnabled] = useState(false);
   const [reminderDeliveryTextEnabled, setReminderDeliveryTextEnabled] = useState(false);
   const [reminderSoundEnabled, setReminderSoundEnabled] = useState(true);
@@ -1864,7 +1978,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
   const resetTypeSelectionUi = useCallback(() => {
     setHasSelectedEventType(false);
-    setIsEventTypePickerVisible(true);
+    setIsEventTypePickerVisible(false);
     setEventTypeDraft('');
     setHasSelectedSubtype(false);
     setIsSubtypePickerVisible(false);
@@ -2223,10 +2337,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         setReminderDeliveryTextEnabled(deliverySettings.text);
 
         if (deliverySettings.device) {
-          const permissionGranted = await requestNotificationPermission();
-          if (!permissionGranted) {
-            setApiStorageStatusMessage('iOS notification permission is not enabled, so reminders will only appear inside the app until you allow notifications in Settings.');
-          }
+          await requestNotificationPermission();
         }
       } catch (error) {
         console.warn('Reminder delivery settings load failed', error);
@@ -2408,7 +2519,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       const reminderCandidates = activeEvents.flatMap((event) => getReminderCandidates(event));
       const dueReminder = reminderCandidates.find((candidate) => {
         if (candidate.entry) {
-          return new Date(candidate.reminderDateTime).getTime() <= now.getTime() && !candidate.entry.notified;
+          return new Date(candidate.reminderDateTime).getTime() <= now.getTime();
         }
 
         return shouldTriggerReminder(candidate.event, now);
@@ -2465,6 +2576,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
             people: dueReminder.event.people,
             eventDateTime: dueReminder.event.eventDateTime,
             eventAllDay: dueReminder.event.eventAllDay,
+            reminderTimeZone: dueReminder.event.reminderTimeZone,
             notes: dueReminder.entry?.notes || dueReminder.event.notes,
           });
         }
@@ -2477,6 +2589,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
             eventDateTime: dueReminder.event.eventDateTime,
             eventAllDay: dueReminder.event.eventAllDay,
             reminderDateTime: dueReminder.reminderDateTime,
+            reminderTimeZone: dueReminder.event.reminderTimeZone,
             notes: dueReminder.entry?.notes || dueReminder.event.notes,
           });
         }
@@ -2555,6 +2668,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
   const addPendingVariableReminder = () => {
     if (form.reminderMode === 'static') {
+      if (!isStaticReminderTimeSelected) {
+        setValidationMessage('Please choose a reminder time before adding reminders.');
+        return;
+      }
+
       const staticOccurrences = getStaticReminderOccurrencesForForm();
       if (!staticOccurrences.length) {
         setValidationMessage('No upcoming recurring reminders found for this schedule.');
@@ -2571,10 +2689,24 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         return [...merged];
       });
       setValidationMessage(null);
+      setIsReminderAddedFlash(true);
+      setIsStaticReminderTimeSelected(false);
+      setForm((current) => ({
+        ...current,
+        reminderDateTime: new Date(0),
+      }));
+      setTimeout(() => {
+        setIsReminderAddedFlash(false);
+      }, 500);
       return;
     }
 
-    const sourceReminderDate = form.reminderMode === 'static' ? form.reminderDateTime : pendingReminderDateTime;
+    if (!isVariableReminderTimeSelected) {
+      setValidationMessage('Please choose a reminder time before adding reminders.');
+      return;
+    }
+
+    const sourceReminderDate = pendingReminderDateTime;
     const nextReminderDate = new Date(sourceReminderDate);
     nextReminderDate.setHours(sourceReminderDate.getHours(), sourceReminderDate.getMinutes(), 0, 0);
     const storedReminderDateTime = convertWallDateInTimeZoneToUtcIso(nextReminderDate, form.reminderTimeZone);
@@ -2586,10 +2718,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     }
 
     const isDuplicatePending = pendingVariableReminders.some((item) => new Date(item.reminderDateTime).getTime() === storedReminderTime);
-    const isDuplicateStatic = form.reminderMode === 'static'
-      && getStaticReminderOccurrencesForForm().some((occurrence) => occurrence.getTime() === storedReminderTime);
 
-    if (isDuplicatePending || isDuplicateStatic) {
+    if (isDuplicatePending) {
       setValidationMessage('Duplicate reminder ignored.');
       return;
     }
@@ -2610,6 +2740,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     };
 
     setPendingVariableReminders((current) => sortVariableReminderDrafts([...current, nextReminder]));
+    setIsReminderAddedFlash(true);
+    setIsVariableReminderTimeSelected(false);
+    setPendingReminderDateTime(new Date(0));
+    setTimeout(() => {
+      setIsReminderAddedFlash(false);
+    }, 500);
   };
 
   const addReminderToEvent = async (eventId: string) => {
@@ -2630,36 +2766,25 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       }
 
       const reminderMode = getReminderModeValue(event);
-      const nextVariableReminders = sortVariableReminderDrafts([
+      const nextVariableReminderEntries: VariableReminderEntry[] = [
         ...(event.variableReminders || []),
         {
           id: reminderEntry.id,
-          title: 'Custom reminder',
-          people: event.people,
-          eventDateTime: event.eventDateTime,
           reminderDateTime: reminderEntry.reminderDateTime,
-          eventAllDay: event.eventAllDay,
-          reminderAllDay: event.reminderAllDay,
-          frequency: 'once' as ReminderFrequency,
           notes: event.notes || '',
-          notified: false,
         },
-      ]);
+      ].sort((left, right) => new Date(left.reminderDateTime).getTime() - new Date(right.reminderDateTime).getTime());
 
       const nextReminderDateTime = reminderMode === 'static'
         ? event.reminderDateTime
-        : nextVariableReminders[0].reminderDateTime;
+        : nextVariableReminderEntries[0]?.reminderDateTime || event.reminderDateTime;
 
       return {
         ...event,
         frequency: reminderMode === 'none' ? 'once' : event.frequency,
         reminderMode: reminderMode === 'none' ? 'variable' : reminderMode,
         reminderDateTime: nextReminderDateTime,
-        variableReminders: nextVariableReminders.map((item) => ({
-          id: item.id,
-          reminderDateTime: item.reminderDateTime,
-          notes: item.notes,
-        })),
+        variableReminders: nextVariableReminderEntries,
       };
     });
 
@@ -2777,9 +2902,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       }
 
       if (Platform.OS === 'ios' && dedupedQueue.length > prioritizedQueue.length) {
-        const queueLimitMessage = `iOS can keep at most 64 pending notifications. Scheduling the next ${prioritizedQueue.length} soonest reminders.`;
+        // Suppress the iOS queue-limit banner in the UI while still honoring the queue cap.
         if (SHOW_NOTIFICATION_DIAGNOSTICS) {
-          setApiStorageStatusMessage(queueLimitMessage);
+          console.log('iOS reminder queue capped at 64 notifications; scheduled the next soonest reminders only.');
         }
       }
 
@@ -2814,7 +2939,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     };
   }, [events, hasLoadedInitialEvents, reminderDeliveryDeviceEnabled]);
 
-  const saveCurrentEvent = async () => {
+  const saveCurrentEvent = async (shareOverride?: boolean) => {
     if (isSavingEvent) {
       return;
     }
@@ -2919,7 +3044,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         return;
       }
 
-      const effectivePendingVariableReminders = form.reminderMode === 'default' && !pendingVariableReminders.length
+      const effectivePendingVariableReminders: SpecialDateEvent[] = form.reminderMode === 'default' && !pendingVariableReminders.length
         ? buildDefaultReminderDrafts(
             getDefaultReminderAnchorDate(eventDateValue, isAnnualEvent, isAllDay),
             notes,
@@ -2979,7 +3104,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       setSeededVariableDraftIds([]);
       setHasTouchedStaticReminderSchedule(false);
       const resetDate = new Date();
-      resetDate.setSeconds(0, 0, 0);
+      resetDate.setSeconds(0);
       setForm(getResetFormState(effectiveReminderTimeZone));
       setPickerMonth(new Date(resetDate));
       setStaticReminderMonth(new Date(resetDate.getFullYear(), resetDate.getMonth(), 1));
@@ -3062,7 +3187,17 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   };
 
   const deleteReminderEntry = async (eventId: string, reminderEntryId: string) => {
-    const nextEvents = events.map((event) => {
+    const currentEvents = events;
+    const targetEvent = currentEvents.find((event) => event.id === eventId);
+
+    if (!targetEvent) {
+      setConfirmDeleteReminder(null);
+      setRemindersForEventId(null);
+      setSelectedSummaryEventId(null);
+      return;
+    }
+
+    const nextEvents = currentEvents.map((event): SpecialDateEvent => {
       if (event.id !== eventId) {
         return event;
       }
@@ -3073,8 +3208,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       if (!nextVariableReminders.length) {
         return {
           ...event,
-          reminderMode: reminderMode === 'static' ? 'static' : 'none',
+          reminderMode: 'none',
           variableReminders: undefined,
+          notified: false,
+          lastReminderTriggeredAt: undefined,
         };
       }
 
@@ -3084,9 +3221,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
       return {
         ...event,
-        reminderMode: reminderMode === 'static' ? 'static' : 'variable',
+        reminderMode: reminderMode === 'static' ? 'variable' : 'variable',
         variableReminders: nextVariableReminders,
-        reminderDateTime: reminderMode === 'static' ? event.reminderDateTime : nextReminderDateTime,
+        reminderDateTime: nextReminderDateTime,
+        notified: false,
+        lastReminderTriggeredAt: undefined,
       };
     });
 
@@ -3095,6 +3234,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     const reloaded = await loadEvents(userId);
     setEvents(reloaded);
     setConfirmDeleteReminder(null);
+    setRemindersForEventId(null);
+    setSelectedSummaryEventId(null);
     Alert.alert('Removed', 'The reminder has been removed.');
   };
 
@@ -3157,6 +3298,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         reminderMode: 'none' as ReminderModeValue,
         variableReminders: undefined,
         notified: false,
+        lastReminderTriggeredAt: undefined,
       };
     });
 
@@ -3166,7 +3308,61 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setEvents(reloaded);
     setRemindersForEventId(null);
     setConfirmDeleteReminder(null);
+    setSelectedSummaryEventId(null);
     Alert.alert('Removed', 'All reminders for this event have been removed.');
+  };
+
+  const promptReminderDelete = (eventId: string, reminderEntryId?: string, reminderSource?: 'static' | 'variable', target: 'reminder' | 'all-reminders' = 'reminder') => {
+    const performDelete = async () => {
+      if (target === 'all-reminders') {
+        await deleteAllRemindersForEvent(eventId);
+        return;
+      }
+
+      if (reminderEntryId) {
+        await deleteReminderEntry(eventId, reminderEntryId);
+        return;
+      }
+
+      if (reminderSource === 'static') {
+        await deleteStaticReminder(eventId);
+        return;
+      }
+
+      await deleteAllRemindersForEvent(eventId);
+    };
+
+    Alert.alert(
+      target === 'all-reminders' ? 'Delete all reminders?' : 'Delete reminder?',
+      'This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            void performDelete();
+          },
+        },
+      ],
+    );
+  };
+
+  const promptEventDelete = (eventId: string) => {
+    Alert.alert(
+      'Delete event?',
+      'This will remove the event and all associated reminders.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            void deleteReminderEvent(eventId);
+          },
+        },
+      ],
+    );
   };
 
   const cancelEvent = async (eventId: string) => {
@@ -3217,14 +3413,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     return startTimeLabel;
   };
 
-  const applyEventTypeDraftSelection = useCallback(() => {
-    if (!eventTypeDraft) {
-      return;
-    }
-
-    const nextEventType = eventTypeDraft;
+  const handleSelectEventType = useCallback((nextEventType: EventTypeValue) => {
     const nextIsAllDay = nextEventType === 'birthday' || nextEventType === 'anniversary';
     const nextShowsSubtype = eventTypeHasSubtype(nextEventType);
+
+    setEventTypeDraft(nextEventType);
 
     setForm((current) => {
       const nextEventDate = new Date(current.eventDateTime);
@@ -3254,36 +3447,38 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setHasSelectedSubtype(false);
     setIsSubtypePickerVisible(nextShowsSubtype);
     setValidationMessage(null);
-  }, [eventTypeDraft]);
+  }, []);
 
-  const applySubtypeDraftSelection = useCallback(() => {
-    if (!subtypeDraft) {
+  const handleSelectSubtype = useCallback((nextSubtype: string) => {
+    if (!nextSubtype) {
       return;
     }
+
+    setSubtypeDraft(nextSubtype);
 
     setForm((current) => {
       if (current.eventType === 'party') {
         return {
           ...current,
-          partySubtype: subtypeDraft as PartySubtypeValue,
+          partySubtype: nextSubtype as PartySubtypeValue,
           eventAllDay: false,
         };
       }
 
       if (current.eventType === 'school') {
-        return { ...current, schoolSubtype: subtypeDraft as SchoolSubtypeValue };
+        return { ...current, schoolSubtype: nextSubtype as SchoolSubtypeValue };
       }
 
       if (current.eventType === 'medical') {
-        return { ...current, medicalSubtype: subtypeDraft as MedicalSubtypeValue };
+        return { ...current, medicalSubtype: nextSubtype as MedicalSubtypeValue };
       }
 
       if (current.eventType === 'dental') {
-        return { ...current, dentalSubtype: subtypeDraft as DentalSubtypeValue };
+        return { ...current, dentalSubtype: nextSubtype as DentalSubtypeValue };
       }
 
       if (current.eventType === 'work') {
-        return { ...current, workSubtype: subtypeDraft as WorkSubtypeValue };
+        return { ...current, workSubtype: nextSubtype as WorkSubtypeValue };
       }
 
       return current;
@@ -3292,7 +3487,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setHasSelectedSubtype(true);
     setIsSubtypePickerVisible(false);
     setValidationMessage(null);
-  }, [subtypeDraft]);
+  }, []);
+
+  const closeTypeSelectionDropdowns = useCallback(() => {
+    setIsEventTypePickerVisible(false);
+    setIsSubtypePickerVisible(false);
+  }, []);
 
   const startEditingEvent = (event: SpecialDateEvent) => {
     const now = getDefaultDate();
@@ -3351,7 +3551,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     });
   };
 
-  const saveEditedEvent = async () => {
+  const saveEditedEvent = async (shareOverride?: boolean) => {
     if (!editingEvent || isSavingEvent) return;
 
     setIsSavingEvent(true);
@@ -3452,7 +3652,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         return;
       }
 
-      const effectivePendingVariableReminders = form.reminderMode === 'default' && !pendingVariableReminders.length
+      const effectivePendingVariableReminders: SpecialDateEvent[] = form.reminderMode === 'default' && !pendingVariableReminders.length
         ? buildDefaultReminderDrafts(
             getDefaultReminderAnchorDate(eventDateValue, isAnnualEvent, isAllDay),
             notes,
@@ -3484,7 +3684,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
             ), variableReminderEntries[0]).reminderDateTime
           : reminderDateTimeInUtc;
 
-      const updatedEvents = events.map((event) =>
+      const updatedEvents: SpecialDateEvent[] = events.map((event): SpecialDateEvent =>
         event.id === editingEvent.id
           ? {
               ...event,
@@ -3515,7 +3715,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       setPendingVariableReminders([]);
       setSeededVariableDraftIds([]);
       const resetDate = new Date();
-      resetDate.setSeconds(0, 0, 0);
+      resetDate.setSeconds(0);
       setForm(getResetFormState(effectiveReminderTimeZone));
       setPickerMonth(new Date(resetDate));
       setStaticReminderMonth(new Date(resetDate.getFullYear(), resetDate.getMonth(), 1));
@@ -3606,7 +3806,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
 
   const updateFieldTime = (field: 'eventDateTime' | 'eventEndDateTime' | 'reminderDateTime', hours: number, minutes: number) => {
     setForm((current) => {
-      const nextDate = new Date(current[field]);
+      const currentValue = current[field];
+      const nextDate = currentValue instanceof Date && Number.isFinite(currentValue.getTime())
+        ? new Date(currentValue)
+        : new Date();
       nextDate.setHours(hours, minutes, 0, 0);
       if (field === 'eventDateTime' && isAnnualEventType(current.eventType, current.partySubtype)) {
         const normalizedDate = getNextAnnualOccurrenceDate(
@@ -3651,10 +3854,18 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`;
   };
 
+  const formatReminderTimeDisplay = (value: Date, isSelected: boolean) => {
+    if (!isSelected || !Number.isFinite(value.getTime())) {
+      return '----:--';
+    }
+
+    return formatTimeLabel(value);
+  };
+
   const formatDateTimeLabel = (value: Date, allDay: boolean) => {
     const dateLabel = value.toDateString();
-    if (allDay) return `${dateLabel} • All-day`;
-    return `${dateLabel} • ${formatTimeLabel(value)}`;
+    if (allDay) return dateLabel;
+    return dateLabel;
   };
 
   const getReminderCount = (event: SpecialDateEvent) => {
@@ -3679,6 +3890,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   };
 
   const startShareForEvent = (event: SpecialDateEvent) => {
+    setSelectedSummaryEventId(null);
+    setRemindersForEventId(null);
     setSharingEvent(event);
     setShareManualEmail('');
     setShareManualPhone('');
@@ -3686,6 +3899,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setShareMessage('');
     setValidationMessage(null);
     setCurrentView('share');
+  };
+
+  const openReminderEditForEvent = (event: SpecialDateEvent) => {
+    setSelectedSummaryEventId(null);
+    setRemindersForEventId(null);
+    setConfirmDeleteReminder(null);
+    setCurrentView('create');
+    startEditingEvent(event);
   };
 
   const cancelShareFlow = () => {
@@ -3957,7 +4178,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   const closeDatePicker = () => setPickerTarget(null);
 
   const openTimePicker = (target: TimePickerTarget, title: string, value: Date) => {
-    const nextDate = new Date(value);
+    const baseDate = target === 'static-reminder'
+      ? (isStaticReminderTimeSelected ? new Date(form.reminderDateTime) : new Date())
+      : target === 'pending-reminder'
+        ? (isVariableReminderTimeSelected ? new Date(pendingReminderDateTime) : new Date())
+        : new Date(value);
+    const nextDate = new Date(baseDate);
     nextDate.setMinutes(alignMinuteToClockInterval(nextDate.getMinutes(), activeClockIntervalMinutes), 0, 0);
     setTimePickerDraftDate(nextDate);
     setActiveTimePicker({ target, title });
@@ -3988,16 +4214,23 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     }
 
     if (activeTimePicker.target === 'static-reminder') {
-      updateFieldTime('reminderDateTime', hours, minutes);
+      const nextReminderDate = new Date();
+      nextReminderDate.setHours(hours, minutes, 0, 0);
+      setForm((current) => ({
+        ...current,
+        reminderDateTime: nextReminderDate,
+      }));
+      setIsStaticReminderTimeSelected(true);
       closeTimePicker();
       return;
     }
 
-    setPendingReminderDateTime((current) => {
-      const pendingDate = new Date(current);
+    setPendingReminderDateTime(() => {
+      const pendingDate = new Date();
       pendingDate.setHours(hours, minutes, 0, 0);
       return pendingDate;
     });
+    setIsVariableReminderTimeSelected(true);
     closeTimePicker();
   };
 
@@ -4014,8 +4247,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     setSeededVariableDraftIds([]);
     setPickerMonth(new Date(now.getFullYear(), now.getMonth(), 1));
     setStaticReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-    setPendingReminderDateTime(new Date(now));
+    setPendingReminderDateTime(new Date(0));
     setPendingReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+    setIsStaticReminderTimeSelected(false);
+    setIsVariableReminderTimeSelected(false);
+    setIsReminderAddedFlash(false);
     setForm(getResetFormState(effectiveReminderTimeZone));
     setValidationMessage(null);
     setCurrentView('landing');
@@ -4068,16 +4304,79 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     (a, b) => new Date(a.eventDateTime).getTime() - new Date(b.eventDateTime).getTime(),
   );
 
+  const savedEventTypeOptions = useMemo<Array<{ label: string; value: SavedEventsFilterType }>>(
+    () => [{ label: 'All', value: 'all' }, ...eventTypeOptions],
+    [],
+  );
+
+  const selectedSavedEventsSubtypeLabel = useMemo(() => {
+    if (savedEventsFilterType === 'party') {
+      return partySubtypeLabels[savedEventsFilterSubtype as PartySubtypeValue] || '';
+    }
+    if (savedEventsFilterType === 'school') {
+      return schoolSubtypeLabels[savedEventsFilterSubtype as SchoolSubtypeValue] || '';
+    }
+    if (savedEventsFilterType === 'medical') {
+      return medicalSubtypeLabels[savedEventsFilterSubtype as MedicalSubtypeValue] || '';
+    }
+    if (savedEventsFilterType === 'dental') {
+      return dentalSubtypeLabels[savedEventsFilterSubtype as DentalSubtypeValue] || '';
+    }
+    if (savedEventsFilterType === 'work') {
+      return workSubtypeLabels[savedEventsFilterSubtype as WorkSubtypeValue] || '';
+    }
+    return '';
+  }, [savedEventsFilterSubtype, savedEventsFilterType]);
+
+  const savedEventsSubtypeOptions = useMemo<Array<{ label: string; value: string }>>(() => {
+    if (savedEventsFilterType === 'party') {
+      return [{ label: 'All', value: 'all' }, ...Object.entries(partySubtypeLabels).map(([value, label]) => ({ value, label }))];
+    }
+    if (savedEventsFilterType === 'school') {
+      return [{ label: 'All', value: 'all' }, ...Object.entries(schoolSubtypeLabels).map(([value, label]) => ({ value, label }))];
+    }
+    if (savedEventsFilterType === 'medical') {
+      return [{ label: 'All', value: 'all' }, ...Object.entries(medicalSubtypeLabels).map(([value, label]) => ({ value, label }))];
+    }
+    if (savedEventsFilterType === 'dental') {
+      return [{ label: 'All', value: 'all' }, ...Object.entries(dentalSubtypeLabels).map(([value, label]) => ({ value, label }))];
+    }
+    if (savedEventsFilterType === 'work') {
+      return [{ label: 'All', value: 'all' }, ...Object.entries(workSubtypeLabels).map(([value, label]) => ({ value, label }))];
+    }
+    return [{ label: 'All', value: 'all' }];
+  }, [savedEventsFilterType]);
+
+  const shouldShowSavedEventsSubtypeFilter = savedEventsFilterType !== 'all' && eventTypeHasSubtype(savedEventsFilterType);
+
+  const filteredSavedEvents = useMemo(() => {
+    return savedEvents.filter((event) => {
+      const inferred = getEventFormState(event);
+      const inferredType = inferred.eventType;
+
+      if (savedEventsFilterType !== 'all' && inferredType !== savedEventsFilterType) {
+        return false;
+      }
+
+      if (!shouldShowSavedEventsSubtypeFilter || savedEventsFilterSubtype === 'all') {
+        return true;
+      }
+
+      const inferredSubtype = getSubtypeValueForEventType(inferred, inferredType);
+      return inferredSubtype === savedEventsFilterSubtype;
+    });
+  }, [savedEvents, savedEventsFilterSubtype, savedEventsFilterType, shouldShowSavedEventsSubtypeFilter]);
+
   const eventDatesByDay = useMemo(() => {
     const dates = new Set<string>();
-    events.forEach((event) => {
+    filteredSavedEvents.forEach((event) => {
       const eventDate = isAllDaySpecialDateEvent(event)
         ? getLocalDateFromUtcDay(event.eventDateTime)
         : new Date(event.eventDateTime);
       dates.add(`${eventDate.getFullYear()}-${eventDate.getMonth()}-${eventDate.getDate()}`);
     });
     return dates;
-  }, [events]);
+  }, [filteredSavedEvents]);
 
   const savedReminders = useMemo(() => {
     if (!events.length) return [];
@@ -4099,19 +4398,19 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   }, [events]);
 
   const savedEventsPages = useMemo(() => {
-    return savedEvents.reduce<Array<SpecialDateEvent[]>>((pages, event, index) => {
-      const pageIndex = Math.floor(index / 4);
+    return filteredSavedEvents.reduce<Array<SpecialDateEvent[]>>((pages, event, index) => {
+      const pageIndex = Math.floor(index / 10);
       if (!pages[pageIndex]) {
         pages[pageIndex] = [];
       }
       pages[pageIndex].push(event);
       return pages;
     }, []);
-  }, [savedEvents]);
+  }, [filteredSavedEvents]);
 
   const savedRemindersPages = useMemo(() => {
     return savedReminders.reduce<Array<Array<{ event: SpecialDateEvent; occurrence: Date }>>>((pages, reminder, index) => {
-      const pageIndex = Math.floor(index / 4);
+      const pageIndex = Math.floor(index / 10);
       if (!pages[pageIndex]) {
         pages[pageIndex] = [];
       }
@@ -4121,19 +4420,19 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
   }, [savedReminders]);
 
   const savedEventsSummaryPages = useMemo(() => {
-    return savedEvents.reduce<Array<SpecialDateEvent[]>>((pages, event, index) => {
-      const pageIndex = Math.floor(index / 6);
+    return filteredSavedEvents.reduce<Array<SpecialDateEvent[]>>((pages, event, index) => {
+      const pageIndex = Math.floor(index / 10);
       if (!pages[pageIndex]) {
         pages[pageIndex] = [];
       }
       pages[pageIndex].push(event);
       return pages;
     }, []);
-  }, [savedEvents]);
+  }, [filteredSavedEvents]);
 
   const savedRemindersSummaryPages = useMemo(() => {
     return savedReminders.reduce<Array<Array<{ event: SpecialDateEvent; occurrence: Date }>>>((pages, reminder, index) => {
-      const pageIndex = Math.floor(index / 6);
+      const pageIndex = Math.floor(index / 10);
       if (!pages[pageIndex]) {
         pages[pageIndex] = [];
       }
@@ -4174,7 +4473,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     const targetYear = selectedCalendarDate.getFullYear();
     const entries: Array<{ kind: 'event'; event: SpecialDateEvent }> = [];
 
-    savedEvents.forEach((event) => {
+    filteredSavedEvents.forEach((event) => {
       const eventDate = isAllDaySpecialDateEvent(event)
         ? getLocalDateFromUtcDay(event.eventDateTime)
         : new Date(event.eventDateTime);
@@ -4184,7 +4483,31 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     });
 
     return entries;
-  }, [savedEvents, selectedCalendarDate]);
+  }, [filteredSavedEvents, selectedCalendarDate]);
+
+  useEffect(() => {
+    if (!shouldShowSavedEventsSubtypeFilter) {
+      setSavedEventsFilterSubtype('all');
+      setIsSavedEventsSubtypeFilterVisible(false);
+      return;
+    }
+
+    if (!savedEventsSubtypeOptions.some((option) => option.value === savedEventsFilterSubtype)) {
+      setSavedEventsFilterSubtype('all');
+    }
+  }, [savedEventsFilterSubtype, savedEventsSubtypeOptions, shouldShowSavedEventsSubtypeFilter]);
+
+  useEffect(() => {
+    setSavedEventsPage(0);
+    setSavedEventsSummaryPage(0);
+    setSelectedCalendarDate(null);
+    setSelectedEventPopupDate(null);
+  }, [savedEventsFilterSubtype, savedEventsFilterType]);
+
+  const closeSavedEventsFilters = () => {
+    setIsSavedEventsTypeFilterVisible(false);
+    setIsSavedEventsSubtypeFilterVisible(false);
+  };
 
   const nextReminderCandidate = useMemo(() => {
     if (!savedReminders.length) return null;
@@ -4451,6 +4774,171 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     ));
   };
 
+  const nextEventTickerMessage = useMemo(() => {
+    const now = Date.now();
+    const upcomingEvent = [...events]
+      .filter((event) => new Date(event.eventDateTime).getTime() >= now)
+      .sort((left, right) => new Date(left.eventDateTime).getTime() - new Date(right.eventDateTime).getTime())[0];
+
+    if (!upcomingEvent) {
+      return 'No scheduled events';
+    }
+
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+
+    return `${upcomingEvent.title} • ${formatter.format(new Date(upcomingEvent.eventDateTime))}`;
+  }, [events]);
+
+  const getOccurrenceDateForReminderCandidate = useCallback((event: SpecialDateEvent, reminderDate: Date) => {
+    const baseEventDate = isAllDaySpecialDateEvent(event)
+      ? getLocalDateFromUtcDay(event.eventDateTime)
+      : new Date(event.eventDateTime);
+    const targetDate = new Date(baseEventDate);
+
+    switch (event.frequency) {
+      case 'daily':
+        return new Date(
+          reminderDate.getFullYear(),
+          reminderDate.getMonth(),
+          reminderDate.getDate(),
+          targetDate.getHours(),
+          targetDate.getMinutes(),
+          targetDate.getSeconds(),
+          targetDate.getMilliseconds(),
+        );
+      case 'weekly': {
+        const weekStart = new Date(reminderDate);
+        weekStart.setHours(0, 0, 0, 0);
+        weekStart.setDate(reminderDate.getDate() - reminderDate.getDay());
+
+        const eventDateInSameWeek = new Date(weekStart);
+        eventDateInSameWeek.setDate(weekStart.getDate() + baseEventDate.getDay());
+
+        return new Date(
+          eventDateInSameWeek.getFullYear(),
+          eventDateInSameWeek.getMonth(),
+          eventDateInSameWeek.getDate(),
+          targetDate.getHours(),
+          targetDate.getMinutes(),
+          targetDate.getSeconds(),
+          targetDate.getMilliseconds(),
+        );
+      }
+      case 'monthly': {
+        const daysInMonth = new Date(reminderDate.getFullYear(), reminderDate.getMonth() + 1, 0).getDate();
+        const day = Math.min(baseEventDate.getDate(), daysInMonth);
+        return new Date(
+          reminderDate.getFullYear(),
+          reminderDate.getMonth(),
+          day,
+          targetDate.getHours(),
+          targetDate.getMinutes(),
+          targetDate.getSeconds(),
+          targetDate.getMilliseconds(),
+        );
+      }
+      case 'yearly': {
+        const daysInMonth = new Date(reminderDate.getFullYear(), baseEventDate.getMonth() + 1, 0).getDate();
+        const day = Math.min(baseEventDate.getDate(), daysInMonth);
+        return new Date(
+          reminderDate.getFullYear(),
+          baseEventDate.getMonth(),
+          day,
+          targetDate.getHours(),
+          targetDate.getMinutes(),
+          targetDate.getSeconds(),
+          targetDate.getMilliseconds(),
+        );
+      }
+      default:
+        return new Date(baseEventDate);
+    }
+  }, []);
+
+  const nextReminderTickerMessage = useMemo(() => {
+    const now = Date.now();
+    const nextReminder = events
+      .flatMap((event) => getReminderCandidates(event).map((candidate) => ({
+        event,
+        reminderDate: new Date(candidate.reminderDateTime),
+        eventDate: getOccurrenceDateForReminderCandidate(event, new Date(candidate.reminderDateTime)),
+      })))
+      .filter((entry) => entry.reminderDate.getTime() >= now)
+      .sort((left, right) => left.reminderDate.getTime() - right.reminderDate.getTime())[0];
+
+    if (!nextReminder) {
+      return 'No scheduled reminders';
+    }
+
+    const reminderFormatter = new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    const eventFormatter = new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+    });
+
+    return `Event: ${eventFormatter.format(nextReminder.eventDate)} • ${nextReminder.event.title} • ${nextReminder.event.people || 'No one listed'} • Reminder: ${reminderFormatter.format(nextReminder.reminderDate)}`;
+  }, [events, getOccurrenceDateForReminderCandidate]);
+
+  useEffect(() => {
+    const nextView = currentView;
+    if (nextView === 'landing' && previousViewRef.current !== 'landing') {
+      setLandingTickerVersion((value) => value + 1);
+    }
+    previousViewRef.current = nextView;
+  }, [currentView]);
+
+  useEffect(() => {
+    const nextEventAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(nextEventTickerX, {
+          toValue: -820,
+          duration: 12000,
+          useNativeDriver: true,
+        }),
+        Animated.delay(50),
+        Animated.timing(nextEventTickerX, {
+          toValue: 0,
+          duration: 0,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    const nextReminderAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(nextReminderTickerX, {
+          toValue: -820,
+          duration: 12000,
+          useNativeDriver: true,
+        }),
+        Animated.delay(50),
+        Animated.timing(nextReminderTickerX, {
+          toValue: 0,
+          duration: 0,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    nextEventAnimation.start();
+    nextReminderAnimation.start();
+
+    return () => {
+      nextEventAnimation.stop();
+      nextReminderAnimation.stop();
+    };
+  }, [landingTickerVersion, nextEventTickerX, nextReminderTickerX]);
+
   const renderLandingView = () => (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.subtitle}>Track birthdays, anniversaries, and other meaningful dates.</Text>
@@ -4461,1182 +4949,453 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         </View>
       ) : null}
 
-      <View style={styles.card}>
-        <Text style={styles.label}>New event</Text>
-        <Text style={styles.helperText}>Create an event with reminders to keep track of your upcoming dates.</Text>
-        <Button title="Create New event" onPress={() => {
-          const now = getDefaultDate();
-          setHasInitializedReminderScheduleView(false);
-          setHasTouchedStaticReminderSchedule(false);
-          setEditingEvent(null);
-          resetTypeSelectionUi();
-          setPendingVariableReminders([]);
-          setSeededVariableDraftIds([]);
-          setForm(getResetFormState(effectiveReminderTimeZone));
-          setPickerMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-          setStaticReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-          setPendingReminderDateTime(new Date(now));
-          setPendingReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-          setValidationMessage(null);
-          setCurrentView('create');
-        }} />
+      <View style={styles.landingLinksWrap}>
+        <View style={styles.landingLinkItem}>
+          <TouchableOpacity
+            style={styles.landingLinkButton}
+            onPress={() => {
+              const now = getDefaultDate();
+              setHasInitializedReminderScheduleView(false);
+              setHasTouchedStaticReminderSchedule(false);
+              setEditingEvent(null);
+              resetTypeSelectionUi();
+              setPendingVariableReminders([]);
+              setSeededVariableDraftIds([]);
+              setForm(getResetFormState(effectiveReminderTimeZone));
+              setPickerMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+              setStaticReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+              setPendingReminderDateTime(new Date(now));
+              setPendingReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+              setValidationMessage(null);
+              setCurrentView('create');
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.landingLinkText}>New event</Text>
+          </TouchableOpacity>
+          <Text style={styles.landingLinkDescription}>Create a new event and set up its reminders.</Text>
+
+        </View>
+
+        <View style={styles.landingLinkItem}>
+          <TouchableOpacity
+            style={styles.landingLinkButton}
+            onPress={() => {
+              setSavedEventsView('summary');
+              setCurrentView('manage-events');
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.landingLinkText}>Manage Events</Text>
+          </TouchableOpacity>
+          <Text style={styles.landingLinkDescription}>Review, update, and organize your saved events and event details.</Text>
+        </View>
+
+        <View style={styles.landingLinkItem}>
+          <TouchableOpacity
+            style={styles.landingLinkButton}
+            onPress={() => {
+              onOpenContacts?.();
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.landingLinkText}>Contacts</Text>
+          </TouchableOpacity>
+          <Text style={styles.landingLinkDescription}>Manage contacts, favorites, and groups.</Text>
+        </View>
+
+        <View style={styles.landingLinkItem}>
+          <TouchableOpacity
+            style={styles.landingLinkButton}
+            onPress={() => {
+              onOpenCalendarSync?.();
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.landingLinkText}>Calendar Sync</Text>
+          </TouchableOpacity>
+          <Text style={styles.landingLinkDescription}>Connect and manage Google, Apple, and Outlook calendar syncing.</Text>
+        </View>
       </View>
 
-      <View style={styles.card}>
-        <View style={styles.savedEventsHeader}>
-          <View style={styles.savedSectionTitleRow}>
-            <Text style={styles.label}>Saved events</Text>
-            <TouchableOpacity
-              style={[styles.refreshButton, isRefreshingSavedData && styles.actionButtonDisabled]}
-              onPress={() => void refreshSavedData()}
-              disabled={isRefreshingSavedData}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.refreshButtonText}>{isRefreshingSavedData ? '↻…' : '↻'}</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.viewControlsRow}>
-            <Text style={styles.viewLabel}>Views</Text>
-            <View style={styles.viewControlsGroup}>
-              <TouchableOpacity
-                style={[styles.toggleButton, savedEventsView === 'summary' && styles.toggleButtonActive]}
-                onPress={() => setSavedEventsView('summary')}
-              >
-                <Text style={styles.toggleButtonText}>Summary</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.toggleButton, savedEventsView === 'list' && styles.toggleButtonActive]}
-                onPress={() => setSavedEventsView('list')}
-              >
-                <Text style={styles.toggleButtonText}>Detail</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.toggleButton, savedEventsView === 'calendar' && styles.toggleButtonActive]}
-                onPress={() => setSavedEventsView('calendar')}
-              >
-                <Text style={styles.toggleButtonText}>Calendar</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
+      <View style={styles.landingTickerSection}>
+        <Text style={styles.landingTickerTitle}>Next Event</Text>
+        <View style={styles.landingTickerWrap}>
+          <Animated.View key={`next-event-ticker-${landingTickerVersion}`} style={[styles.landingTickerRow, { transform: [{ translateX: nextEventTickerX }] }]}>
+            <Text style={styles.landingTickerText}>{nextEventTickerMessage}</Text>
+          </Animated.View>
         </View>
-
-        {savedEventsView === 'calendar' ? (
-          <View>
-            <View style={styles.calendarHeader}>
-              <TouchableOpacity onPress={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))}>
-                <Text style={styles.variableReminderNav}>←</Text>
-              </TouchableOpacity>
-              <Text style={styles.variableReminderMonth}>{calendarMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</Text>
-              <TouchableOpacity onPress={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))}>
-                <Text style={styles.variableReminderNav}>→</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={styles.weekRow}>
-              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => (
-                <Text key={day} style={styles.weekDay}>{day}</Text>
-              ))}
-            </View>
-            <View style={styles.calendarGrid}>
-              {getCalendarDays(calendarMonth).map((day, index) => {
-                if (!day) {
-                  return <View key={`empty-${index}`} style={styles.dayCell} />;
-                }
-
-                const dayKey = `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
-                const hasEvents = eventDatesByDay.has(dayKey);
-                const isSelected = selectedCalendarDate?.toDateString() === day.toDateString();
-                const isToday = day.toDateString() === new Date().toDateString();
-
-                return (
-                  <TouchableOpacity
-                    key={dayKey}
-                    style={[styles.dayCell, hasEvents && styles.dayCellWithEvents, isSelected && styles.selectedDayCell]}
-                    onPress={() => {
-                      setSelectedCalendarDate(day);
-                      if (hasEvents) {
-                        setSelectedEventPopupDate(day);
-                      }
-                    }}
-                  >
-                    <Text style={[styles.dayText, isToday && styles.todayText, isSelected && styles.selectedDayText]}>
-                      {day.getDate()}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-
-            {selectedDateEntries.length ? (
-              <View style={{ marginTop: 12 }}>
-                {selectedDateEntries.filter((entry) => entry.kind === 'event').map((entry) => {
-                  if (entry.kind !== 'event') return null;
-
-                  return (
-                    <View key={entry.event.id} style={styles.eventRow}>
-                      <View style={styles.eventContentRow}>
-                        <View style={styles.eventDetails}>
-                          <Text style={styles.eventTitle}>{entry.event.title}</Text>
-                          <Text>{entry.event.people}</Text>
-                          <Text numberOfLines={1} ellipsizeMode="tail">{formatEventSummary(entry.event)}</Text>
-                          {entry.event.notes ? <Text style={styles.notesText}>{entry.event.notes}</Text> : null}
-                          <TouchableOpacity
-                            onPress={() => openRemindersForEvent(entry.event)}
-                            disabled={!getReminderSummaryState(entry.event).isActive}
-                          >
-                            <Text
-                              style={[
-                                styles.reminderCountLink,
-                                !getReminderSummaryState(entry.event).isActive && styles.reminderCountLinkDisabled,
-                              ]}
-                            >
-                              {getReminderSummaryState(entry.event).label}
-                            </Text>
-                          </TouchableOpacity>
-                        </View>
-                        <View style={styles.actionColumn}>
-                          <View style={styles.viewControlsRow}>
-                            <Text style={styles.viewLabel}>Actions</Text>
-                            <View style={styles.viewControlsGroup}>
-                              <TouchableOpacity
-                                style={styles.toggleButton}
-                                onPress={() => startShareForEvent(entry.event)}
-                              >
-                                <Text style={styles.toggleButtonText}>Share</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity style={styles.toggleButton} onPress={() => startEditingEvent(entry.event)}>
-                                <Text style={styles.toggleButtonText}>Modify</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity style={styles.toggleButton} onPress={() => setConfirmCancelEventId(entry.event.id)}>
-                                <Text style={styles.toggleButtonText}>Delete</Text>
-                              </TouchableOpacity>
-                            </View>
-                          </View>
-                          {(() => {
-                            const addressLines = getEventLocationDisplayLines(entry.event.eventLocation);
-                            if (!addressLines.length) {
-                              return null;
-                            }
-
-                            return (
-                              <View style={styles.savedEventAddressBlock}>
-                                {addressLines.map((line, index) => (
-                                  <Text key={`${entry.event.id}-calendar-address-${index}`} style={styles.savedEventAddressLine}>{line}</Text>
-                                ))}
-                              </View>
-                            );
-                          })()}
-                        </View>
-                      </View>
-                    </View>
-                  );
-                })}
-              </View>
-            ) : (
-              <Text style={styles.helperText}>Select a highlighted day to see its events.</Text>
-            )}
-          </View>
-        ) : savedEventsView === 'summary' ? (
-          <View>
-            {currentSavedEventsSummaryPageItems.map((event) => (
-              <TouchableOpacity
-                key={event.id}
-                style={styles.summaryLink}
-                onPress={() => {
-                  openSummaryEventDetails(event.id);
-                }}
-              >
-                <Text style={styles.summaryLinkText} numberOfLines={1} ellipsizeMode="tail">{event.title} • {event.people} • {formatEventSummary(event)}</Text>
-              </TouchableOpacity>
-            ))}
-            {savedEventsSummaryPages.length > 1 ? (
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
-                <TouchableOpacity
-                  style={[styles.reminderDeleteButton, safeSavedEventsSummaryPage === 0 && styles.actionButtonDisabled]}
-                  onPress={() => setSavedEventsSummaryPage((page) => Math.max(0, page - 1))}
-                  disabled={safeSavedEventsSummaryPage === 0}
-                >
-                  <Text style={styles.reminderDeleteButtonText}>Back</Text>
-                </TouchableOpacity>
-                <Text style={styles.reminderListNotes}>Page {safeSavedEventsSummaryPage + 1} of {savedEventsSummaryPages.length}</Text>
-                <TouchableOpacity
-                  style={[styles.reminderDeleteButton, safeSavedEventsSummaryPage >= savedEventsSummaryPages.length - 1 && styles.actionButtonDisabled]}
-                  onPress={() => setSavedEventsSummaryPage((page) => Math.min(savedEventsSummaryPages.length - 1, page + 1))}
-                  disabled={safeSavedEventsSummaryPage >= savedEventsSummaryPages.length - 1}
-                >
-                  <Text style={styles.reminderDeleteButtonText}>Next</Text>
-                </TouchableOpacity>
-              </View>
-            ) : null}
-          </View>
-        ) : (
-          <View>
-            {currentSavedEventsPageItems.map((event) => (
-              <View key={event.id} style={styles.eventRow}>
-                <View style={styles.eventContentRow}>
-                  <View style={styles.eventDetails}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Text style={[styles.eventTitle, { flex: 1 }]}>{event.title}</Text>
-                      <TouchableOpacity
-                        onPress={() => openRemindersForEvent(event)}
-                        disabled={!getReminderSummaryState(event).isActive}
-                      >
-                        <Text
-                          style={[
-                            styles.reminderCountLink,
-                            !getReminderSummaryState(event).isActive && styles.reminderCountLinkDisabled,
-                          ]}
-                        >
-                          {getReminderSummaryState(event).label}
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text>{event.people}</Text>
-                    <Text numberOfLines={1} ellipsizeMode="tail">{formatEventDateLabel(event)}</Text>
-                    <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventTimeOnlyLabel(event)}</Text>
-                    {event.notes ? <Text style={styles.notesText}>{event.notes}</Text> : null}
-                  </View>
-                  <View style={styles.actionColumn}>
-                    <View style={styles.viewControlsRow}>
-                      <Text style={styles.viewLabel}>Actions</Text>
-                      <View style={styles.viewControlsGroup}>
-                        <TouchableOpacity
-                          style={styles.toggleButton}
-                          onPress={() => startShareForEvent(event)}
-                        >
-                          <Text style={styles.toggleButtonText}>Share</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={styles.toggleButton} onPress={() => startEditingEvent(event)}>
-                          <Text style={styles.toggleButtonText}>Modify</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={styles.toggleButton} onPress={() => setConfirmCancelEventId(event.id)}>
-                          <Text style={styles.toggleButtonText}>Delete</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  </View>
-                </View>
-                {(() => {
-                  const addressLines = getEventLocationDisplayLines(event.eventLocation);
-                  if (!addressLines.length) {
-                    return null;
-                  }
-
-                  return (
-                    <View style={styles.savedEventAddressBlock}>
-                      {addressLines.map((line, index) => (
-                        <Text key={`${event.id}-detail-address-${index}`} style={styles.savedEventAddressLine}>{line}</Text>
-                      ))}
-                    </View>
-                  );
-                })()}
-              </View>
-            ))}
-            {savedEventsPages.length > 1 ? (
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
-                <TouchableOpacity
-                  style={[styles.reminderDeleteButton, safeSavedEventsPage === 0 && styles.actionButtonDisabled]}
-                  onPress={() => setSavedEventsPage((page) => Math.max(0, page - 1))}
-                  disabled={safeSavedEventsPage === 0}
-                >
-                  <Text style={styles.reminderDeleteButtonText}>Back</Text>
-                </TouchableOpacity>
-                <Text style={styles.reminderListNotes}>Page {safeSavedEventsPage + 1} of {savedEventsPages.length}</Text>
-                <TouchableOpacity
-                  style={[styles.reminderDeleteButton, safeSavedEventsPage >= savedEventsPages.length - 1 && styles.actionButtonDisabled]}
-                  onPress={() => setSavedEventsPage((page) => Math.min(savedEventsPages.length - 1, page + 1))}
-                  disabled={safeSavedEventsPage >= savedEventsPages.length - 1}
-                >
-                  <Text style={styles.reminderDeleteButtonText}>Next</Text>
-                </TouchableOpacity>
-              </View>
-            ) : null}
-          </View>
-        )}
       </View>
 
-      <View style={styles.card}>
-        <View style={styles.savedEventsHeader}>
-          <View style={styles.savedSectionTitleRow}>
-            <Text style={styles.label}>Saved reminders</Text>
-            <TouchableOpacity
-              style={[styles.refreshButton, isRefreshingSavedData && styles.actionButtonDisabled]}
-              onPress={() => void refreshSavedData()}
-              disabled={isRefreshingSavedData}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.refreshButtonText}>{isRefreshingSavedData ? '↻…' : '↻'}</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.viewControlsRow}>
-            <Text style={styles.viewLabel}>Views</Text>
-            <View style={styles.viewControlsGroup}>
-              <TouchableOpacity
-                style={[styles.toggleButton, savedRemindersView === 'summary' && styles.toggleButtonActive]}
-                onPress={() => setSavedRemindersView('summary')}
-              >
-                <Text style={styles.toggleButtonText}>Summary</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.toggleButton, savedRemindersView === 'list' && styles.toggleButtonActive]}
-                onPress={() => setSavedRemindersView('list')}
-              >
-                <Text style={styles.toggleButtonText}>Detail</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.toggleButton, savedRemindersView === 'calendar' && styles.toggleButtonActive]}
-                onPress={() => {
-                  setSavedRemindersView('calendar');
-                  if (savedReminders.length) {
-                    const firstReminder = savedReminders[0];
-                    setSavedRemindersCalendarMonth(new Date(firstReminder.occurrence.getFullYear(), firstReminder.occurrence.getMonth(), 1));
-                  }
-                }}
-              >
-                <Text style={styles.toggleButtonText}>Calendar</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
+      <View style={styles.landingTickerSection}>
+        <Text style={styles.landingTickerTitle}>Next Reminder</Text>
+        <View style={styles.landingTickerWrap}>
+          <Animated.View key={`next-reminder-ticker-${landingTickerVersion}`} style={[styles.landingTickerRow, { transform: [{ translateX: nextReminderTickerX }] }]}>
+            <Text style={styles.landingTickerText}>{nextReminderTickerMessage}</Text>
+          </Animated.View>
         </View>
-        {savedRemindersView === 'calendar' ? (
-          <View>
-            <View style={styles.calendarHeader}>
-              <TouchableOpacity onPress={() => setSavedRemindersCalendarMonth(new Date(savedRemindersCalendarMonth.getFullYear(), savedRemindersCalendarMonth.getMonth() - 1, 1))}>
-                <Text style={styles.variableReminderNav}>←</Text>
-              </TouchableOpacity>
-              <Text style={styles.variableReminderMonth}>{savedRemindersCalendarMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</Text>
-              <TouchableOpacity onPress={() => setSavedRemindersCalendarMonth(new Date(savedRemindersCalendarMonth.getFullYear(), savedRemindersCalendarMonth.getMonth() + 1, 1))}>
-                <Text style={styles.variableReminderNav}>→</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={styles.weekRow}>
-              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => (
-                <Text key={day} style={styles.weekDay}>{day}</Text>
-              ))}
-            </View>
-            <View style={styles.calendarGrid}>
-              {getCalendarDays(savedRemindersCalendarMonth).map((day, index) => {
-                if (!day) {
-                  return <View key={`empty-${index}`} style={styles.dayCell} />;
-                }
-
-                const dayKey = `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
-                const hasReminder = upcomingReminderDates.has(dayKey);
-                const isToday = day.toDateString() === new Date().toDateString();
-
-                return (
-                  <TouchableOpacity
-                    key={dayKey}
-                    style={[styles.dayCell, hasReminder && styles.dayCellWithReminder]}
-                    onPress={() => {
-                      setSelectedReminderDetail(null);
-                      setSelectedReminderCalendarDate(day);
-                      setSelectedReminderPopup(day);
-                    }}
-                  >
-                    <Text style={[styles.dayText, isToday && styles.todayText]}>{day.getDate()}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            <Text style={styles.helperText}>Tap a highlighted day to see its reminders.</Text>
-          </View>
-        ) : savedRemindersView === 'summary' ? (
-          <View>
-            {currentSavedRemindersSummaryPageItems.map(({ event, occurrence }) => (
-              <TouchableOpacity
-                key={`${event.id}-${occurrence.getTime()}`}
-                style={styles.summaryLink}
-                onPress={() => {
-                  const reminderDate = new Date(occurrence);
-                  setSelectedReminderCalendarDate(null);
-                  setSelectedReminderDetail({ eventId: event.id, occurrenceTime: reminderDate.getTime() });
-                  setSelectedReminderPopup(reminderDate);
-                }}
-              >
-                <Text style={styles.summaryLinkText} numberOfLines={1} ellipsizeMode="tail">{event.title} • {event.people} • {occurrence.toLocaleDateString()} • {occurrence.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
-              </TouchableOpacity>
-            ))}
-            {savedRemindersSummaryPages.length > 1 ? (
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
-                <TouchableOpacity
-                  style={[styles.reminderDeleteButton, safeSavedRemindersSummaryPage === 0 && styles.actionButtonDisabled]}
-                  onPress={() => setSavedRemindersSummaryPage((page) => Math.max(0, page - 1))}
-                  disabled={safeSavedRemindersSummaryPage === 0}
-                >
-                  <Text style={styles.reminderDeleteButtonText}>Back</Text>
-                </TouchableOpacity>
-                <Text style={styles.reminderListNotes}>Page {safeSavedRemindersSummaryPage + 1} of {savedRemindersSummaryPages.length}</Text>
-                <TouchableOpacity
-                  style={[styles.reminderDeleteButton, safeSavedRemindersSummaryPage >= savedRemindersSummaryPages.length - 1 && styles.actionButtonDisabled]}
-                  onPress={() => setSavedRemindersSummaryPage((page) => Math.min(savedRemindersSummaryPages.length - 1, page + 1))}
-                  disabled={safeSavedRemindersSummaryPage >= savedRemindersSummaryPages.length - 1}
-                >
-                  <Text style={styles.reminderDeleteButtonText}>Next</Text>
-                </TouchableOpacity>
-              </View>
-            ) : null}
-          </View>
-        ) : (
-          <View>
-            {currentSavedRemindersPageItems.map(({ event, occurrence }) => (
-              <View key={`${event.id}-${occurrence.getTime()}`} style={[styles.eventRow, styles.eventContentRow]}>
-                <View style={styles.eventDetails}>
-                  <Text style={styles.eventTitle}>{event.title}</Text>
-                  <Text>{event.people}</Text>
-                  <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventSummary(event)}</Text>
-                  <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(occurrence, event.reminderAllDay)}</Text>
-                  {event.notes ? <Text style={styles.notesText}>{event.notes}</Text> : null}
-                </View>
-                <View style={styles.actionColumn}>
-                  <TouchableOpacity
-                    style={styles.actionButton}
-                    onPress={() => {
-                      const reminderEntryId = event.variableReminders?.find((entry) => new Date(entry.reminderDateTime).getTime() === occurrence.getTime())?.id;
-                      setConfirmDeleteReminder({
-                        eventId: event.id,
-                        reminderEntryId,
-                        reminderSource: reminderEntryId ? 'variable' : 'static',
-                        target: 'reminder',
-                      });
-                    }}
-                  >
-                    <Text style={styles.actionButtonText}>Delete</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ))}
-            {savedRemindersPages.length > 1 ? (
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
-                <TouchableOpacity
-                  style={[styles.reminderDeleteButton, safeSavedRemindersPage === 0 && styles.actionButtonDisabled]}
-                  onPress={() => setSavedRemindersPage((page) => Math.max(0, page - 1))}
-                  disabled={safeSavedRemindersPage === 0}
-                >
-                  <Text style={styles.reminderDeleteButtonText}>Back</Text>
-                </TouchableOpacity>
-                <Text style={styles.reminderListNotes}>Page {safeSavedRemindersPage + 1} of {savedRemindersPages.length}</Text>
-                <TouchableOpacity
-                  style={[styles.reminderDeleteButton, safeSavedRemindersPage >= savedRemindersPages.length - 1 && styles.actionButtonDisabled]}
-                  onPress={() => setSavedRemindersPage((page) => Math.min(savedRemindersPages.length - 1, page + 1))}
-                  disabled={safeSavedRemindersPage >= savedRemindersPages.length - 1}
-                >
-                  <Text style={styles.reminderDeleteButtonText}>Next</Text>
-                </TouchableOpacity>
-              </View>
-            ) : null}
-          </View>
-        )}
       </View>
-
-      <Modal transparent visible={confirmCancelEventId !== null} animationType="fade" onRequestClose={() => {
-        if (!isDeletingConfirmedEvent) {
-          setConfirmCancelEventId(null);
-        }
-      }}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Delete event?</Text>
-            <Text style={styles.modalBody}>This will permanently remove the event and all associated reminders from your saved list. Are you sure?</Text>
-            <View style={styles.confirmActionRow}>
-              <View style={styles.confirmActionSide}>
-                <Button title="No" onPress={() => {
-                  if (!isDeletingConfirmedEvent) {
-                    setConfirmCancelEventId(null);
-                  }
-                }} disabled={isDeletingConfirmedEvent} />
-              </View>
-              <View style={styles.confirmActionDivider} />
-              <View style={styles.confirmActionSide}>
-                <Button title={isDeletingConfirmedEvent ? 'Deleting...' : 'Yes'} disabled={isDeletingConfirmedEvent} onPress={async () => {
-                  if (!confirmCancelEventId || isDeletingConfirmedEvent) {
-                    return;
-                  }
-
-                  setIsDeletingConfirmedEvent(true);
-                  try {
-                    await cancelEvent(confirmCancelEventId);
-                  } finally {
-                    setIsDeletingConfirmedEvent(false);
-                  }
-                }} />
-              </View>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal transparent visible={remindersForEventId !== null} animationType="fade" onRequestClose={() => setRemindersForEventId(null)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Scheduled reminders</Text>
-            {(() => {
-              const selectedEvent = events.find((event) => event.id === remindersForEventId);
-              if (!selectedEvent) return null;
-
-              const reminderEntries = getReminderOccurrencesForEvent(selectedEvent.id).map(({ occurrence }) => {
-                const reminderEntryId = selectedEvent.variableReminders?.find((entry) => (
-                  new Date(entry.reminderDateTime).getTime() === occurrence.getTime()
-                ))?.id;
-
-                return {
-                  id: `${selectedEvent.id}-${occurrence.getTime()}`,
-                  reminderDateTime: occurrence,
-                  source: reminderEntryId ? 'variable' as const : 'static' as const,
-                  reminderEntryId,
-                };
-              });
-
-              const reminderPages = reminderEntries.reduce<Array<Array<typeof reminderEntries[number]>>>((pages, entry, index) => {
-                const pageIndex = Math.floor(index / 4);
-                if (!pages[pageIndex]) {
-                  pages[pageIndex] = [];
-                }
-                pages[pageIndex].push(entry);
-                return pages;
-              }, []);
-
-              const safeReminderPage = Math.min(reminderPage, Math.max(0, reminderPages.length - 1));
-              const currentReminderPage = reminderPages[safeReminderPage] || [];
-
-              return (
-                <View>
-                  {currentReminderPage.length ? currentReminderPage.map((entry) => (
-                    <View key={`${entry.id}-${entry.reminderDateTime.getTime()}`} style={styles.reminderListItem}>
-                      <View style={styles.reminderListRow}>
-                        <View style={{ flex: 1, minWidth: 0 }}>
-                          <Text style={styles.reminderListDate}>{selectedEvent.title} • {selectedEvent.people}</Text>
-                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(entry.reminderDateTime)}</Text>
-                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event date: {formatEventDateOnly(selectedEvent)} • {formatEventTimeOnlyLabel(selectedEvent)}</Text>
-                          {selectedEvent.notes ? <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Notes: {selectedEvent.notes}</Text> : null}
-                        </View>
-                        <TouchableOpacity
-                          style={styles.reminderDeleteButton}
-                          onPress={() => {
-                            setConfirmDeleteReminder({
-                              eventId: selectedEvent.id,
-                              reminderEntryId: entry.reminderEntryId,
-                              reminderSource: entry.source,
-                              target: 'reminder',
-                            });
-                          }}
-                        >
-                          <Text style={styles.reminderDeleteButtonText}>Delete reminder</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  )) : (
-                    <Text style={styles.reminderListNotes}>There are no active reminders for this event.</Text>
-                  )}
-                  {reminderPages.length > 1 ? (
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
-                      <TouchableOpacity
-                        style={[styles.reminderDeleteButton, safeReminderPage === 0 && styles.actionButtonDisabled]}
-                        onPress={() => setReminderPage((page) => Math.max(0, page - 1))}
-                        disabled={safeReminderPage === 0}
-                      >
-                        <Text style={styles.reminderDeleteButtonText}>Back</Text>
-                      </TouchableOpacity>
-                      <Text style={styles.reminderListNotes}>Page {safeReminderPage + 1} of {reminderPages.length}</Text>
-                      <TouchableOpacity
-                        style={[styles.reminderDeleteButton, safeReminderPage >= reminderPages.length - 1 && styles.actionButtonDisabled]}
-                        onPress={() => setReminderPage((page) => Math.min(reminderPages.length - 1, page + 1))}
-                        disabled={safeReminderPage >= reminderPages.length - 1}
-                      >
-                        <Text style={styles.reminderDeleteButtonText}>Next</Text>
-                      </TouchableOpacity>
-                    </View>
-                  ) : null}
-                  <TouchableOpacity
-                    style={[styles.primaryButton, { marginTop: 8 }]}
-                    onPress={() => {
-                      setRemindersForEventId(null);
-                      setSelectedEventPopupDate(null);
-                      setSelectedReminderPopup(null);
-                      setSelectedReminderCalendarDate(null);
-                      startEditingEvent(selectedEvent);
-                    }}
-                  >
-                    <Text style={styles.primaryButtonText}>Add Reminder(s)</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.primaryButton, styles.deleteAllRemindersButton, { marginTop: 8 }]}
-                    onPress={() => setConfirmDeleteReminder({ eventId: selectedEvent.id, target: 'all-reminders' })}
-                  >
-                    <Text style={[styles.primaryButtonText, styles.deleteAllRemindersButtonText]}>Delete All Reminders</Text>
-                  </TouchableOpacity>
-                </View>
-              );
-            })()}
-            <View style={{ marginTop: 8 }}>
-              <Button title="Close" onPress={() => setRemindersForEventId(null)} />
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal
-        transparent
-        visible={selectedEventPopupDate !== null && savedEventsView === 'calendar'}
-        animationType="fade"
-        onRequestClose={() => setSelectedEventPopupDate(null)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Saved event details</Text>
-            {selectedEventPopupDate ? (
-              <View>
-                <Text style={styles.modalBody}>{selectedEventPopupDate.toLocaleDateString()}</Text>
-                {selectedDateEntries.length ? selectedDateEntries.map((entry) => {
-                  const remindersForEvent = getReminderOccurrencesForEvent(entry.event.id);
-
-                  return (
-                    <View key={entry.event.id} style={styles.reminderListItem}>
-                      <View style={styles.reminderListRow}>
-                        <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
-                          <Text style={styles.reminderListDate}>{entry.event.title} • {entry.event.people}</Text>
-                          <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                            <Text numberOfLines={1} ellipsizeMode="tail">{formatEventDateLabel(entry.event)}</Text>
-                          </View>
-                          <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                            <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventTimeOnlyLabel(entry.event)}</Text>
-                          </View>
-                          {entry.event.notes ? (
-                            <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                              <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Notes: {entry.event.notes}</Text>
-                            </View>
-                          ) : null}
-                        </View>
-                        <View style={styles.actionColumn}>
-                          <TouchableOpacity
-                            onPress={() => {
-                              setSelectedEventPopupDate(null);
-                              openRemindersForEvent(entry.event);
-                            }}
-                            disabled={!getReminderSummaryState(entry.event).isActive}
-                          >
-                            <Text
-                              style={[
-                                styles.reminderCountLink,
-                                !getReminderSummaryState(entry.event).isActive && styles.reminderCountLinkDisabled,
-                                { flexShrink: 0 },
-                              ]}
-                            >
-                              {getReminderSummaryState(entry.event).label}
-                            </Text>
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                      {remindersForEvent.length ? remindersForEvent.map(({ occurrence }, index) => (
-                        <Text key={`${entry.event.id}-saved-event-reminder-${occurrence.getTime()}-${index}`} style={styles.reminderListNotes}>
-                          Reminder {index + 1}: {formatDisplayDate(occurrence, entry.event.reminderAllDay)}
-                        </Text>
-                      )) : null}
-                    </View>
-                  );
-                }) : (
-                  <Text style={styles.reminderListNotes}>No saved events were found for this day.</Text>
-                )}
-              </View>
-            ) : null}
-            <View style={{ marginTop: 8 }}>
-              <Button title="Close" onPress={() => setSelectedEventPopupDate(null)} />
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal transparent visible={selectedSummaryEventId !== null} animationType="fade" onRequestClose={() => setSelectedSummaryEventId(null)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Saved event details</Text>
-            {selectedSummaryEvent ? (
-              <View style={styles.eventRow}>
-                <View style={styles.eventContentRow}>
-                  <View style={styles.eventDetails}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Text style={[styles.eventTitle, { flex: 1 }]}>{selectedSummaryEvent.title}</Text>
-                      <TouchableOpacity
-                        onPress={() => {
-                          setSelectedSummaryEventId(null);
-                          openRemindersForEvent(selectedSummaryEvent);
-                        }}
-                        disabled={!getReminderSummaryState(selectedSummaryEvent).isActive}
-                      >
-                        <Text
-                          style={[
-                            styles.reminderCountLink,
-                            !getReminderSummaryState(selectedSummaryEvent).isActive && styles.reminderCountLinkDisabled,
-                          ]}
-                        >
-                          {getReminderSummaryState(selectedSummaryEvent).label}
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text>{selectedSummaryEvent.people}</Text>
-                    <Text numberOfLines={1} ellipsizeMode="tail">{formatEventDateLabel(selectedSummaryEvent)}</Text>
-                    <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">{formatEventTimeOnlyLabel(selectedSummaryEvent)}</Text>
-                    {selectedSummaryEvent.notes ? <Text style={styles.notesText}>{selectedSummaryEvent.notes}</Text> : null}
-                  </View>
-                  <View style={styles.actionColumn}>
-                    <View style={styles.viewControlsRow}>
-                      <Text style={styles.viewLabel}>Actions</Text>
-                      <View style={styles.viewControlsGroup}>
-                        <TouchableOpacity
-                          style={styles.toggleButton}
-                          onPress={() => {
-                            setSelectedSummaryEventId(null);
-                            startShareForEvent(selectedSummaryEvent);
-                          }}
-                        >
-                          <Text style={styles.toggleButtonText}>Share</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.toggleButton}
-                          onPress={() => {
-                            setSelectedSummaryEventId(null);
-                            startEditingEvent(selectedSummaryEvent);
-                          }}
-                        >
-                          <Text style={styles.toggleButtonText}>Modify</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.toggleButton}
-                          onPress={() => {
-                            setSelectedSummaryEventId(null);
-                            setConfirmCancelEventId(selectedSummaryEvent.id);
-                          }}
-                        >
-                          <Text style={styles.toggleButtonText}>Delete</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                    {(() => {
-                      const addressLines = getEventLocationDisplayLines(selectedSummaryEvent.eventLocation);
-                      if (!addressLines.length) {
-                        return null;
-                      }
-
-                      return (
-                        <View style={styles.savedEventAddressBlock}>
-                          {addressLines.map((line, index) => (
-                            <Text key={`${selectedSummaryEvent.id}-address-${index}`} style={styles.savedEventAddressLine}>{line}</Text>
-                          ))}
-                        </View>
-                      );
-                    })()}
-                  </View>
-                </View>
-              </View>
-            ) : (
-              <Text style={styles.reminderListNotes}>This event is no longer available.</Text>
-            )}
-            <View style={{ marginTop: 8 }}>
-              <Button title="Close" onPress={() => setSelectedSummaryEventId(null)} />
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal transparent visible={selectedReminderPopup !== null} animationType="fade" onRequestClose={() => {
-        setSelectedReminderPopup(null);
-        setSelectedReminderCalendarDate(null);
-        setSelectedReminderDetail(null);
-      }}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Reminder details</Text>
-            {selectedReminderDetailEntry ? (
-              <View>
-                <Text style={styles.modalBody}>{selectedReminderDetailEntry.occurrence.toLocaleDateString()}</Text>
-                <View style={styles.reminderListItem}>
-                  <View style={styles.reminderListRow}>
-                    <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
-                      <Text style={styles.reminderListDate}>{selectedReminderDetailEntry.event.title} • {selectedReminderDetailEntry.event.people}</Text>
-                      <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                        <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(selectedReminderDetailEntry.occurrence, selectedReminderDetailEntry.event.reminderAllDay)}</Text>
-                      </View>
-                      <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                        <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event date: {formatEventDateOnly(selectedReminderDetailEntry.event)} • {formatEventTimeOnlyLabel(selectedReminderDetailEntry.event)}</Text>
-                      </View>
-                      {selectedReminderDetailEntry.event.notes ? (
-                        <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Notes: {selectedReminderDetailEntry.event.notes}</Text>
-                        </View>
-                      ) : null}
-                    </View>
-                    <TouchableOpacity
-                      style={styles.reminderDeleteButton}
-                      onPress={async () => {
-                        const reminderEntryId = selectedReminderDetailEntry.event.variableReminders?.find((entry) => (
-                          new Date(entry.reminderDateTime).getTime() === selectedReminderDetailEntry.occurrence.getTime()
-                        ))?.id;
-
-                        if (reminderEntryId) {
-                          await deleteReminderEntry(selectedReminderDetailEntry.event.id, reminderEntryId);
-                        } else {
-                          await deleteStaticReminder(selectedReminderDetailEntry.event.id);
-                        }
-
-                        setSelectedReminderPopup(null);
-                        setSelectedReminderDetail(null);
-                      }}
-                    >
-                      <Text style={styles.reminderDeleteButtonText}>Delete reminder</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </View>
-            ) : selectedReminderCalendarDate ? (
-              <View>
-                <Text style={styles.modalBody}>{selectedReminderCalendarDate.toLocaleDateString()}</Text>
-                {selectedReminderDayEvents.length ? selectedReminderDayEvents.map(({ event, occurrence }) => (
-                  <View key={`${event.id}-${occurrence.getTime()}`} style={styles.reminderListItem}>
-                    <View style={styles.reminderListRow}>
-                      <View style={{ flex: 1, minWidth: 0, maxWidth: '100%' }}>
-                        <Text style={styles.reminderListDate}>{event.title} • {event.people}</Text>
-                        <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Reminder: {formatDisplayDate(occurrence, event.reminderAllDay)}</Text>
-                        </View>
-                        <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                          <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Event date: {formatEventDateOnly(event)} • {formatEventTimeOnlyLabel(event)}</Text>
-                        </View>
-                        {event.notes ? (
-                          <View style={{ flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', maxWidth: '100%' }}>
-                            <Text style={styles.reminderListNotes} numberOfLines={1} ellipsizeMode="tail">Notes: {event.notes}</Text>
-                          </View>
-                        ) : null}
-                      </View>
-                      <TouchableOpacity
-                        style={styles.reminderDeleteButton}
-                        onPress={async () => {
-                          const reminderToDelete = savedReminders.find(({ event: reminderEvent, occurrence: reminderOccurrence }) =>
-                            reminderEvent.id === event.id && reminderOccurrence.getTime() === occurrence.getTime(),
-                          );
-
-                          if (!reminderToDelete) {
-                            return;
-                          }
-
-                          const reminderEntryId = reminderToDelete.event.variableReminders?.find((entry) => new Date(entry.reminderDateTime).getTime() === reminderToDelete.occurrence.getTime())?.id;
-
-                          if (reminderEntryId) {
-                            await deleteReminderEntry(reminderToDelete.event.id, reminderEntryId);
-                          } else {
-                            await deleteStaticReminder(reminderToDelete.event.id);
-                          }
-
-                          setSelectedReminderPopup(null);
-                          setSelectedReminderCalendarDate(null);
-                        }}
-                      >
-                        <Text style={styles.reminderDeleteButtonText}>Delete reminder</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                )) : (
-                  <Text style={styles.reminderListNotes}>No reminders were found for this day.</Text>
-                )}
-              </View>
-            ) : null}
-            <View style={{ marginTop: 8 }}>
-              <Button title="Close" onPress={() => {
-                setSelectedReminderPopup(null);
-                setSelectedReminderCalendarDate(null);
-                setSelectedReminderDetail(null);
-              }} />
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal transparent visible={confirmDeleteReminder !== null} animationType="fade" onRequestClose={() => {
-        if (!isDeletingConfirmedItem) {
-          setConfirmDeleteReminder(null);
-        }
-      }}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>
-              {confirmDeleteReminder?.target === 'event'
-                ? 'Delete event?'
-                : confirmDeleteReminder?.target === 'all-reminders'
-                  ? 'Delete all reminders?'
-                  : 'Delete reminder?'}
-            </Text>
-            <Text style={styles.modalBody}>
-              {confirmDeleteReminder?.target === 'event'
-                ? 'This will permanently remove the event and all associated reminders from your saved list. Are you sure?'
-                : confirmDeleteReminder?.target === 'all-reminders'
-                  ? 'This will remove every scheduled reminder for this event. Continue?'
-                    : 'This will permanently remove the selected reminder from the event. Are you sure?'}
-            </Text>
-            <View style={styles.confirmActionRow}>
-              <View style={styles.confirmActionSide}>
-                <Button
-                  title="No"
-                  onPress={() => {
-                    if (!isDeletingConfirmedItem) {
-                      setConfirmDeleteReminder(null);
-                    }
-                  }}
-                  disabled={isDeletingConfirmedItem}
-                />
-              </View>
-              <View style={styles.confirmActionDivider} />
-              <View style={styles.confirmActionSide}>
-                <Button title={isDeletingConfirmedItem ? 'Deleting...' : 'Yes'} disabled={isDeletingConfirmedItem} onPress={async () => {
-                  if (!confirmDeleteReminder || isDeletingConfirmedItem) return;
-
-                  setIsDeletingConfirmedItem(true);
-                  try {
-                    if (confirmDeleteReminder.target === 'event') {
-                      await deleteReminderEvent(confirmDeleteReminder.eventId);
-                    } else if (confirmDeleteReminder.target === 'all-reminders') {
-                      await deleteAllRemindersForEvent(confirmDeleteReminder.eventId);
-                    } else if (confirmDeleteReminder.reminderSource === 'static') {
-                      await deleteStaticReminder(confirmDeleteReminder.eventId);
-                    } else if (confirmDeleteReminder.reminderEntryId) {
-                      await deleteReminderEntry(confirmDeleteReminder.eventId, confirmDeleteReminder.reminderEntryId);
-                    }
-                  } finally {
-                    setIsDeletingConfirmedItem(false);
-                  }
-                }} />
-              </View>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal
-        transparent
-        visible={activeShareInvite !== null}
-        animationType="fade"
-        onRequestClose={() => {
-          if (!isRespondingToShareInvite) {
-            void respondToActiveShareInvite('dismiss');
-          }
-        }}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Shared Event Invite</Text>
-            {activeShareInvite ? (
-              <>
-                <Text style={[styles.modalBody, styles.shareInviteBodyText]}>
-                  {`${activeShareInvite.sender.fullName || activeShareInvite.sender.email} shared an event with you.`}
-                </Text>
-                <Text style={[styles.reminderListDate, styles.shareInviteDetailText]}>{`${activeShareInvite.sourceEvent.title} • ${activeShareInvite.sourceEvent.people}`}</Text>
-                <Text style={[styles.reminderListNotes, styles.shareInviteDetailText]}>{`Event: ${formatEventDateOnly(activeShareInvite.sourceEvent)} • ${formatEventTimeOnlyLabel(activeShareInvite.sourceEvent)}`}</Text>
-                {activeShareInvite.message ? (
-                  <Text style={[styles.reminderListNotes, styles.shareInviteDetailText]}>{`Message: ${activeShareInvite.message}`}</Text>
-                ) : null}
-              </>
-            ) : null}
-            <View style={styles.shareInviteActionsRow}>
-              <TouchableOpacity
-                style={[styles.primaryButton, styles.shareInviteActionButton, isRespondingToShareInvite && styles.actionButtonDisabled]}
-                disabled={isRespondingToShareInvite}
-                onPress={() => {
-                  void respondToActiveShareInvite('accept');
-                }}
-              >
-                <Text style={styles.primaryButtonText}>{isRespondingToShareInvite ? 'Working…' : 'Accept'}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.toggleButton, styles.shareInviteActionButton, isRespondingToShareInvite && styles.actionButtonDisabled]}
-                disabled={isRespondingToShareInvite}
-                onPress={() => {
-                  void respondToActiveShareInvite('dismiss');
-                }}
-              >
-                <Text style={styles.toggleButtonText}>Dismiss</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </ScrollView>
   );
 
-  const renderShareView = () => (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
-    >
-      <ScrollView
-        contentContainerStyle={[styles.container, { paddingBottom: 32 }]}
-        keyboardShouldPersistTaps="handled"
-      >
-      <Text style={styles.title}>Share event</Text>
-      <Text style={styles.subtitle}>Send this event to another person by email and/or text.</Text>
+  const renderManageEventsView = () => (
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+      <View style={styles.manageEventsHeaderRow}>
+        <Text style={styles.manageEventsTitle}>Manage Events</Text>
+        <TouchableOpacity style={[styles.floatingActionButton, styles.floatingActionSecondaryButton]} onPress={() => setCurrentView('landing')} activeOpacity={0.8}>
+          <Text style={styles.floatingActionSecondaryText}>Back</Text>
+        </TouchableOpacity>
+      </View>
+      <Text style={styles.subtitle}>Review and organize your saved events.</Text>
 
-      <View style={styles.shareCard}>
-        <Text style={styles.label}>Event details</Text>
-        {sharingEvent ? (
-          <View style={styles.shareEventDetailsCard}>
-            <Text style={styles.eventTitle}>{sharingEvent.title}</Text>
-            <Text>{sharingEvent.people}</Text>
-            <Text style={styles.reminderListNotes}>{formatEventSummary(sharingEvent)}</Text>
-          </View>
-        ) : (
-          <Text style={styles.helperText}>No event selected for sharing.</Text>
-        )}
-
-        {validationMessage ? (
-          <View style={styles.validationBanner}>
-            <Text style={styles.validationBannerText}>{validationMessage}</Text>
-          </View>
-        ) : null}
-
-        <Text style={styles.label}>Share event with</Text>
-        <View style={styles.shareBuilderCard}>
-          {shareContactOptions.length ? (
-            <>
-              <Text style={styles.viewLabel}>Contacts</Text>
-              <View style={styles.shareRecipientPickerRow}>
-                <View style={styles.shareRecipientPickerWrapper}>
-                  <Picker
-                    selectedValue={selectedShareContactId}
-                    onValueChange={(value) => setSelectedShareContactId(String(value))}
-                    style={styles.picker}
-                  >
-                    <Picker.Item label="Select contact" value="" />
-                    {shareContactOptions.map((option) => (
-                      <Picker.Item key={option.value} label={option.label} value={option.value} />
-                    ))}
-                  </Picker>
-                </View>
-                <TouchableOpacity style={styles.shareRecipientAddButton} onPress={addSelectedShareContact}>
-                  <Text style={styles.primaryButtonText}>Add</Text>
-                </TouchableOpacity>
-              </View>
-            </>
-          ) : (
-            <>
-              <Text style={styles.viewLabel}>Contacts <Text style={styles.helperText}>(No Contacts Available)</Text></Text>
-              <Text style={styles.helperText}>Setup contacts in Account screen.</Text>
-            </>
-          )}
-
-          {shareGroupOptions.length ? (
-            <>
-              <Text style={styles.viewLabel}>Groups</Text>
-              <View style={styles.shareRecipientPickerRow}>
-                <View style={styles.shareRecipientPickerWrapper}>
-                  <Picker
-                    selectedValue={selectedShareGroupId}
-                    onValueChange={(value) => setSelectedShareGroupId(String(value))}
-                    style={styles.picker}
-                  >
-                    <Picker.Item label="Select group" value="" />
-                    {shareGroupOptions.map((option) => (
-                      <Picker.Item key={option.value} label={option.label} value={option.value} />
-                    ))}
-                  </Picker>
-                </View>
-                <TouchableOpacity style={styles.shareRecipientAddButton} onPress={addSelectedShareGroup}>
-                  <Text style={styles.primaryButtonText}>Add</Text>
-                </TouchableOpacity>
-              </View>
-            </>
-          ) : (
-            <>
-              <Text style={styles.viewLabel}>Groups <Text style={styles.helperText}>(No Groups Available)</Text></Text>
-              <Text style={styles.helperText}>Setup groups in Account screen.</Text>
-            </>
-          )}
-
-          <Text style={styles.viewLabel}>Individual email</Text>
-          <View style={styles.shareRecipientPickerRow}>
-            <TextInput
-              style={[styles.input, styles.shareRecipientInlineInput]}
-              value={shareManualEmail}
-              onChangeText={(value) => setShareManualEmail(value)}
-              placeholder="name@example.com"
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <TouchableOpacity style={styles.shareRecipientAddButton} onPress={addManualEmailRecipient}>
-              <Text style={styles.primaryButtonText}>Add</Text>
-            </TouchableOpacity>
-          </View>
-
-          <Text style={styles.viewLabel}>Individual mobile phone</Text>
-          <View style={styles.shareRecipientPickerRow}>
-            <TextInput
-              style={[styles.input, styles.shareRecipientInlineInput]}
-              value={shareManualPhone}
-              onChangeText={(value) => setShareManualPhone(formatPhoneNumberInput(value))}
-              placeholder="(555) 555-5555"
-              keyboardType="phone-pad"
-              maxLength={14}
-            />
-            <TouchableOpacity
-              style={[
-                styles.shareRecipientAddButton,
-                !reminderDeliveryTextEnabled && styles.shareRecipientAddButtonDisabled,
-              ]}
-              onPress={addManualPhoneRecipient}
-              disabled={!reminderDeliveryTextEnabled}
-            >
-              <Text style={styles.primaryButtonText}>Add</Text>
-            </TouchableOpacity>
-          </View>
-
-          <Text style={styles.viewLabel}>Recipient list</Text>
-          {shareRecipients.length ? (
-            <View style={styles.shareRecipientList}>
-              {shareRecipients.map((recipient) => (
-                <View key={recipient.key} style={styles.shareRecipientCard}>
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    <Text style={styles.reminderListDate} numberOfLines={1}>{recipient.label}</Text>
-                    {recipient.email ? <Text style={styles.reminderListNotes} numberOfLines={1}>{recipient.email}</Text> : null}
-                    {recipient.phone ? <Text style={styles.reminderListNotes} numberOfLines={1}>{formatPhoneNumberInput(recipient.phone)}</Text> : null}
-                  </View>
-                  <TouchableOpacity style={styles.toggleButton} onPress={() => removeShareRecipient(recipient.key)}>
-                    <Text style={styles.toggleButtonText}>Remove</Text>
-                  </TouchableOpacity>
-                </View>
-              ))}
-            </View>
-          ) : (
-            <Text style={styles.helperText}>Build a recipient list from contacts, groups, or individual email and phone entries.</Text>
-          )}
-        </View>
-
-        <Text style={styles.label}>Delivery routing</Text>
-        <Text style={styles.helperText}>
-          Registered app users receive an in-app popup invite. Contacts without an app account use any populated email and mobile phone values. Manual email and phone entries send to those exact destinations.
-        </Text>
-
-        <Text style={styles.label}>Message to recipient</Text>
-        <TextInput
-          style={[styles.input, styles.notesInput]}
-          value={shareMessage}
-          onChangeText={(value) => setShareMessage(value)}
-          placeholder="Optional message"
-          multiline
-          maxLength={255}
-        />
-
-        <View style={styles.shareActionsRow}>
+      <View style={styles.viewControlsRow}>
+        {([
+          { key: 'summary', label: 'Summary' },
+          { key: 'calendar', label: 'Calendar' },
+        ] as const).map((tab) => (
           <TouchableOpacity
-            style={[styles.primaryButton, styles.shareActionButton, isSendingShare && styles.actionButtonDisabled]}
-            onPress={() => void handleSendShare()}
-            disabled={isSendingShare}
+            key={tab.key}
+            style={[styles.toggleButton, savedEventsView === tab.key && styles.toggleButtonActive]}
+            onPress={() => setSavedEventsView(tab.key)}
+            activeOpacity={0.8}
           >
-            <Text style={styles.primaryButtonText}>{isSendingShare ? 'Sending…' : 'Send'}</Text>
+            <Text style={styles.toggleButtonText}>{tab.label}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.toggleButton, styles.shareActionButton]} onPress={cancelShareFlow} disabled={isSendingShare}>
-            <Text style={styles.toggleButtonText}>Cancel</Text>
+        ))}
+      </View>
+
+      {(isSavedEventsTypeFilterVisible || isSavedEventsSubtypeFilterVisible) ? (
+        <Pressable style={styles.dropdownDismissBackdrop} onPress={closeSavedEventsFilters} />
+      ) : null}
+
+      <View style={styles.savedEventsFilterRow}>
+        <Text style={styles.viewLabel}>Filter</Text>
+        <View style={styles.viewControlsGroup}>
+          <TouchableOpacity
+            style={[styles.toggleButton, savedEventsFilterType !== 'all' && styles.toggleButtonActive]}
+            onPress={() => {
+              setIsSavedEventsSubtypeFilterVisible(false);
+              setIsSavedEventsTypeFilterVisible((current) => !current);
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.toggleButtonText}>
+              Event: {savedEventTypeOptions.find((option) => option.value === savedEventsFilterType)?.label || 'All'}
+            </Text>
           </TouchableOpacity>
+
+          {shouldShowSavedEventsSubtypeFilter ? (
+            <TouchableOpacity
+              style={[styles.toggleButton, savedEventsFilterSubtype !== 'all' && styles.toggleButtonActive]}
+              onPress={() => {
+                setIsSavedEventsTypeFilterVisible(false);
+                setIsSavedEventsSubtypeFilterVisible((current) => !current);
+              }}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.toggleButtonText}>Subtype: {selectedSavedEventsSubtypeLabel || 'All'}</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+
+      {isSavedEventsTypeFilterVisible ? (
+        <View style={styles.dropdownList}>
+          {savedEventTypeOptions.map((option) => (
+            <TouchableOpacity
+              key={option.value}
+              style={[
+                styles.dropdownListItem,
+                savedEventsFilterType === option.value && styles.dropdownListItemSelected,
+              ]}
+              onPress={() => {
+                setSavedEventsFilterType(option.value);
+                setSavedEventsFilterSubtype('all');
+                closeSavedEventsFilters();
+              }}
+              activeOpacity={0.8}
+            >
+              <Text
+                style={[
+                  styles.dropdownListItemText,
+                  savedEventsFilterType === option.value && styles.dropdownListItemTextSelected,
+                ]}
+              >
+                {option.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      ) : null}
+
+      {shouldShowSavedEventsSubtypeFilter && isSavedEventsSubtypeFilterVisible ? (
+        <View style={styles.dropdownList}>
+          {savedEventsSubtypeOptions.map((option) => (
+            <TouchableOpacity
+              key={option.value}
+              style={[
+                styles.dropdownListItem,
+                savedEventsFilterSubtype === option.value && styles.dropdownListItemSelected,
+              ]}
+              onPress={() => {
+                setSavedEventsFilterSubtype(option.value);
+                setIsSavedEventsSubtypeFilterVisible(false);
+              }}
+              activeOpacity={0.8}
+            >
+              <Text
+                style={[
+                  styles.dropdownListItemText,
+                  savedEventsFilterSubtype === option.value && styles.dropdownListItemTextSelected,
+                ]}
+              >
+                {option.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      ) : null}
+
+      {savedEventsView === 'summary' ? (
+        filteredSavedEvents.length ? (
+          <>
+            {currentSavedEventsSummaryPageItems.map((event) => {
+              const isSelected = selectedSummaryEventId === event.id;
+              const selectedEvent = isSelected ? events.find((item) => item.id === event.id) ?? null : null;
+
+              return (
+                <View key={event.id}>
+                  <TouchableOpacity
+                    style={styles.summaryLink}
+                    onPress={() => setSelectedSummaryEventId(isSelected ? null : event.id)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.summaryLinkText}>
+                      {formatEventDateOnly(event)} • {event.title} • {event.people} • {formatEventTimeOnlyLabel(event)}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {selectedEvent ? (
+                    <View style={styles.card}>
+                      <Text style={styles.label}>{selectedEvent.title}</Text>
+                      <Text style={styles.helperText}>{selectedEvent.people}</Text>
+                      <Text style={styles.helperText}>{formatEventDateOnly(selectedEvent)}</Text>
+                      <Text style={styles.helperText}>{formatEventTimeOnlyLabel(selectedEvent)}</Text>
+                      <Text style={styles.helperText}>{selectedEvent.notes || 'No notes'}</Text>
+                      <View style={styles.row}>
+                        <TouchableOpacity onPress={() => openRemindersForEvent(selectedEvent)}>
+                          <Text style={[styles.summaryLinkText, !getReminderSummaryState(selectedEvent).isActive && styles.reminderCountLinkDisabled]}>
+                            {getReminderSummaryState(selectedEvent).isActive ? 'View reminders' : 'No reminders'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })}
+
+            {savedEventsSummaryPages.length > 1 ? (
+              <View style={styles.summaryPaginationRow}>
+                <TouchableOpacity
+                  style={[styles.summaryPagerButton, safeSavedEventsSummaryPage === 0 && styles.summaryPagerButtonDisabled]}
+                  onPress={() => setSavedEventsSummaryPage((page) => Math.max(0, page - 1))}
+                  disabled={safeSavedEventsSummaryPage === 0}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.summaryPagerButtonText}>Back</Text>
+                </TouchableOpacity>
+                <Text style={styles.summaryPagerPageText}>Page {safeSavedEventsSummaryPage + 1} of {savedEventsSummaryPages.length}</Text>
+                <TouchableOpacity
+                  style={[styles.summaryPagerButton, safeSavedEventsSummaryPage >= savedEventsSummaryPages.length - 1 && styles.summaryPagerButtonDisabled]}
+                  onPress={() => setSavedEventsSummaryPage((page) => Math.min(savedEventsSummaryPages.length - 1, page + 1))}
+                  disabled={safeSavedEventsSummaryPage >= savedEventsSummaryPages.length - 1}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.summaryPagerButtonText}>Next</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+          </>
+        ) : (
+          <View style={styles.card}>
+            <Text style={styles.helperText}>No saved events yet.</Text>
+          </View>
+        )
+      ) : null}
+
+      {savedEventsView === 'list' ? (
+        filteredSavedEvents.length ? (
+          <>
+            {currentSavedEventsPageItems.map((event) => (
+              <View key={event.id} style={styles.card}>
+                <Text style={styles.label}>{event.title}</Text>
+                <Text style={styles.helperText}>{event.people}</Text>
+                <Text style={styles.helperText}>{formatEventDateOnly(event)}</Text>
+                <Text style={styles.helperText}>{formatEventTimeOnlyLabel(event)}</Text>
+                <View style={styles.row}>
+                  <TouchableOpacity onPress={() => setSelectedSummaryEventId(event.id)}>
+                    <Text style={styles.summaryLinkText}>Details</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => openRemindersForEvent(event)}>
+                    <Text style={[styles.summaryLinkText, !getReminderSummaryState(event).isActive && styles.reminderCountLinkDisabled]}>
+                      {getReminderSummaryState(event).isActive ? 'Reminders' : 'No reminders'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ))}
+
+            {savedEventsPages.length > 1 ? (
+              <View style={styles.viewControlsRow}>
+                <TouchableOpacity
+                  style={styles.toggleButton}
+                  onPress={() => setSavedEventsPage((page) => Math.max(0, page - 1))}
+                  disabled={safeSavedEventsPage === 0}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.toggleButtonText}>Previous</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.toggleButton}
+                  onPress={() => setSavedEventsPage((page) => Math.min(savedEventsPages.length - 1, page + 1))}
+                  disabled={safeSavedEventsPage >= savedEventsPages.length - 1}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.toggleButtonText}>Next</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+          </>
+        ) : (
+          <View style={styles.card}>
+            <Text style={styles.helperText}>No saved events yet.</Text>
+          </View>
+        )
+      ) : null}
+
+      {savedEventsView === 'calendar' ? (
+        <View style={[styles.card, styles.calendarViewCard]}>
+          <View style={styles.calendarHeader}>
+            <TouchableOpacity onPress={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))}>
+              <Text style={styles.modalNav}>◀</Text>
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>{calendarMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</Text>
+            <TouchableOpacity onPress={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))}>
+              <Text style={styles.modalNav}>▶</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.weekRow}>
+            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => (
+              <Text key={day} style={styles.weekDay}>{day}</Text>
+            ))}
+          </View>
+
+          <View style={styles.calendarGrid}>
+            {getCalendarDays(calendarMonth).map((day, index) => {
+              if (!day) {
+                return <View key={`empty-${index}`} style={styles.dayCell} />;
+              }
+
+              const hasEvent = filteredSavedEvents.some((event) => {
+                const eventDate = isAllDaySpecialDateEvent(event)
+                  ? getLocalDateFromUtcDay(event.eventDateTime)
+                  : new Date(event.eventDateTime);
+                return day.toDateString() === eventDate.toDateString();
+              });
+              const isSelected = selectedCalendarDate && day.toDateString() === selectedCalendarDate.toDateString();
+
+              return (
+                <TouchableOpacity
+                  key={day.toISOString()}
+                  style={[styles.dayCell, hasEvent && styles.dayCellWithEvents, isSelected && styles.selectedDayCell]}
+                  onPress={() => {
+                    setSelectedCalendarDate(day);
+                    setSelectedEventPopupDate(null);
+                  }}
+                >
+                  <Text style={[styles.dayText, isSelected && styles.selectedDayText]}>{day.getDate()}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {selectedCalendarDate ? (
+            <View style={styles.calendarDateOverlayPanel} pointerEvents="box-none">
+              {selectedDateEntries.length ? (
+                selectedDateEntries.map(({ event }, index) => (
+                  <View key={event.id} style={[styles.calendarDateDetailCard, index > 0 && styles.calendarDateDetailCardSpaced]}>
+                    <View style={styles.savedEventDetailsHeaderRow}>
+                      <Text style={styles.savedEventDetailsEventTitle}>{event.title}</Text>
+                      <TouchableOpacity onPress={() => openRemindersForEvent(event)}>
+                        <Text style={[styles.savedEventDetailsReminderCounter, !getReminderSummaryState(event).isActive && styles.reminderCountLinkDisabled]}>
+                          {getReminderSummaryState(event).isActive ? `Reminders: ${getReminderSummaryState(event).count}` : 'Reminders: 0'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={styles.savedEventDetailsPeople}>{event.people}</Text>
+                    <Text style={styles.savedEventDetailsMeta}>Event Date: {formatEventDateOnly(event)}</Text>
+                    <Text style={styles.savedEventDetailsMeta}>{formatEventTimeOnlyLabel(event)}</Text>
+
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.savedEventDetailsActionRow}>
+                      <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => {
+                        setSelectedCalendarDate(null);
+                      }}>
+                        <Text style={styles.savedEventDetailActionText}>Close</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => startShareForEvent(event)}>
+                        <Text style={styles.savedEventDetailActionText}>Share</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => {
+                        startEditingEvent(event);
+                        setSelectedCalendarDate(null);
+                      }}>
+                        <Text style={styles.savedEventDetailActionText}>Modify</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.savedEventDetailActionPillDanger} onPress={() => promptEventDelete(event.id)}>
+                        <Text style={styles.savedEventDetailActionTextDanger}>Delete</Text>
+                      </TouchableOpacity>
+                    </ScrollView>
+                  </View>
+                ))
+              ) : (
+                <View style={styles.calendarDateDetailCard}>
+                  <Text style={styles.helperText}>No events scheduled on this date.</Text>
+                </View>
+              )}
+            </View>
+          ) : (
+            <Text style={styles.helperText}>Select a day to view events.</Text>
+          )}
+        </View>
+      ) : null}
+    </ScrollView>
+  );
+
+  const renderManageRemindersView = () => (
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+      <TouchableOpacity style={[styles.floatingActionButton, styles.floatingActionSecondaryButton]} onPress={() => setCurrentView('landing')} activeOpacity={0.8}>
+        <Text style={styles.floatingActionSecondaryText}>Back</Text>
+      </TouchableOpacity>
+
+      <Text style={styles.title}>Manage Reminders</Text>
+      <Text style={styles.subtitle}>Review and adjust the reminders attached to your events.</Text>
+
+      {savedReminders.length ? (
+        savedReminders.map(({ event, occurrence }) => (
+          <View key={`${event.id}-${occurrence.getTime()}`} style={styles.card}>
+            <Text style={styles.label}>{event.title}</Text>
+            <Text style={styles.helperText}>{event.people}</Text>
+            <Text style={styles.helperText}>{occurrence.toLocaleString()}</Text>
+          </View>
+        ))
+      ) : (
+        <View style={styles.card}>
+          <Text style={styles.helperText}>No reminders scheduled yet.</Text>
+        </View>
+      )}
+    </ScrollView>
   );
 
   const renderCreateView = () => {
@@ -5644,6 +5403,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     const subtypeFieldLabel = getSubtypeFieldLabel(form.eventType);
     const subtypeDisplayLabel = getSubtypeDisplayLabel(form);
     const shouldShowSubtypeField = eventTypeHasSubtype(form.eventType);
+    const shouldShowAgeAsOfTodayField = hasSelectedEventType && form.eventType === 'birthday';
+    const isAnyTypeDropdownVisible = isEventTypePickerVisible || isSubtypePickerVisible;
+    const subtypeOptions =
+      form.eventType === 'party' ? Object.entries(partySubtypeLabels)
+        : form.eventType === 'school' ? Object.entries(schoolSubtypeLabels)
+          : form.eventType === 'medical' ? Object.entries(medicalSubtypeLabels)
+            : form.eventType === 'dental' ? Object.entries(dentalSubtypeLabels)
+              : form.eventType === 'work' ? Object.entries(workSubtypeLabels)
+                : [];
 
     return (
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
@@ -5657,83 +5425,78 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
       ) : null}
 
       <View style={styles.card}>
+        {isAnyTypeDropdownVisible ? (
+          <Pressable style={styles.dropdownDismissBackdrop} onPress={closeTypeSelectionDropdowns} />
+        ) : null}
         <View style={styles.inlineSelectionRow}>
           <Text style={styles.label}>Event type</Text>
-          {!isEventTypePickerVisible && hasSelectedEventType ? (
-            <TouchableOpacity style={styles.inlineSelectionValueButton} onPress={() => {
-              setEventTypeDraft(form.eventType);
-              setIsEventTypePickerVisible(true);
-            }} activeOpacity={0.8}>
-              <Text style={styles.inlineSelectionValueText}>{eventTypeLabels[form.eventType]}</Text>
-            </TouchableOpacity>
-          ) : null}
+          <TouchableOpacity
+            style={styles.inlineSelectionValueButton}
+            onPress={() => {
+              setEventTypeDraft(hasSelectedEventType ? form.eventType : eventTypeDraft);
+              setIsSubtypePickerVisible(false);
+              setIsEventTypePickerVisible((current) => !current);
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.inlineSelectionValueText}>{hasSelectedEventType ? eventTypeLabels[form.eventType] : 'Select event type'}</Text>
+          </TouchableOpacity>
         </View>
-        {(isEventTypePickerVisible || !hasSelectedEventType) ? (
-          <View style={styles.pickerWrapper}>
-            <Picker
-              selectedValue={eventTypeDraft}
-              onValueChange={(value) => setEventTypeDraft(value as EventTypeValue | '')}
-              style={styles.picker}
-            >
-              <Picker.Item label="Select event type" value="" />
-              {eventTypeOptions.map((option) => (
-                <Picker.Item key={option.value} label={option.label} value={option.value} />
-              ))}
-            </Picker>
-            <TouchableOpacity
-              style={[styles.toggleButton, styles.inlineSelectionConfirmButton, !eventTypeDraft && styles.actionButtonDisabled]}
-              onPress={applyEventTypeDraftSelection}
-              disabled={!eventTypeDraft}
-            >
-              <Text style={styles.toggleButtonText}>Select event type</Text>
-            </TouchableOpacity>
+        {isEventTypePickerVisible ? (
+          <View style={styles.dropdownList}>
+            {eventTypeOptions.map((option) => (
+              <TouchableOpacity
+                key={option.value}
+                style={[
+                  styles.dropdownListItem,
+                  hasSelectedEventType && form.eventType === option.value && styles.dropdownListItemSelected,
+                ]}
+                onPress={() => handleSelectEventType(option.value)}
+                activeOpacity={0.8}
+              >
+                <Text style={[
+                  styles.dropdownListItemText,
+                  hasSelectedEventType && form.eventType === option.value && styles.dropdownListItemTextSelected,
+                ]}>{option.label}</Text>
+              </TouchableOpacity>
+            ))}
           </View>
         ) : null}
 
-        {shouldShowSubtypeField && subtypeFieldLabel ? (
+        {shouldShowSubtypeField && subtypeFieldLabel && hasSelectedEventType ? (
           <>
             <View style={styles.inlineSelectionRow}>
               <Text style={styles.label}>{subtypeFieldLabel}</Text>
-              {!isSubtypePickerVisible && hasSelectedSubtype ? (
-                <TouchableOpacity style={styles.inlineSelectionValueButton} onPress={() => {
+              <TouchableOpacity
+                style={styles.inlineSelectionValueButton}
+                onPress={() => {
                   setSubtypeDraft(getSubtypeValueForEventType(form, form.eventType));
-                  setIsSubtypePickerVisible(true);
-                }} activeOpacity={0.8}>
-                  <Text style={styles.inlineSelectionValueText}>{subtypeDisplayLabel}</Text>
-                </TouchableOpacity>
-              ) : null}
+                  setIsEventTypePickerVisible(false);
+                  setIsSubtypePickerVisible((current) => !current);
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.inlineSelectionValueText}>{hasSelectedSubtype ? subtypeDisplayLabel : `Select ${subtypeFieldLabel.toLowerCase()}`}</Text>
+              </TouchableOpacity>
             </View>
-            {(isSubtypePickerVisible || !hasSelectedSubtype) ? (
-              <View style={styles.pickerWrapper}>
-                <Picker
-                  selectedValue={subtypeDraft}
-                  onValueChange={(value) => setSubtypeDraft(String(value || ''))}
-                  style={styles.picker}
-                >
-                  <Picker.Item label={`Select ${subtypeFieldLabel.toLowerCase()}`} value="" />
-                  {form.eventType === 'party' ? Object.entries(partySubtypeLabels).map(([value, label]) => (
-                    <Picker.Item key={value} label={label} value={value} />
-                  )) : null}
-                  {form.eventType === 'school' ? Object.entries(schoolSubtypeLabels).map(([value, label]) => (
-                    <Picker.Item key={value} label={label} value={value} />
-                  )) : null}
-                  {form.eventType === 'medical' ? Object.entries(medicalSubtypeLabels).map(([value, label]) => (
-                    <Picker.Item key={value} label={label} value={value} />
-                  )) : null}
-                  {form.eventType === 'dental' ? Object.entries(dentalSubtypeLabels).map(([value, label]) => (
-                    <Picker.Item key={value} label={label} value={value} />
-                  )) : null}
-                  {form.eventType === 'work' ? Object.entries(workSubtypeLabels).map(([value, label]) => (
-                    <Picker.Item key={value} label={label} value={value} />
-                  )) : null}
-                </Picker>
-                <TouchableOpacity
-                  style={[styles.toggleButton, styles.inlineSelectionConfirmButton, !subtypeDraft && styles.actionButtonDisabled]}
-                  onPress={applySubtypeDraftSelection}
-                  disabled={!subtypeDraft}
-                >
-                  <Text style={styles.toggleButtonText}>Select subtype</Text>
-                </TouchableOpacity>
+            {isSubtypePickerVisible ? (
+              <View style={styles.dropdownList}>
+                {subtypeOptions.map(([value, label]) => (
+                  <TouchableOpacity
+                    key={value}
+                    style={[
+                      styles.dropdownListItem,
+                      hasSelectedSubtype && getSubtypeValueForEventType(form, form.eventType) === value && styles.dropdownListItemSelected,
+                    ]}
+                    onPress={() => handleSelectSubtype(value)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[
+                      styles.dropdownListItemText,
+                      hasSelectedSubtype && getSubtypeValueForEventType(form, form.eventType) === value && styles.dropdownListItemTextSelected,
+                    ]}>{label}</Text>
+                  </TouchableOpacity>
+                ))}
               </View>
             ) : null}
           </>
@@ -5765,7 +5528,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           placeholder="Enter a person, people, group, place or description"
         />
 
-        {form.eventType === 'birthday' ? (
+        {shouldShowAgeAsOfTodayField ? (
           <>
             <Text style={styles.label}>Age as of today</Text>
             <TextInput
@@ -5907,8 +5670,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           </>
         ) : null}
 
-        <Text style={styles.label}>Event start date</Text>
-        <Button title={formatDateTimeLabel(form.eventDateTime, isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay))} onPress={() => openDatePicker('event')} />
+        <View style={styles.inlineSelectionRow}>
+          <Text style={styles.label}>Event date</Text>
+          <TouchableOpacity style={styles.inlineSelectionValueButton} onPress={() => openDatePicker('event')} activeOpacity={0.8}>
+            <Text style={styles.inlineSelectionValueText}>{formatDateTimeLabel(form.eventDateTime, isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay))}</Text>
+          </TouchableOpacity>
+        </View>
 
         {form.eventType !== 'birthday' && form.eventType !== 'anniversary' && form.eventType !== 'party' && (
           <View style={styles.checkboxRow}>
@@ -5933,43 +5700,47 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
             {supportsEventEndTime(form.eventType, form.partySubtype, form.eventAllDay) ? (
               <View style={styles.eventTimeGroupsRow}>
                 <View style={styles.eventTimeGroup}>
-                  <Text style={styles.label}>Event start time</Text>
-                  <TouchableOpacity
-                    style={styles.timeValueButton}
-                    onPress={() => openTimePicker('event-start', 'Start time', form.eventDateTime)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.timeValueButtonText}>{formatTimeLabel(form.eventDateTime)}</Text>
-                  </TouchableOpacity>
+                  <View style={styles.inlineSelectionRow}>
+                    <Text style={styles.label}>Start time</Text>
+                    <TouchableOpacity
+                      style={styles.inlineSelectionValueButton}
+                      onPress={() => openTimePicker('event-start', 'Start time', form.eventDateTime)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.inlineSelectionValueText}>{formatTimeLabel(form.eventDateTime)}</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
 
                 <View style={styles.eventTimeGroup}>
-                  <Text style={styles.label}>Event end time</Text>
-                  <TouchableOpacity
-                    style={styles.timeValueButton}
-                    onPress={() => openTimePicker('event-end', 'End time', effectiveEventEndDateTime)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.timeValueButtonText}>{formatTimeLabel(effectiveEventEndDateTime)}</Text>
-                  </TouchableOpacity>
+                  <View style={styles.inlineSelectionRow}>
+                    <Text style={styles.label}>End time</Text>
+                    <TouchableOpacity
+                      style={styles.inlineSelectionValueButton}
+                      onPress={() => openTimePicker('event-end', 'End time', effectiveEventEndDateTime)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.inlineSelectionValueText}>{formatTimeLabel(effectiveEventEndDateTime)}</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
               </View>
             ) : (
-              <>
-                <Text style={styles.label}>Event start time</Text>
+              <View style={styles.inlineSelectionRow}>
+                <Text style={styles.label}>Start time</Text>
                 <TouchableOpacity
-                  style={styles.timeValueButton}
+                  style={styles.inlineSelectionValueButton}
                   onPress={() => openTimePicker('event-start', 'Start time', form.eventDateTime)}
                   activeOpacity={0.8}
                 >
-                  <Text style={styles.timeValueButtonText}>{formatTimeLabel(form.eventDateTime)}</Text>
+                  <Text style={styles.inlineSelectionValueText}>{formatTimeLabel(form.eventDateTime)}</Text>
                 </TouchableOpacity>
-              </>
+              </View>
             )}
           </>
         )}
 
-        <Text style={styles.label}>Event Notes</Text>
+        <Text style={styles.label}>Notes</Text>
         <TextInput
           style={[styles.input, styles.notesInput]}
           multiline
@@ -5978,93 +5749,86 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           placeholder="Optional details"
         />
 
-        <TouchableOpacity
-          style={styles.shareOptionRow}
-          onPress={() => setForm((current) => ({
-            ...current,
-            shareAfterSave: !current.shareAfterSave,
-          }))}
-          activeOpacity={0.8}
-        >
-          <View style={styles.shareRadioOuter}>
-            {form.shareAfterSave ? <View style={styles.shareRadioInner} /> : null}
-          </View>
-          <Text style={styles.preferenceToggleText}>Share Event With Others</Text>
-        </TouchableOpacity>
         <Text style={styles.label}>Reminder Creation Mode</Text>
-          <View style={[styles.row, styles.reminderModeRow]}>
-          {([
-            { value: 'none' as ReminderModeValue, label: 'None' },
-            { value: 'default' as ReminderModeValue, label: 'Default' },
-              { value: 'static' as ReminderModeValue, label: 'Recur' },
-            { value: 'variable' as ReminderModeValue, label: 'Custom' },
-          ]).map((option) => {
-            const isSelected = form.reminderMode === option.value;
-            return (
-              <Pressable
-                key={option.value}
+        <View style={styles.reminderModeScrollContainer}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.reminderModeScrollContent}
+            snapToInterval={150}
+            decelerationRate="fast"
+          >
+            {([
+              { value: 'none' as ReminderModeValue, label: 'None' },
+              { value: 'default' as ReminderModeValue, label: 'Default' },
+              { value: 'static' as ReminderModeValue, label: 'Recurring' },
+              { value: 'variable' as ReminderModeValue, label: 'Custom' },
+            ]).map((option) => {
+              const isSelected = form.reminderMode === option.value;
+              return (
+                <Pressable
+                  key={option.value}
                   style={[
-                    styles.frequencyOption,
-                    styles.reminderModeOption,
-                    isSelected ? styles.frequencyOptionSelected : styles.frequencyOptionUnselected,
+                    styles.reminderModeScrollButton,
+                    isSelected ? styles.reminderModeScrollButtonSelected : styles.reminderModeScrollButtonUnselected,
                   ]}
-                onPress={() => {
-                  const now = getDefaultDate();
-                  const isFirstReminderModeSelection = isNoReminderMode(form.reminderMode) && isReminderTimeZoneMode(option.value);
+                  onPress={() => {
+                    const now = getDefaultDate();
+                    const isFirstReminderModeSelection = isNoReminderMode(form.reminderMode) && isReminderTimeZoneMode(option.value);
 
-                  if (option.value === 'default') {
-                    const isAnnualEvent = isAnnualEventType(form.eventType, form.partySubtype);
-                    const isAllDay = isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay);
-                    const defaultReminderEventDate = getDefaultReminderAnchorDate(form.eventDateTime, isAnnualEvent, isAllDay);
+                    if (option.value === 'default') {
+                      const isAnnualEvent = isAnnualEventType(form.eventType, form.partySubtype);
+                      const isAllDay = isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay);
+                      const defaultReminderEventDate = getDefaultReminderAnchorDate(form.eventDateTime, isAnnualEvent, isAllDay);
 
-                    const defaultReminders = buildDefaultReminderDrafts(
-                      defaultReminderEventDate,
-                      form.notes.trim(),
-                      form.people.trim(),
-                      getEventTitle(form.eventType, form.partySubtype, form.customType, form.schoolSubtype, form.medicalSubtype, form.dentalSubtype, form.workSubtype),
-                      defaultReminderTime,
-                    );
-                    setPendingVariableReminders(defaultReminders);
-                    setSeededVariableDraftIds(defaultReminders.map((item) => item.id));
-                  }
+                      const defaultReminders = buildDefaultReminderDrafts(
+                        defaultReminderEventDate,
+                        form.notes.trim(),
+                        form.people.trim(),
+                        getEventTitle(form.eventType, form.partySubtype, form.customType, form.schoolSubtype, form.medicalSubtype, form.dentalSubtype, form.workSubtype),
+                        defaultReminderTime,
+                      );
+                      setPendingVariableReminders(defaultReminders);
+                      setSeededVariableDraftIds(defaultReminders.map((item) => item.id));
+                    }
 
-                  if (option.value !== 'static') {
-                    setHasTouchedStaticReminderSchedule(false);
-                  }
+                    if (option.value !== 'static') {
+                      setHasTouchedStaticReminderSchedule(false);
+                    }
 
-                  if (isFirstReminderModeSelection) {
-                    setPickerMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-                    setStaticReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-                    setHasTouchedStaticReminderSchedule(false);
-                    setPendingReminderDateTime(new Date(now));
-                    setPendingReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-                    setForm((current) => ({
-                      ...current,
-                      reminderDateTime: new Date(now),
-                      reminderMode: option.value,
-                    }));
-                    return;
-                  }
+                    if (isFirstReminderModeSelection) {
+                      setPickerMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+                      setStaticReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+                      setHasTouchedStaticReminderSchedule(false);
+                      setPendingReminderDateTime(new Date(now));
+                      setPendingReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+                      setForm((current) => ({
+                        ...current,
+                        reminderDateTime: new Date(now),
+                        reminderMode: option.value,
+                      }));
+                      return;
+                    }
 
-                  setForm({ ...form, reminderMode: option.value });
-                }}
-                onHoverIn={() => setHoveredReminderMode(option.value)}
-                onHoverOut={() => setHoveredReminderMode((current) => (current === option.value ? null : current))}
-                disabled={isSelected && option.value !== 'default'}
-              >
-                <Text
-                  style={[
-                    styles.frequencyOptionText,
-                    styles.reminderModeOptionText,
-                    isSelected ? styles.frequencyOptionTextSelected : styles.frequencyOptionTextUnselected,
-                  ]}
-                  numberOfLines={1}
+                    setForm({ ...form, reminderMode: option.value });
+                  }}
+                  onHoverIn={() => setHoveredReminderMode(option.value)}
+                  onHoverOut={() => setHoveredReminderMode((current) => (current === option.value ? null : current))}
+                  disabled={isSelected && option.value !== 'default'}
                 >
-                  {option.label}
-                </Text>
-              </Pressable>
-            );
-          })}
+                  <Text
+                    style={[
+                      styles.reminderModeScrollButtonText,
+                      isSelected ? styles.reminderModeScrollButtonTextSelected : styles.reminderModeScrollButtonTextUnselected,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {option.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
         </View>
 
         {hoveredReminderMode ? (
@@ -6078,22 +5842,36 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
         {form.reminderMode === 'static' && (
           <>
             <Text style={styles.label}>Reminder frequency</Text>
-            <View style={styles.row}>
-              {(['daily', 'weekly', 'monthly', 'yearly'] as ReminderFrequency[]).map((option) => {
-                const isSelected = form.frequency === option;
-                return (
-                  <TouchableOpacity
-                    key={option}
-                    style={[styles.frequencyOption, isSelected ? styles.frequencyOptionSelected : styles.frequencyOptionUnselected]}
-                    onPress={() => setForm({ ...form, frequency: option })}
-                    disabled={isSelected}
-                  >
-                    <Text style={[styles.frequencyOptionText, isSelected ? styles.frequencyOptionTextSelected : styles.frequencyOptionTextUnselected]}>
-                      {option}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
+            <View style={styles.reminderFrequencyScrollContainer}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.reminderModeScrollContent}
+                snapToInterval={130}
+                decelerationRate="fast"
+              >
+                {(['daily', 'weekly', 'monthly', 'yearly'] as ReminderFrequency[]).map((option) => {
+                  const isSelected = form.frequency === option;
+                  return (
+                    <TouchableOpacity
+                      key={option}
+                      style={[
+                        styles.reminderModeScrollButton,
+                        isSelected ? styles.reminderModeScrollButtonSelected : styles.reminderModeScrollButtonUnselected,
+                      ]}
+                      onPress={() => setForm({ ...form, frequency: option })}
+                      disabled={isSelected}
+                    >
+                      <Text style={[
+                        styles.reminderModeScrollButtonText,
+                        isSelected ? styles.reminderModeScrollButtonTextSelected : styles.reminderModeScrollButtonTextUnselected,
+                      ]}>
+                        {option}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
             </View>
           </>
         )}
@@ -6211,15 +5989,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   onPress={() => openTimePicker('static-reminder', 'Reminder time', form.reminderDateTime)}
                   activeOpacity={0.8}
                 >
-                  <Text style={styles.timeValueButtonText}>{formatTimeLabel(form.reminderDateTime)}</Text>
+                  <Text style={styles.timeValueButtonText}>{formatReminderTimeDisplay(form.reminderDateTime, isStaticReminderTimeSelected)}</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity style={styles.primaryButton} onPress={addPendingVariableReminder}>
-                  <Text style={styles.addReminderButtonText}>{`Add\nReminder(s)`}</Text>
+                <TouchableOpacity
+                  style={[styles.primaryButton, !isStaticReminderTimeSelected && styles.actionButtonDisabled]}
+                  onPress={addPendingVariableReminder}
+                  disabled={!isStaticReminderTimeSelected}
+                >
+                  <Text style={styles.addReminderButtonText}>{isReminderAddedFlash ? 'Reminder Added' : 'Add\nReminder(s)'}</Text>
                 </TouchableOpacity>
-                <Text style={styles.reminderActionHint}>
-                  (Choose a time,{`\n`}click Add Reminder(s) to add to reminder list.)
-                </Text>
               </View>
             </View>
           </>
@@ -6298,14 +6077,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
                   onPress={() => openTimePicker('pending-reminder', 'Reminder time', pendingReminderDateTime)}
                   activeOpacity={0.8}
                 >
-                  <Text style={styles.timeValueButtonText}>{formatTimeLabel(pendingReminderDateTime)}</Text>
+                  <Text style={styles.timeValueButtonText}>{formatReminderTimeDisplay(pendingReminderDateTime, isVariableReminderTimeSelected)}</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.primaryButton} onPress={addPendingVariableReminder}>
-                  <Text style={styles.addReminderButtonText}>{`Add\nReminder(s)`}</Text>
+                <TouchableOpacity
+                  style={[styles.primaryButton, !isVariableReminderTimeSelected && styles.actionButtonDisabled]}
+                  onPress={addPendingVariableReminder}
+                  disabled={!isVariableReminderTimeSelected}
+                >
+                  <Text style={styles.addReminderButtonText}>{isReminderAddedFlash ? 'Reminder Added' : 'Add\nReminder(s)'}</Text>
                 </TouchableOpacity>
-                <Text style={styles.reminderActionHint}>
-                  (Choose a time,{`\n`}click Add Reminder(s) to add to reminder list.)
-                </Text>
               </View>
             </View>
 
@@ -6368,24 +6148,53 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
           </View>
         ) : null}
 
-        <View style={{ marginTop: 8 }}>
-          <Button title="Cancel" onPress={cancelCreateFlow} />
-        </View>
-        <View style={{ marginTop: 8 }}>
-          <TouchableOpacity
-            activeOpacity={0.8}
-            style={[styles.primaryButton, isSavingEvent && styles.actionButtonDisabled]}
-            disabled={isSavingEvent}
-            onPress={() => {
-              if (editingEvent) {
-                void saveEditedEvent();
-              } else {
-                void saveCurrentEvent();
-              }
-            }}
+        <View style={styles.floatingActionStripWrap}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.floatingActionStripContent}
+            snapToInterval={170}
+            decelerationRate="fast"
           >
-            <Text style={styles.primaryButtonText}>{isSavingEvent ? 'Saving…' : editingEvent ? 'Save changes' : 'SAVE'}</Text>
-          </TouchableOpacity>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={[styles.floatingActionButton, styles.floatingActionSecondaryButton, isSavingEvent && styles.actionButtonDisabled]}
+              onPress={cancelCreateFlow}
+              disabled={isSavingEvent}
+            >
+              <Text style={styles.floatingActionSecondaryText}>Cancel</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={[styles.floatingActionButton, styles.floatingActionPrimaryButton, isSavingEvent && styles.actionButtonDisabled]}
+              disabled={isSavingEvent}
+              onPress={() => {
+                if (editingEvent) {
+                  void saveEditedEvent(false);
+                } else {
+                  void saveCurrentEvent(false);
+                }
+              }}
+            >
+              <Text style={styles.floatingActionPrimaryText}>{isSavingEvent ? 'Saving…' : 'Save'}</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={[styles.floatingActionButton, styles.floatingActionPrimaryButton, isSavingEvent && styles.actionButtonDisabled]}
+              disabled={isSavingEvent}
+              onPress={() => {
+                if (editingEvent) {
+                  void saveEditedEvent(true);
+                } else {
+                  void saveCurrentEvent(true);
+                }
+              }}
+            >
+              <Text style={styles.floatingActionPrimaryText}>Save and Share</Text>
+            </TouchableOpacity>
+          </ScrollView>
         </View>
       </View>
 
@@ -6440,9 +6249,268 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone 
     );
   };
 
+  const renderShareView = () => (
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+      <Text style={styles.title}>Share Event</Text>
+      <Text style={styles.subtitle}>{sharingEvent ? `Share “${sharingEvent.title}” with others.` : 'Choose an event to share.'}</Text>
+
+      {validationMessage ? (
+        <View style={styles.validationBanner}>
+          <Text style={styles.validationBannerText}>{validationMessage}</Text>
+        </View>
+      ) : null}
+
+      {sharingEvent ? (
+        <View style={styles.card}>
+          <Text style={styles.label}>Event</Text>
+          <Text style={styles.helperText}>{sharingEvent.title}</Text>
+          <Text style={styles.helperText}>{sharingEvent.people}</Text>
+          <Text style={styles.helperText}>{new Date(sharingEvent.eventDateTime).toLocaleString()}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.card}>
+        <Text style={styles.label}>Recipients</Text>
+        {shareRecipients.length ? (
+          shareRecipients.map((recipient) => (
+            <View key={recipient.key} style={styles.reminderListItem}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.reminderListDate}>{recipient.label}</Text>
+                {recipient.email ? <Text style={styles.reminderListNotes}>{recipient.email}</Text> : null}
+                {recipient.phone ? <Text style={styles.reminderListNotes}>{recipient.phone}</Text> : null}
+              </View>
+              <TouchableOpacity onPress={() => removeShareRecipient(recipient.key)}>
+                <Text style={styles.pendingReminderRemove}>Remove</Text>
+              </TouchableOpacity>
+            </View>
+          ))
+        ) : (
+          <Text style={styles.helperText}>No recipients added yet.</Text>
+        )}
+
+        <Text style={styles.label}>Add email</Text>
+        <TextInput
+          style={styles.input}
+          value={shareManualEmail}
+          onChangeText={setShareManualEmail}
+          placeholder="name@example.com"
+          keyboardType="email-address"
+          autoCapitalize="none"
+        />
+        <TouchableOpacity style={styles.primaryButton} onPress={addManualEmailRecipient}>
+          <Text style={styles.addReminderButtonText}>Add email</Text>
+        </TouchableOpacity>
+
+        <Text style={styles.label}>Add phone</Text>
+        <TextInput
+          style={styles.input}
+          value={shareManualPhone}
+          onChangeText={setShareManualPhone}
+          placeholder="(555) 123-4567"
+          keyboardType="phone-pad"
+        />
+        <TouchableOpacity style={styles.primaryButton} onPress={addManualPhoneRecipient}>
+          <Text style={styles.addReminderButtonText}>Add phone</Text>
+        </TouchableOpacity>
+
+        <Text style={styles.label}>Message</Text>
+        <TextInput
+          style={[styles.input, styles.notesInput]}
+          multiline
+          value={shareMessage}
+          onChangeText={setShareMessage}
+          placeholder="Optional personal note"
+        />
+      </View>
+
+      <View style={styles.floatingActionStripWrap}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.floatingActionStripContent}
+          snapToInterval={170}
+          decelerationRate="fast"
+        >
+          <TouchableOpacity
+            activeOpacity={0.8}
+            style={[styles.floatingActionButton, styles.floatingActionSecondaryButton, isSendingShare && styles.actionButtonDisabled]}
+            onPress={cancelShareFlow}
+            disabled={isSendingShare}
+          >
+            <Text style={styles.floatingActionSecondaryText}>Cancel</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            activeOpacity={0.8}
+            style={[styles.floatingActionButton, styles.floatingActionPrimaryButton, isSendingShare && styles.actionButtonDisabled]}
+            onPress={() => void handleSendShare()}
+            disabled={isSendingShare}
+          >
+            <Text style={styles.floatingActionPrimaryText}>{isSendingShare ? 'Sending…' : 'Send'}</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+    </ScrollView>
+  );
+
+  const activeEventSummaryModal = selectedSummaryEvent ? (
+    <Modal transparent visible={Boolean(selectedSummaryEvent)} animationType="fade" onRequestClose={() => setSelectedSummaryEventId(null)}>
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalCard, styles.savedEventDetailsCard]}>
+          <Text style={styles.savedEventDetailsTitle}>Event details</Text>
+          <View style={styles.savedEventDetailsHeaderRow}>
+            <Text style={styles.savedEventDetailsEventTitle}>{selectedSummaryEvent.title}</Text>
+            {getReminderSummaryState(selectedSummaryEvent).isActive ? (
+              <TouchableOpacity onPress={() => {
+                setSelectedSummaryEventId(null);
+                setRemindersForEventId(selectedSummaryEvent.id);
+              }}>
+                <Text style={styles.savedEventDetailsReminderCounter}>Reminders: {getReminderSummaryState(selectedSummaryEvent).count}</Text>
+              </TouchableOpacity>
+            ) : (
+              <Text style={styles.savedEventDetailsReminderCounter}>Reminders: 0</Text>
+            )}
+          </View>
+          <Text style={styles.savedEventDetailsPeople}>{selectedSummaryEvent.people}</Text>
+          <Text style={styles.savedEventDetailsMeta}>Event Date: {formatEventDateOnly(selectedSummaryEvent)}</Text>
+          <Text style={styles.savedEventDetailsMeta}>{formatEventTimeOnlyLabel(selectedSummaryEvent)}</Text>
+
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.savedEventDetailsActionRow}
+          >
+            <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => setSelectedSummaryEventId(null)}>
+              <Text style={styles.savedEventDetailActionText}>Close</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => startShareForEvent(selectedSummaryEvent)}>
+              <Text style={styles.savedEventDetailActionText}>Share</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => {
+              startEditingEvent(selectedSummaryEvent);
+              setSelectedSummaryEventId(null);
+            }}>
+              <Text style={styles.savedEventDetailActionText}>Modify</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.savedEventDetailActionPillDanger} onPress={() => promptEventDelete(selectedSummaryEvent.id)}>
+              <Text style={styles.savedEventDetailActionTextDanger}>Delete</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  ) : null;
+
+  const reminderEventModal = remindersForEventId && events.find((event) => event.id === remindersForEventId)
+    ? (() => {
+        const reminderEvent = events.find((event) => event.id === remindersForEventId)!;
+        const reminderEntries = getReminderOccurrencesForEvent(reminderEvent.id);
+        return (
+          <Modal transparent visible={Boolean(remindersForEventId)} animationType="fade" onRequestClose={() => setRemindersForEventId(null)}>
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, styles.savedEventDetailsCard]}>
+                <Text style={styles.savedEventDetailsTitle}>Scheduled reminders</Text>
+                {reminderEntries.length ? reminderEntries.map(({ event, occurrence }) => {
+                  const matchingReminderEntry = (event.variableReminders || []).find((entry) => (
+                    new Date(entry.reminderDateTime).getTime() === occurrence.getTime()
+                  ));
+
+                  return (
+                    <View key={`${event.id}-${occurrence.getTime()}`} style={styles.savedReminderItemCard}>
+                      <TouchableOpacity style={styles.savedReminderDeleteButton} onPress={() => {
+                        promptReminderDelete(
+                          event.id,
+                          matchingReminderEntry?.id || (event.variableReminders || [])[0]?.id,
+                          event.reminderMode === 'static' ? 'static' : 'variable',
+                          'reminder',
+                        );
+                      }}>
+                        <Text style={styles.savedReminderDeleteButtonText}>Delete</Text>
+                      </TouchableOpacity>
+                      <View style={styles.savedReminderItemHeader}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.savedReminderItemTitle}>{event.title} • {event.people}</Text>
+                          <Text style={styles.savedReminderItemSubtext}>Reminder: {occurrence.toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</Text>
+                          <Text style={styles.savedReminderItemSubtext}>Event date: {formatEventDateOnly(event)}</Text>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                }) : (
+                  <Text style={styles.helperText}>No current reminders.</Text>
+                )}
+
+                <View style={styles.savedReminderActionsWrap}>
+                  <TouchableOpacity style={styles.savedReminderPrimaryButton} onPress={() => {
+                    const eventToEdit = events.find((event) => event.id === reminderEvent.id);
+                    if (eventToEdit) {
+                      openReminderEditForEvent(eventToEdit);
+                    }
+                  }}>
+                    <Text style={styles.savedReminderPrimaryButtonText}>Add Reminder(s)</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.savedReminderDangerButton} onPress={() => {
+                    promptReminderDelete(reminderEvent.id, undefined, undefined, 'all-reminders');
+                  }}>
+                    <Text style={styles.savedReminderDangerButtonText}>Delete All Reminders</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => {
+                    setSelectedSummaryEventId(reminderEvent.id);
+                    setRemindersForEventId(null);
+                  }} style={styles.savedReminderCloseButton}>
+                    <Text style={styles.savedReminderCloseText}>Close</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
+        );
+      })() : null;
+
+  const confirmDeleteModal = confirmDeleteReminder ? (
+    <Modal transparent visible={Boolean(confirmDeleteReminder)} animationType="fade" onRequestClose={() => setConfirmDeleteReminder(null)}>
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalCard, styles.confirmDeleteCard]}>
+          <Text style={styles.confirmDeleteTitle}>{confirmDeleteReminder.target === 'event' ? 'Delete event?' : confirmDeleteReminder.target === 'all-reminders' ? 'Delete all reminders?' : 'Delete reminder?'}</Text>
+          <Text style={styles.confirmDeleteText}>This action cannot be undone.</Text>
+
+          <View style={styles.confirmDeleteActionRow}>
+            <TouchableOpacity style={styles.confirmDeleteCancelButton} onPress={() => setConfirmDeleteReminder(null)}>
+              <Text style={styles.confirmDeleteCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.confirmDeleteDeleteButton}
+              onPress={async () => {
+                try {
+                  if (confirmDeleteReminder.target === 'event') {
+                    await deleteReminderEvent(confirmDeleteReminder.eventId);
+                  } else if (confirmDeleteReminder.target === 'all-reminders') {
+                    await deleteAllRemindersForEvent(confirmDeleteReminder.eventId);
+                  } else if (confirmDeleteReminder.reminderEntryId) {
+                    await deleteReminderEntry(confirmDeleteReminder.eventId, confirmDeleteReminder.reminderEntryId);
+                  } else {
+                    await deleteAllRemindersForEvent(confirmDeleteReminder.eventId);
+                  }
+                } finally {
+                  setConfirmDeleteReminder(null);
+                  setRemindersForEventId(null);
+                }
+              }}
+            >
+              <Text style={styles.confirmDeleteDeleteButtonText}>Delete</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  ) : null;
+
   return (
     <>
-      {currentView === 'landing' ? renderLandingView() : currentView === 'share' ? renderShareView() : renderCreateView()}
+      {currentView === 'landing' ? renderLandingView() : currentView === 'share' ? renderShareView() : currentView === 'manage-events' ? renderManageEventsView() : currentView === 'manage-reminders' ? renderManageRemindersView() : renderCreateView()}
+      {activeEventSummaryModal}
+      {reminderEventModal}
+      {confirmDeleteModal}
       <TimePickerModal
         visible={activeTimePicker !== null}
         title={activeTimePicker?.title || 'Pick time'}
@@ -6502,16 +6570,82 @@ const styles = StyleSheet.create({
     color: '#5f6b7a',
     marginBottom: 16,
   },
+  manageEventsHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 4,
+  },
+  manageEventsTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
   helperText: {
     fontSize: 13,
     color: '#6b7280',
     marginBottom: 10,
+  },
+  landingLinksWrap: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    paddingBottom: 10,
+    marginBottom: 16,
+    gap: 10,
+  },
+  landingLinkItem: {
+    gap: 2,
+  },
+  landingLinkButton: {
+    alignSelf: 'flex-start',
+  },
+  landingLinkText: {
+    color: '#2563eb',
+    fontSize: 14,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+  landingLinkDescription: {
+    color: '#64748b',
+    fontSize: 12,
+  },
+  landingTickerSection: {
+    marginTop: 8,
+    marginBottom: 6,
+  },
+  landingTickerTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0f172a',
+    marginBottom: 6,
+  },
+  landingTickerWrap: {
+    overflow: 'hidden',
+    backgroundColor: '#eef4ff',
+    borderWidth: 1,
+    borderColor: '#cfe0ff',
+    borderRadius: 10,
+    height: 28,
+    justifyContent: 'center',
+  },
+  landingTickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 10,
+    width: 2000,
+  },
+  landingTickerText: {
+    fontSize: 13,
+    color: '#0f172a',
+    fontWeight: '600',
   },
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,
     padding: 16,
     marginBottom: 16,
+    position: 'relative',
     shadowColor: '#000',
     shadowOpacity: 0.08,
     shadowRadius: 8,
@@ -6537,6 +6671,10 @@ const styles = StyleSheet.create({
     padding: 10,
     marginBottom: 10,
     backgroundColor: '#f8fafc',
+  },
+  preferenceToggleText: {
+    color: '#0f172a',
+    fontWeight: '600',
   },
   shareOptionRow: {
     flexDirection: 'row',
@@ -6648,6 +6786,37 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     marginTop: 6,
   },
+  dropdownDismissBackdrop: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 10,
+  },
+  dropdownList: {
+    borderWidth: 1,
+    borderColor: '#d9e2f0',
+    borderRadius: 10,
+    marginBottom: 8,
+    overflow: 'hidden',
+    backgroundColor: '#ffffff',
+    zIndex: 20,
+  },
+  dropdownListItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  dropdownListItemSelected: {
+    backgroundColor: '#eff6ff',
+  },
+  dropdownListItemText: {
+    color: '#0f172a',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  dropdownListItemTextSelected: {
+    color: '#1d4ed8',
+    fontWeight: '700',
+  },
   savedEventsHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -6680,23 +6849,33 @@ const styles = StyleSheet.create({
   toggleButton: {
     backgroundColor: '#e2e8f0',
     borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    minWidth: 112,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   toggleButtonActive: {
     backgroundColor: '#bfdbfe',
   },
   toggleButtonText: {
     color: '#0f172a',
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: 14,
+    fontWeight: '700',
   },
   viewControlsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 12,
     flexWrap: 'wrap',
     justifyContent: 'flex-end',
+  },
+  savedEventsFilterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'nowrap',
   },
   viewLabel: {
     color: '#475569',
@@ -6968,6 +7147,51 @@ const styles = StyleSheet.create({
   reminderModeRow: {
     flexWrap: 'nowrap',
   },
+  reminderModeScrollContainer: {
+    marginBottom: 8,
+    overflow: 'visible',
+  },
+  reminderModeScrollContent: {
+    paddingHorizontal: 8,
+    paddingRight: 24,
+    alignItems: 'center',
+    gap: 10,
+  },
+  reminderModeScrollButton: {
+    minWidth: 120,
+    height: 52,
+    paddingHorizontal: 18,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  reminderModeScrollButtonSelected: {
+    backgroundColor: '#2563eb',
+  },
+  reminderModeScrollButtonUnselected: {
+    backgroundColor: '#e5e7eb',
+  },
+  reminderModeScrollButtonText: {
+    fontSize: 15,
+    fontWeight: '700',
+    textTransform: 'capitalize',
+    textAlign: 'center',
+  },
+  reminderModeScrollButtonTextSelected: {
+    color: '#fff',
+  },
+  reminderModeScrollButtonTextUnselected: {
+    color: '#374151',
+  },
+  reminderFrequencyScrollContainer: {
+    marginBottom: 8,
+    overflow: 'visible',
+  },
   frequencyOption: {
     borderRadius: 999,
     paddingHorizontal: 12,
@@ -7000,6 +7224,51 @@ const styles = StyleSheet.create({
   },
   frequencyOptionTextUnselected: {
     color: '#374151',
+  },
+  floatingActionStripWrap: {
+    marginTop: 12,
+    marginBottom: 4,
+    paddingVertical: 6,
+    overflow: 'visible',
+  },
+  floatingActionStripContent: {
+    paddingHorizontal: 8,
+    paddingRight: 28,
+    alignItems: 'center',
+    gap: 12,
+  },
+  floatingActionButton: {
+    minWidth: 150,
+    height: 54,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
+  },
+  floatingActionPrimaryButton: {
+    backgroundColor: '#2563eb',
+  },
+  floatingActionSecondaryButton: {
+    backgroundColor: '#e2e8f0',
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+  },
+  floatingActionPrimaryText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 15,
+    textAlign: 'center',
+  },
+  floatingActionSecondaryText: {
+    color: '#0f172a',
+    fontWeight: '700',
+    fontSize: 15,
+    textAlign: 'center',
   },
   primaryButton: {
     backgroundColor: '#2563eb',
@@ -7077,6 +7346,259 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 20,
     gap: 8,
+  },
+  savedEventDetailsCard: {
+    maxWidth: 680,
+    paddingHorizontal: 18,
+    paddingVertical: 20,
+  },
+  savedEventDetailsTitle: {
+    fontSize: 26,
+    lineHeight: 32,
+    fontWeight: '800',
+    color: '#111827',
+    marginBottom: 8,
+    textAlign: 'left',
+  },
+  savedEventDetailsHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 0,
+  },
+  savedEventDetailsEventTitle: {
+    fontSize: 18,
+    lineHeight: 18,
+    fontWeight: '700',
+    color: '#111827',
+    flexShrink: 1,
+  },
+  savedEventDetailsReminderCounter: {
+    fontSize: 12,
+    lineHeight: 14,
+    fontWeight: '700',
+    color: '#2563eb',
+  },
+  savedEventDetailsPeople: {
+    fontSize: 16,
+    lineHeight: 16,
+    color: '#111827',
+    marginBottom: 0,
+  },
+  savedEventDetailsMeta: {
+    fontSize: 15,
+    lineHeight: 15,
+    color: '#111827',
+    marginBottom: 0,
+  },
+  savedEventDetailsActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexWrap: 'nowrap',
+    gap: 12,
+    marginTop: 12,
+    marginBottom: 4,
+    paddingHorizontal: 2,
+  },
+  summaryPaginationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 10,
+    gap: 10,
+  },
+  summaryPagerButton: {
+    flex: 1,
+    minHeight: 34,
+    borderRadius: 8,
+    backgroundColor: '#f3f4f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  summaryPagerButtonDisabled: {
+    backgroundColor: '#f8fafc',
+  },
+  summaryPagerButtonText: {
+    color: '#b91c1c',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  summaryPagerPageText: {
+    flexShrink: 0,
+    color: '#4b5563',
+    fontSize: 14,
+    fontWeight: '500',
+    textAlign: 'center',
+    minWidth: 92,
+  },
+  savedEventDetailsActionLabel: {
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: '700',
+    color: '#111827',
+    marginRight: 4,
+  },
+  savedEventDetailActionPill: {
+    borderRadius: 999,
+    backgroundColor: '#e5e7eb',
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    minWidth: 104,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  savedEventDetailActionPillDanger: {
+    borderRadius: 999,
+    backgroundColor: '#fee2e2',
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    minWidth: 104,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  savedEventDetailActionText: {
+    color: '#111827',
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: '700',
+  },
+  savedEventDetailActionTextDanger: {
+    color: '#b91c1c',
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: '700',
+  },
+  savedReminderCloseButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#e0f2fe',
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    alignSelf: 'center',
+    minWidth: 120,
+  },
+  savedReminderCloseText: {
+    color: '#2563eb',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  savedReminderItemCard: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+    backgroundColor: '#f8fafc',
+  },
+  savedReminderItemHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  savedReminderItemTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#111827',
+    marginBottom: 4,
+    lineHeight: 18,
+  },
+  savedReminderItemSubtext: {
+    fontSize: 14,
+    color: '#475569',
+    marginBottom: 2,
+  },
+  savedReminderDeleteButton: {
+    backgroundColor: '#fee2e2',
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 136,
+  },
+  savedReminderDeleteButtonText: {
+    color: '#b91c1c',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  savedReminderActionsWrap: {
+    marginTop: 12,
+    gap: 10,
+  },
+  savedReminderPrimaryButton: {
+    backgroundColor: '#2563eb',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    width: '100%',
+  },
+  savedReminderPrimaryButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  savedReminderDangerButton: {
+    backgroundColor: '#dc2626',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    width: '100%',
+  },
+  savedReminderDangerButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  confirmDeleteCard: {
+    maxWidth: 440,
+    paddingHorizontal: 18,
+    paddingVertical: 20,
+  },
+  confirmDeleteTitle: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#111827',
+    marginBottom: 4,
+  },
+  confirmDeleteText: {
+    fontSize: 14,
+    color: '#475569',
+    marginBottom: 12,
+  },
+  confirmDeleteActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 10,
+  },
+  confirmDeleteCancelButton: {
+    flex: 1,
+    borderRadius: 10,
+    backgroundColor: '#e2e8f0',
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  confirmDeleteCancelText: {
+    color: '#111827',
+    fontWeight: '700',
+  },
+  confirmDeleteDeleteButton: {
+    flex: 1,
+    borderRadius: 10,
+    backgroundColor: '#dc2626',
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  confirmDeleteDeleteButtonText: {
+    color: '#fff',
+    fontWeight: '700',
   },
   modalTitle: {
     fontSize: 20,
@@ -7196,6 +7718,34 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     marginBottom: 12,
+  },
+  calendarViewCard: {
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  calendarDateOverlayPanel: {
+    ...StyleSheet.absoluteFill,
+    padding: 16,
+    backgroundColor: '#f8fafc',
+    zIndex: 5,
+    elevation: 5,
+  },
+  calendarDateDetailCard: {
+    borderWidth: 1,
+    borderColor: '#d9e2f0',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 18,
+    backgroundColor: '#fff',
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+    marginBottom: 12,
+  },
+  calendarDateDetailCardSpaced: {
+    marginTop: 8,
   },
   dayCell: {
     width: '14%',

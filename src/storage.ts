@@ -1803,7 +1803,7 @@ export async function changePassword(userId: string, currentPassword: string, ne
   return { user: users[index] };
 }
 
-export async function deleteUser(userId: string) {
+export async function deleteUser(userId: string): Promise<{ success: boolean; error?: string }> {
   if (USE_API_STORAGE) {
     try {
       await apiRequest<{ success: boolean }>(`/users/${encodeURIComponent(userId)}`, {
@@ -1811,7 +1811,7 @@ export async function deleteUser(userId: string) {
       });
       return { success: true };
     } catch {
-      return { success: false };
+      return { success: false, error: 'Unable to delete account right now.' };
     }
   }
 

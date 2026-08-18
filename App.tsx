@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Contacts from 'expo-contacts/src/legacy/Contacts';
+import * as Contacts from 'expo-contacts/legacy';
 import {
   Alert,
   Animated,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -18,6 +19,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import * as LocalAuthentication from 'expo-local-authentication';
 import { Picker } from '@react-native-picker/picker';
 import * as Calendar from 'expo-calendar/legacy';
 import AppContent from './src/AppContent';
@@ -770,9 +772,9 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
           </View>
 
           {mode === 'forgot' ? (
-            <View style={[styles.modePill, mode === 'signup' ? styles.modePillActive : styles.modePillDefault]}>
-              <Text style={[styles.modePillText, mode === 'signup' ? styles.modePillTextActive : null]}>
-                {mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Reset password'}
+            <View style={[styles.modePill, styles.modePillDefault]}>
+              <Text style={[styles.modePillText, styles.modePillTextActive]}>
+                Reset password
               </Text>
             </View>
           ) : null}
@@ -1080,6 +1082,10 @@ interface AccountScreenProps {
   onUserUpdated: (user: StoredUser) => void;
   onDeleteAccount: () => void;
   onReminderTimeZoneUpdated: (timeZone: string) => void;
+  initialAccountAction?: 'contacts' | 'calendar-sync' | null;
+  returnToLanding?: boolean;
+  onInitialActionHandled?: () => void;
+  onBackToLanding?: () => void;
 }
 
 interface AccountContact {
@@ -1126,10 +1132,10 @@ interface DeviceContactImportCandidate {
   birthDate: string;
 }
 
-type ContactsView = 'contacts' | 'favorites' | 'deleted' | 'groups';
+type ContactsView = 'none' | 'contacts' | 'favorites' | 'groups';
 type ContactsDisplayMode = 'detail' | 'summary';
-type GroupsDisplayMode = 'new' | 'summary' | 'detail';
-type AccountAction = 'profile' | 'settings' | 'calendar-sync';
+type GroupsDisplayMode = 'new' | 'summary' | 'manage';
+type AccountAction = 'none' | 'profile' | 'settings' | 'calendar-sync';
 
 const createEmptyContactDraft = () => ({
   email: '',
@@ -1145,7 +1151,17 @@ const createEmptyContactDraft = () => ({
 const CONTACTS_STORAGE_KEY_PREFIX = 'special-date-contacts:';
 const getContactsStorageKey = (userId: string) => `${CONTACTS_STORAGE_KEY_PREFIX}${userId}`;
 
-function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminderTimeZoneUpdated }: AccountScreenProps) {
+function AccountScreen({
+  user,
+  onBack,
+  onUserUpdated,
+  onDeleteAccount,
+  onReminderTimeZoneUpdated,
+  initialAccountAction,
+  returnToLanding,
+  onInitialActionHandled,
+  onBackToLanding,
+}: AccountScreenProps) {
   const initialNameParts = useMemo(() => splitNameParts(user.fullName || ''), [user.fullName]);
   const initialAddressParts = useMemo(() => parseAddressParts(user.address || ''), [user.address]);
   const [firstName, setFirstName] = useState(initialNameParts.firstName);
@@ -1217,7 +1233,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [contacts, setContacts] = useState<AccountContact[]>([]);
   const [contactGroups, setContactGroups] = useState<ContactGroup[]>([]);
   const [contactsLastSyncedAt, setContactsLastSyncedAt] = useState<string | null>(null);
-  const [activeContactsView, setActiveContactsView] = useState<ContactsView>('contacts');
+  const [activeContactsView, setActiveContactsView] = useState<ContactsView>('none');
   const [isLoadingContacts, setIsLoadingContacts] = useState(false);
   const [contactsMessage, setContactsMessage] = useState<string | null>(null);
   const [isEditingContact, setIsEditingContact] = useState(false);
@@ -1237,10 +1253,20 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const accountAddressBlurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDescription, setNewGroupDescription] = useState('');
+  const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
+  const [showCloneGroupModal, setShowCloneGroupModal] = useState(false);
+  const [groupDeleteCandidateId, setGroupDeleteCandidateId] = useState<string | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState('');
+  const [selectedGroupNameDraft, setSelectedGroupNameDraft] = useState('');
   const [selectedGroupDescriptionDraft, setSelectedGroupDescriptionDraft] = useState('');
   const [groupsDisplayMode, setGroupsDisplayMode] = useState<GroupsDisplayMode>('summary');
-  const [activeSummaryGroupId, setActiveSummaryGroupId] = useState<string | null>(null);
+  const [selectedGroupMembersPage, setSelectedGroupMembersPage] = useState(0);
+  const [selectedGroupAddContactsPage, setSelectedGroupAddContactsPage] = useState(0);
+  const [groupMembersSearch, setGroupMembersSearch] = useState('');
+  const [groupAddContactsSearch, setGroupAddContactsSearch] = useState('');
+  const [groupNameSaveState, setGroupNameSaveState] = useState<'idle' | 'saved'>('idle');
+  const [groupDescriptionSaveState, setGroupDescriptionSaveState] = useState<'idle' | 'saved'>('idle');
+  const [contactsPage, setContactsPage] = useState(0);
   const [selectedContactIdToAdd, setSelectedContactIdToAdd] = useState('');
   const [showContactSupportModal, setShowContactSupportModal] = useState(false);
   const [contactSupportSubject, setContactSupportSubject] = useState('');
@@ -1257,37 +1283,23 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   const [showMobileVerificationModal, setShowMobileVerificationModal] = useState(false);
   const [mobileVerificationCode, setMobileVerificationCode] = useState('');
   const [isMobileVerificationSubmitting, setIsMobileVerificationSubmitting] = useState(false);
-  const [activeAccountAction, setActiveAccountAction] = useState<AccountAction>('profile');
-  const activeContacts = useMemo(() => contacts.filter((entry) => !entry.deletedAt), [contacts]);
+  const [activeAccountAction, setActiveAccountAction] = useState<AccountAction>('none');
+  const activeContacts = useMemo(() => contacts, [contacts]);
   const favoriteContacts = useMemo(() => activeContacts.filter((entry) => entry.isFavorite), [activeContacts]);
-  const deletedContacts = useMemo(() => contacts.filter((entry) => Boolean(entry.deletedAt)), [contacts]);
   const visibleContacts = useMemo(() => {
     if (activeContactsView === 'favorites') {
       return favoriteContacts;
     }
-    if (activeContactsView === 'deleted') {
-      return deletedContacts;
-    }
     return activeContacts;
-  }, [activeContacts, activeContactsView, deletedContacts, favoriteContacts]);
+  }, [activeContacts, activeContactsView, favoriteContacts]);
   const activeSummaryContact = useMemo(
     () => contacts.find((entry) => entry.id === activeSummaryContactId) || null,
     [activeSummaryContactId, contacts],
   );
   const selectedGroup = useMemo(() => contactGroups.find((entry) => entry.id === selectedGroupId) || null, [contactGroups, selectedGroupId]);
-  const activeSummaryGroup = useMemo(() => contactGroups.find((entry) => entry.id === activeSummaryGroupId) || null, [activeSummaryGroupId, contactGroups]);
   const getGroupMemberCount = useCallback((group: ContactGroup) => (
     group.contactIds.filter((contactId) => activeContacts.some((entry) => entry.id === contactId)).length
   ), [activeContacts]);
-  const activeSummaryGroupMembers = useMemo(() => {
-    if (!activeSummaryGroup) {
-      return [] as AccountContact[];
-    }
-
-    return activeSummaryGroup.contactIds
-      .map((contactId) => activeContacts.find((entry) => entry.id === contactId) || null)
-      .filter((entry): entry is AccountContact => entry !== null);
-  }, [activeSummaryGroup, activeContacts]);
   const selectedGroupMembers = useMemo(() => {
     if (!selectedGroup) {
       return [] as AccountContact[];
@@ -1297,6 +1309,19 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       .map((contactId) => activeContacts.find((entry) => entry.id === contactId) || null)
       .filter((entry): entry is AccountContact => entry !== null);
   }, [activeContacts, selectedGroup]);
+  const filteredSelectedGroupMembers = useMemo(() => {
+    const query = groupMembersSearch.trim().toLowerCase();
+    if (!query) {
+      return selectedGroupMembers;
+    }
+
+    return selectedGroupMembers.filter((entry) => {
+      const displayName = getContactDisplayName(entry).toLowerCase();
+      const email = (entry.email || '').toLowerCase();
+      const mobile = (entry.mobileNumber || '').toLowerCase();
+      return displayName.includes(query) || email.includes(query) || mobile.includes(query);
+    });
+  }, [getContactDisplayName, groupMembersSearch, selectedGroupMembers]);
   const contactsAvailableForSelectedGroup = useMemo(() => {
     if (!selectedGroup) {
       return [] as AccountContact[];
@@ -1304,6 +1329,36 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
     return activeContacts.filter((entry) => !selectedGroup.contactIds.includes(entry.id));
   }, [activeContacts, selectedGroup]);
+  const filteredContactsAvailableForSelectedGroup = useMemo(() => {
+    const query = groupAddContactsSearch.trim().toLowerCase();
+    if (!query) {
+      return contactsAvailableForSelectedGroup;
+    }
+
+    return contactsAvailableForSelectedGroup.filter((entry) => {
+      const displayName = getContactDisplayName(entry).toLowerCase();
+      const email = (entry.email || '').toLowerCase();
+      const mobile = (entry.mobileNumber || '').toLowerCase();
+      return displayName.includes(query) || email.includes(query) || mobile.includes(query);
+    });
+  }, [contactsAvailableForSelectedGroup, getContactDisplayName, groupAddContactsSearch]);
+  const selectedGroupMembersPageSize = 5;
+  const selectedGroupMembersPageCount = Math.max(1, Math.ceil(filteredSelectedGroupMembers.length / selectedGroupMembersPageSize));
+  const selectedGroupAddContactsPageCount = Math.max(1, Math.ceil(filteredContactsAvailableForSelectedGroup.length / selectedGroupMembersPageSize));
+  const contactsPageSize = 12;
+  const contactsPageCount = Math.max(1, Math.ceil(visibleContacts.length / contactsPageSize));
+  const contactsPageItems = useMemo(() => {
+    const startIndex = contactsPage * contactsPageSize;
+    return visibleContacts.slice(startIndex, startIndex + contactsPageSize);
+  }, [contactsPage, visibleContacts]);
+  const selectedGroupMembersPageItems = useMemo(() => {
+    const startIndex = selectedGroupMembersPage * selectedGroupMembersPageSize;
+    return filteredSelectedGroupMembers.slice(startIndex, startIndex + selectedGroupMembersPageSize);
+  }, [filteredSelectedGroupMembers, selectedGroupMembersPage]);
+  const selectedGroupAddContactsPageItems = useMemo(() => {
+    const startIndex = selectedGroupAddContactsPage * selectedGroupMembersPageSize;
+    return filteredContactsAvailableForSelectedGroup.slice(startIndex, startIndex + selectedGroupMembersPageSize);
+  }, [filteredContactsAvailableForSelectedGroup, selectedGroupAddContactsPage]);
   const activeContactEmails = useMemo(
     () => new Set(activeContacts.map((entry) => entry.email.trim().toLowerCase()).filter(Boolean)),
     [activeContacts],
@@ -1328,10 +1383,10 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     (entry.email && activeContactEmails.has(entry.email.trim().toLowerCase()))
       || (entry.mobileNumber && activeContactPhones.has(normalizePhoneDigits(entry.mobileNumber)))
   ), [activeContactEmails, activeContactPhones]);
-  const deviceContactsImportRows = useMemo(() => (
+  const deviceContactsImportRows = useMemo<Array<DeviceContactImportCandidate & { alreadyAdded: boolean }>>(() => (
     deviceContactsToImport.map((entry) => ({
       ...entry,
-      alreadyAdded: isImportCandidateAlreadySaved(entry),
+      alreadyAdded: Boolean(isImportCandidateAlreadySaved(entry)),
     }))
   ), [deviceContactsToImport, isImportCandidateAlreadySaved]);
   const importableDeviceContactsCount = useMemo(
@@ -1340,8 +1395,54 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
   );
 
   useEffect(() => {
+    setSelectedGroupNameDraft(selectedGroup?.name || '');
     setSelectedGroupDescriptionDraft(selectedGroup?.description || '');
-  }, [selectedGroup?.description, selectedGroup?.id]);
+  }, [selectedGroup?.description, selectedGroup?.id, selectedGroup?.name]);
+
+  useEffect(() => {
+    setSelectedGroupMembersPage(0);
+    setSelectedGroupAddContactsPage(0);
+  }, [selectedGroupId, groupsDisplayMode]);
+
+  useEffect(() => {
+    setContactsPage(0);
+  }, [activeContactsView, contacts.length, favoriteContacts.length]);
+
+  useEffect(() => {
+    if (contactsPage >= contactsPageCount) {
+      setContactsPage(Math.max(0, contactsPageCount - 1));
+    }
+  }, [contactsPage, contactsPageCount]);
+
+  useEffect(() => {
+    if (selectedGroupMembersPage >= selectedGroupMembersPageCount) {
+      setSelectedGroupMembersPage(Math.max(0, selectedGroupMembersPageCount - 1));
+    }
+  }, [selectedGroupMembersPage, selectedGroupMembersPageCount]);
+
+  useEffect(() => {
+    if (selectedGroupAddContactsPage >= selectedGroupAddContactsPageCount) {
+      setSelectedGroupAddContactsPage(Math.max(0, selectedGroupAddContactsPageCount - 1));
+    }
+  }, [selectedGroupAddContactsPage, selectedGroupAddContactsPageCount]);
+
+  useEffect(() => {
+    if (!selectedGroup || groupsDisplayMode !== 'manage') {
+      setSelectedContactIdToAdd('');
+      return;
+    }
+
+    if (!contactsAvailableForSelectedGroup.length) {
+      setSelectedContactIdToAdd('');
+      return;
+    }
+
+    setSelectedContactIdToAdd((current) => (
+      current && contactsAvailableForSelectedGroup.some((entry) => entry.id === current)
+        ? current
+        : contactsAvailableForSelectedGroup[0].id
+    ));
+  }, [contactsAvailableForSelectedGroup, groupsDisplayMode, selectedGroup]);
 
   useEffect(() => () => {
     if (accountAddressBlurTimeoutRef.current) {
@@ -2464,6 +2565,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
         })();
 
         const eventPayload: Calendar.Event = {
+          id: `${specialDateId}-calendar`,
+          calendarId: appleCalendarId,
           title: event.title,
           notes: event.notes || '',
           location: event.people || '',
@@ -2471,7 +2574,10 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
           endDate,
           allDay: isAllDay,
           url: `${markerPrefix}${specialDateId}`,
-          recurrenceRule: recurrenceFrequency ? { frequency: recurrenceFrequency } : undefined,
+          timeZone: event.reminderTimeZone || getDeviceTimeZone(),
+          availability: Calendar.Availability.BUSY,
+          status: Calendar.EventStatus.CONFIRMED,
+          recurrenceRule: recurrenceFrequency ? { frequency: recurrenceFrequency } : null,
           alarms: [],
         };
 
@@ -3050,7 +3156,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
           let bestScore = 0;
 
           legacyEntries.forEach(([, raw]) => {
-            const candidate = normalizeContactsSnapshot(raw);
+            const candidate: ContactsSnapshot = normalizeContactsSnapshot(raw);
             const score = (candidate.contacts.length * 10) + candidate.groups.length;
             if (score > bestScore) {
               bestScore = score;
@@ -3058,17 +3164,21 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
             }
           });
 
-          if (bestSnapshot && (bestSnapshot.contacts.length || bestSnapshot.groups.length)) {
-            snapshot = bestSnapshot;
-            const migratedPayload: ContactsSnapshot = {
-              contacts: snapshot.contacts,
-              groups: snapshot.groups,
-              ownerUserId: user.id,
-              ownerEmail: normalizedEmail,
-              schemaVersion: 2,
-              updatedAt: new Date().toISOString(),
-            };
-            await AsyncStorage.setItem(primaryKey, JSON.stringify(migratedPayload));
+          const legacySnapshot = bestSnapshot as ContactsSnapshot | null;
+          if (legacySnapshot) {
+            const { contacts, groups } = legacySnapshot;
+            if (contacts.length || groups.length) {
+              snapshot = legacySnapshot;
+              const migratedPayload: ContactsSnapshot = {
+                contacts: snapshot.contacts,
+                groups: snapshot.groups,
+                ownerUserId: user.id,
+                ownerEmail: normalizedEmail,
+                schemaVersion: 2,
+                updatedAt: new Date().toISOString(),
+              };
+              await AsyncStorage.setItem(primaryKey, JSON.stringify(migratedPayload));
+            }
           }
         }
       }
@@ -3101,7 +3211,6 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     setContactAddressState('');
     setContactAddressZip('');
     setContactAddressPredictions([]);
-    setActiveSummaryGroupId(null);
     setEditingContactId(null);
     setIsEditingContact(false);
   };
@@ -3115,7 +3224,6 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     setContactAddressState('');
     setContactAddressZip('');
     setContactAddressPredictions([]);
-    setActiveSummaryGroupId(null);
     setEditingContactId(null);
     setActiveSummaryContactId(null);
     setIsEditingContact(true);
@@ -3161,7 +3269,27 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       return;
     }
 
-    const filteredContacts = selectedContacts.filter((entry) => !isImportCandidateAlreadySaved(entry));
+    const seenEmails = new Set(activeContactEmails);
+    const seenPhones = new Set(activeContactPhones);
+    const filteredContacts: DeviceContactImportCandidate[] = [];
+
+    selectedContacts.forEach((entry) => {
+      const emailKey = String(entry.email || '').trim().toLowerCase();
+      const phoneKey = normalizePhoneDigits(String(entry.mobileNumber || ''));
+      const isDuplicate = (emailKey && seenEmails.has(emailKey)) || (phoneKey && seenPhones.has(phoneKey));
+
+      if (isDuplicate) {
+        return;
+      }
+
+      filteredContacts.push(entry);
+      if (emailKey) {
+        seenEmails.add(emailKey);
+      }
+      if (phoneKey) {
+        seenPhones.add(phoneKey);
+      }
+    });
 
     if (!filteredContacts.length) {
       setContactsMessage(selectedContacts.length === 1 ? 'That contact is already in your saved contacts.' : 'All eligible iPhone contacts are already added.');
@@ -3191,10 +3319,18 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     });
 
     await persistContactsSnapshot(nextContacts, contactGroups);
+    const duplicateCount = selectedContacts.length - filteredContacts.length;
+    if (duplicateCount > 0) {
+      setContactsMessage(filteredContacts.length === 1
+        ? `Imported ${getContactDisplayName(filteredContacts[0])}. Skipped ${duplicateCount} duplicate contact${duplicateCount === 1 ? '' : 's'}.`
+        : `Imported ${filteredContacts.length} iPhone contacts. Skipped ${duplicateCount} duplicate contact${duplicateCount === 1 ? '' : 's'}.`);
+      return;
+    }
+
     setContactsMessage(filteredContacts.length === 1
       ? `Imported ${getContactDisplayName(filteredContacts[0])}.`
       : `Imported ${filteredContacts.length} iPhone contacts.`);
-  }, [contactGroups, contacts, isImportCandidateAlreadySaved, persistContactsSnapshot]);
+  }, [activeContactEmails, activeContactPhones, contactGroups, contacts, persistContactsSnapshot]);
 
   const loadDeviceContactsForImport = useCallback(async () => {
     if (Platform.OS === 'web') {
@@ -3362,9 +3498,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
     const duplicate = contacts.find((entry) => (
       entry.id !== editingContactId
-      && !entry.deletedAt
       && (
-        (normalizedEmail && entry.email.toLowerCase() === normalizedEmail)
+        (normalizedEmail && entry.email.trim().toLowerCase() === normalizedEmail)
         || (normalizedMobileDigits && normalizePhoneDigits(entry.mobileNumber || '') === normalizedMobileDigits)
       )
     ));
@@ -3430,43 +3565,6 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     await persistContactsSnapshot(nextContacts, contactGroups);
   };
 
-  const softDeleteContact = async (contactId: string) => {
-    const deletionStamp = new Date().toISOString();
-    const nextContacts = contacts.map((entry) => (
-      entry.id === contactId
-        ? {
-            ...entry,
-            deletedAt: deletionStamp,
-            isFavorite: false,
-            groupIds: [],
-            updatedAt: deletionStamp,
-          }
-        : entry
-    ));
-    const nextGroups = contactGroups.map((group) => ({
-      ...group,
-      contactIds: group.contactIds.filter((id) => id !== contactId),
-    }));
-
-    await persistContactsSnapshot(nextContacts, nextGroups);
-    setContactsMessage('Contact moved to Deleted.');
-  };
-
-  const restoreDeletedContact = async (contactId: string) => {
-    const nextContacts = contacts.map((entry) => (
-      entry.id === contactId
-        ? {
-            ...entry,
-            deletedAt: null,
-            updatedAt: new Date().toISOString(),
-          }
-        : entry
-    ));
-
-    await persistContactsSnapshot(nextContacts, contactGroups);
-    setContactsMessage('Contact restored.');
-  };
-
   const permanentlyDeleteContact = async (contactId: string) => {
     const nextContacts = contacts.filter((entry) => entry.id !== contactId);
     const nextGroups = contactGroups.map((group) => ({
@@ -3475,7 +3573,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     }));
 
     await persistContactsSnapshot(nextContacts, nextGroups);
-    setContactsMessage('Contact permanently deleted.');
+    setContactsMessage('Contact deleted.');
   };
 
   const createContactGroup = async () => {
@@ -3504,13 +3602,77 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     setSelectedGroupId(nextGroup.id);
     setNewGroupName('');
     setNewGroupDescription('');
-    setGroupsDisplayMode('detail');
+    setShowCreateGroupModal(false);
+    setGroupsDisplayMode('manage');
     setContactsMessage('Group created.');
   };
 
-  const addSelectedContactToSelectedGroup = async () => {
-    if (!selectedGroup || !selectedContactIdToAdd) {
-      setContactsMessage('Select a group and contact first.');
+  const getNextGroupCloneName = useCallback((baseName: string) => {
+    const trimmedBase = baseName.trim();
+    if (!trimmedBase) {
+      return 'Group1';
+    }
+
+    let suffix = 1;
+    let candidate = `${trimmedBase}${suffix}`;
+    while (contactGroups.some((entry) => entry.name.toLowerCase() === candidate.toLowerCase())) {
+      suffix += 1;
+      candidate = `${trimmedBase}${suffix}`;
+    }
+    return candidate;
+  }, [contactGroups]);
+
+  const cloneContactGroup = async (sourceGroupId: string) => {
+    const sourceGroup = contactGroups.find((entry) => entry.id === sourceGroupId);
+    if (!sourceGroup) {
+      setContactsMessage('Select a group to clone.');
+      return;
+    }
+
+    const nextGroupName = getNextGroupCloneName(sourceGroup.name);
+    const nextGroup: ContactGroup = {
+      id: generateUUID(),
+      name: nextGroupName,
+      description: sourceGroup.description,
+      contactIds: [...sourceGroup.contactIds],
+      createdAt: new Date().toISOString(),
+    };
+
+    const nextGroups = [...contactGroups, nextGroup];
+    const nextContacts = contacts.map((entry) => {
+      const isInClonedGroup = sourceGroup.contactIds.includes(entry.id);
+      if (!isInClonedGroup) {
+        return entry;
+      }
+
+      return {
+        ...entry,
+        groupIds: entry.groupIds.includes(nextGroup.id) ? entry.groupIds : [...entry.groupIds, nextGroup.id],
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    await persistContactsSnapshot(nextContacts, nextGroups);
+    setSelectedGroupId(nextGroup.id);
+    setSelectedGroupNameDraft(nextGroupName);
+    setGroupsDisplayMode('manage');
+    setShowCloneGroupModal(false);
+    setContactsMessage(`Group cloned as ${nextGroupName}.`);
+  };
+
+  const saveSelectedGroupName = async () => {
+    if (!selectedGroup) {
+      return;
+    }
+
+    const normalizedName = selectedGroupNameDraft.trim();
+    if (!normalizedName) {
+      setContactsMessage('Enter a group name.');
+      return;
+    }
+
+    if (contactGroups.some((entry) => entry.id !== selectedGroup.id && entry.name.toLowerCase() === normalizedName.toLowerCase())) {
+      setContactsMessage('A group with this name already exists.');
       return;
     }
 
@@ -3518,15 +3680,42 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       group.id === selectedGroup.id
         ? {
             ...group,
-            contactIds: group.contactIds.includes(selectedContactIdToAdd)
+            name: normalizedName,
+          }
+        : group
+    ));
+
+    await persistContactsSnapshot(contacts, nextGroups);
+    setGroupNameSaveState('saved');
+    setTimeout(() => setGroupNameSaveState('idle'), 500);
+    setContactsMessage('Group name updated.');
+  };
+
+  const addSelectedContactToSelectedGroup = async (contactIdOverride?: string) => {
+    if (!selectedGroup) {
+      setContactsMessage('Select a group and contact first.');
+      return;
+    }
+
+    const contactIdToAdd = contactIdOverride || selectedContactIdToAdd || contactsAvailableForSelectedGroup[0]?.id || '';
+    if (!contactIdToAdd) {
+      setContactsMessage('No contacts are available to add.');
+      return;
+    }
+
+    const nextGroups = contactGroups.map((group) => (
+      group.id === selectedGroup.id
+        ? {
+            ...group,
+            contactIds: group.contactIds.includes(contactIdToAdd)
               ? group.contactIds
-              : [...group.contactIds, selectedContactIdToAdd],
+              : [...group.contactIds, contactIdToAdd],
           }
         : group
     ));
 
     const nextContacts = contacts.map((entry) => (
-      entry.id === selectedContactIdToAdd
+      entry.id === contactIdToAdd
         ? {
             ...entry,
             groupIds: entry.groupIds.includes(selectedGroup.id)
@@ -3586,20 +3775,73 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
     ));
 
     await persistContactsSnapshot(contacts, nextGroups);
+    setGroupDescriptionSaveState('saved');
+    setTimeout(() => setGroupDescriptionSaveState('idle'), 500);
     setContactsMessage('Group description updated.');
+  };
+
+  const deleteSelectedGroup = async (groupId: string) => {
+    const groupToDelete = contactGroups.find((entry) => entry.id === groupId);
+    if (!groupToDelete) {
+      setGroupDeleteCandidateId(null);
+      return;
+    }
+
+    const nextGroups = contactGroups.filter((group) => group.id !== groupId);
+    const nextContacts = contacts.map((entry) => ({
+      ...entry,
+      groupIds: entry.groupIds.filter((entryGroupId) => entryGroupId !== groupId),
+      updatedAt: new Date().toISOString(),
+    }));
+
+    await persistContactsSnapshot(nextContacts, nextGroups);
+    setGroupDeleteCandidateId(null);
+    if (selectedGroupId === groupId) {
+      setSelectedGroupId('');
+      setGroupsDisplayMode('summary');
+    }
+    setContactsMessage(`Group "${groupToDelete.name}" deleted.`);
   };
 
   const handleOpenContacts = async () => {
     await loadContacts();
-    setActiveContactsView('contacts');
+    setActiveContactsView('none');
     setGroupsDisplayMode('summary');
     setNewGroupName('');
     setNewGroupDescription('');
     setSelectedGroupId('');
-    setActiveSummaryGroupId(null);
     setContactsMessage(null);
     resetContactEditor();
     setShowContactsModal(true);
+  };
+
+  const closeContactsPanel = () => {
+    setShowCreateGroupModal(false);
+    setShowContactsModal(false);
+  };
+
+  const handleContactsBack = () => {
+    if (isEditingContact) {
+      resetContactEditor();
+      return;
+    }
+
+    if (activeContactsView !== 'none') {
+      setContactsMessage(null);
+      setActiveSummaryContactId(null);
+      setGroupsDisplayMode('summary');
+      setSelectedGroupId('');
+      setActiveContactsView('none');
+      return;
+    }
+
+    if (returnToLanding) {
+      closeContactsPanel();
+      onBackToLanding?.();
+      return;
+    }
+
+    closeContactsPanel();
   };
 
   const handleConfirmDelete = async () => {
@@ -3609,8 +3851,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       const result = await deleteUser(user.id);
       setIsSaving(false);
 
-      if (result.error) {
-        setMessage(result.error);
+      if (!result.success) {
+        setMessage('Unable to delete account right now.');
         setShowDeleteConfirm(false);
         return;
       }
@@ -3622,6 +3864,42 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
       setMessage('Unable to delete account right now.');
     }
   };
+
+  const handleSettingsBack = () => {
+    if (activeAccountAction === 'calendar-sync' || showCalendarSyncEditor) {
+      setMessage(null);
+      setShowCalendarSyncEditor(false);
+      setActiveAccountAction('none');
+      if (returnToLanding) {
+        onBackToLanding?.();
+      }
+      return;
+    }
+
+    if (activeAccountAction !== 'none') {
+      setMessage(null);
+      setActiveAccountAction('none');
+      return;
+    }
+
+    handleBack();
+  };
+
+  useEffect(() => {
+    if (!initialAccountAction) {
+      return;
+    }
+
+    if (initialAccountAction === 'contacts') {
+      void handleOpenContacts();
+    }
+
+    if (initialAccountAction === 'calendar-sync') {
+      setActiveAccountAction('calendar-sync');
+    }
+
+    onInitialActionHandled?.();
+  }, [initialAccountAction, onInitialActionHandled]);
 
   return (
     <ScrollView style={styles.accountScreen} contentContainerStyle={styles.accountScreenContent} keyboardShouldPersistTaps="handled">
@@ -3993,60 +4271,73 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
               <Image source={require('./assets/icon.png')} style={styles.accountHeaderLogo} resizeMode="cover" />
               <View style={styles.accountHeaderTextWrap}>
                 <Text style={styles.accountTitle}>Contacts</Text>
-                <Text style={styles.accountSubtitle}>Manage your contacts, favorites, deleted, and groups.</Text>
-                <Text style={styles.contactsSyncMarker}>{contactsLastSyncedLabel}</Text>
+                <Text style={styles.accountSubtitle}>{contactsLastSyncedLabel}</Text>
               </View>
             </View>
-            <TouchableOpacity style={styles.secondaryButton} onPress={() => setShowContactsModal(false)}>
-              <Text style={styles.secondaryButtonText}>Back to Account</Text>
+            <TouchableOpacity
+              style={styles.secondaryButton}
+              onPress={handleContactsBack}
+            >
+              <Text style={styles.secondaryButtonText}>Back</Text>
             </TouchableOpacity>
           </View>
 
-          {contactsMessage ? <Text style={styles.message}>{contactsMessage}</Text> : null}
+          {activeContactsView !== 'none' && contactsMessage ? <Text style={styles.message}>{contactsMessage}</Text> : null}
 
           <View style={styles.contactsShell}>
-            <View style={styles.contactsSidebar}>
-              <TouchableOpacity
-                style={[styles.contactsSidebarButton, activeContactsView === 'contacts' && styles.contactsSidebarButtonActive]}
-                onPress={() => setActiveContactsView('contacts')}
-              >
-                <Text style={styles.contactsSidebarButtonText}>Contacts</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.contactsSidebarButton, activeContactsView === 'favorites' && styles.contactsSidebarButtonActive]}
-                onPress={() => setActiveContactsView('favorites')}
-              >
-                <Text style={styles.contactsSidebarButtonText}>Favorites</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.contactsSidebarButton, activeContactsView === 'deleted' && styles.contactsSidebarButtonActive]}
-                onPress={() => setActiveContactsView('deleted')}
-              >
-                <Text style={styles.contactsSidebarButtonText}>Deleted</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.contactsSidebarButton, activeContactsView === 'groups' && styles.contactsSidebarButtonActive]}
-                onPress={() => setActiveContactsView('groups')}
-              >
-                <Text style={styles.contactsSidebarButtonText}>Groups</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.contactsSidebarButton}
-                onPress={() => {
-                  setContactsMessage(null);
-                  setShowContactsModal(false);
-                }}
-              >
-                <Text style={styles.contactsSidebarButtonText}>Close</Text>
-              </TouchableOpacity>
-            </View>
-
             <View style={styles.contactsMainPane}>
+              {!isEditingContact && activeContactsView === 'none' ? (
+                <View style={styles.contactsLinksWrap}>
+                  <View style={styles.contactsLinkItem}>
+                    <TouchableOpacity
+                      style={styles.contactsLinkButton}
+                      onPress={() => {
+                        setActiveContactsView('contacts');
+                        setContactsDisplayMode('summary');
+                        setActiveSummaryContactId(null);
+                      }}
+                    >
+                      <Text style={styles.contactsLinkText}>Contacts</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.contactsLinkDescription}>View and manage your contact list.</Text>
+                  </View>
+
+                  <View style={styles.contactsLinkItem}>
+                    <TouchableOpacity
+                      style={styles.contactsLinkButton}
+                      onPress={() => {
+                        setActiveContactsView('favorites');
+                        setContactsDisplayMode('summary');
+                        setActiveSummaryContactId(null);
+                      }}
+                    >
+                      <Text style={styles.contactsLinkText}>Favorites</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.contactsLinkDescription}>See only contacts marked as favorites.</Text>
+                  </View>
+
+                  <View style={styles.contactsLinkItem}>
+                    <TouchableOpacity
+                      style={styles.contactsLinkButton}
+                      onPress={() => {
+                        setActiveContactsView('groups');
+                        setGroupsDisplayMode('summary');
+                        setSelectedGroupId('');
+                      }}
+                    >
+                      <Text style={styles.contactsLinkText}>Groups</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.contactsLinkDescription}>Create and manage your contact groups.</Text>
+                  </View>
+
+                </View>
+              ) : null}
+
               {isLoadingContacts ? (
                 <Text style={styles.contactsEmptySubtext}>Loading contacts...</Text>
               ) : null}
 
-              {!isLoadingContacts && isEditingContact ? (
+              {!isLoadingContacts && isEditingContact && activeContactsView === 'contacts' ? (
                 <ScrollView style={styles.contactsList} contentContainerStyle={styles.contactsListContent} keyboardShouldPersistTaps="handled">
                   <Text style={styles.sectionTitle}>{editingContactId ? 'Edit contact' : 'New contact'}</Text>
 
@@ -4193,54 +4484,34 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                 </ScrollView>
               ) : null}
 
-              {!isLoadingContacts && !isEditingContact && activeContactsView !== 'groups' ? (
+              {!isLoadingContacts && !isEditingContact && (activeContactsView === 'contacts' || activeContactsView === 'favorites') ? (
                 <>
                   <View style={styles.contactsTopActions}>
-                    <TouchableOpacity style={[styles.secondaryButton, styles.contactsTopActionButton]} onPress={openNewContactEditor}>
-                      <Text style={styles.secondaryButtonText}>New</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[styles.secondaryButton, styles.contactsTopActionButton]}
-                      onPress={() => void loadDeviceContactsForImport()}
-                      disabled={isLoadingDeviceContacts}
-                    >
-                      <Text style={styles.secondaryButtonText}>{isLoadingDeviceContacts ? 'Loading…' : 'Import iPhone'}</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        styles.secondaryButton,
-                        styles.contactsTopActionButton,
-                        contactsDisplayMode === 'summary' && styles.contactsTopActionButtonActive,
-                      ]}
-                      onPress={() => setContactsDisplayMode('summary')}
-                    >
-                      <Text style={styles.secondaryButtonText}>Summary</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        styles.secondaryButton,
-                        styles.contactsTopActionButton,
-                        contactsDisplayMode === 'detail' && styles.contactsTopActionButtonActive,
-                      ]}
-                      onPress={() => {
-                        setContactsDisplayMode('detail');
-                        setActiveSummaryContactId(null);
-                      }}
-                    >
-                      <Text style={styles.secondaryButtonText}>Detail</Text>
-                    </TouchableOpacity>
+                    {activeContactsView === 'contacts' ? (
+                      <>
+                        <TouchableOpacity style={[styles.secondaryButton, styles.contactsTopActionButton]} onPress={openNewContactEditor}>
+                          <Text style={styles.secondaryButtonText}>New</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.secondaryButton, styles.contactsTopActionButton]}
+                          onPress={() => void loadDeviceContactsForImport()}
+                          disabled={isLoadingDeviceContacts}
+                        >
+                          <Text style={styles.secondaryButtonText}>{isLoadingDeviceContacts ? 'Loading…' : 'Import iPhone'}</Text>
+                        </TouchableOpacity>
+                      </>
+                    ) : null}
                   </View>
 
                   {(activeContactsView === 'contacts' && !activeContacts.length)
-                  || (activeContactsView === 'favorites' && !favoriteContacts.length)
-                  || (activeContactsView === 'deleted' && !deletedContacts.length) ? (
+                  || (activeContactsView === 'favorites' && !favoriteContacts.length) ? (
                     <View style={styles.contactsEmptyState}>
                       <Text style={styles.contactsEmptyIcon}>👥</Text>
                       <Text style={styles.contactsEmptyTitle}>You haven't added any contacts yet</Text>
                     </View>
                   ) : (
                     <ScrollView style={styles.contactsList} contentContainerStyle={styles.contactsListContent} keyboardShouldPersistTaps="handled">
-                      {visibleContacts.map((contact) => contactsDisplayMode === 'summary' ? (
+                      {contactsPageItems.map((contact) => (
                         <TouchableOpacity
                           key={contact.id}
                           style={styles.contactsSummaryRow}
@@ -4249,55 +4520,50 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                         >
                           <Text style={styles.contactsSummaryRowText} numberOfLines={1}>{`${getContactDisplayName(contact)} - ${getContactPrimaryChannelLabel(contact)}`}</Text>
                         </TouchableOpacity>
-                      ) : (
-                        <View key={contact.id} style={styles.contactRowCard}>
-                          <Text style={styles.contactRowName}>{getContactDisplayName(contact)}</Text>
-                          {contact.email ? <Text style={styles.contactRowMeta}>{contact.email}</Text> : null}
-                          {contact.mobileNumber ? <Text style={styles.contactRowMeta}>{contact.mobileNumber}</Text> : null}
-                          {contact.company ? <Text style={styles.contactRowMeta}>{`Company: ${contact.company}`}</Text> : null}
-                          {contact.birthDate ? <Text style={styles.contactRowMeta}>{`Birth date: ${contact.birthDate}`}</Text> : null}
-                          {contact.address ? <Text style={styles.contactRowMeta}>{`Address: ${contact.address}`}</Text> : null}
-                          {contact.notes ? <Text style={styles.contactRowMeta}>{`Notes: ${contact.notes}`}</Text> : null}
-
-                          {activeContactsView === 'deleted' ? (
-                            <View style={styles.contactsCardActionsRow}>
-                              <TouchableOpacity style={styles.secondaryButton} onPress={() => void restoreDeletedContact(contact.id)}>
-                                <Text style={styles.secondaryButtonText}>Restore</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity style={styles.deleteButton} onPress={() => void permanentlyDeleteContact(contact.id)}>
-                                <Text style={styles.deleteButtonText}>Delete forever</Text>
-                              </TouchableOpacity>
-                            </View>
-                          ) : (
-                            <View style={styles.contactsCardActionsRow}>
-                              <TouchableOpacity style={[styles.secondaryButton, styles.contactInlineActionButton]} onPress={() => openEditContactEditor(contact)}>
-                                <Text style={styles.secondaryButtonText}>Edit</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity style={[styles.secondaryButton, styles.contactInlineActionButton]} onPress={() => void toggleFavoriteContact(contact.id)}>
-                                <Text style={styles.secondaryButtonText}>{contact.isFavorite ? 'Unfavorite' : 'Favorite'}</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity style={[styles.deleteButton, styles.contactInlineActionButton]} onPress={() => void softDeleteContact(contact.id)}>
-                                <Text style={styles.deleteButtonText}>Delete</Text>
-                              </TouchableOpacity>
-                            </View>
-                          )}
-                        </View>
                       ))}
+
+                      {contactsPageCount > 1 ? (
+                        <View style={styles.groupsManagePaginationRow}>
+                          <TouchableOpacity
+                            style={[styles.secondaryButton, styles.groupsManagePageButton, contactsPage === 0 && styles.groupsManagePageButtonDisabled]}
+                            disabled={contactsPage === 0}
+                            onPress={() => setContactsPage((page) => Math.max(0, page - 1))}
+                          >
+                            <Text style={styles.secondaryButtonText}>Prev</Text>
+                          </TouchableOpacity>
+
+                          <Text style={styles.contactRowMeta}>{`${contactsPage + 1}/${contactsPageCount}`}</Text>
+
+                          <TouchableOpacity
+                            style={[styles.secondaryButton, styles.groupsManagePageButton, contactsPage >= contactsPageCount - 1 && styles.groupsManagePageButtonDisabled]}
+                            disabled={contactsPage >= contactsPageCount - 1}
+                            onPress={() => setContactsPage((page) => Math.min(contactsPageCount - 1, page + 1))}
+                          >
+                            <Text style={styles.secondaryButtonText}>Next</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : null}
                     </ScrollView>
                   )}
                 </>
               ) : null}
 
               {!isLoadingContacts && !isEditingContact && activeContactsView === 'groups' ? (
-                <ScrollView style={styles.contactsList} contentContainerStyle={styles.contactsListContent} keyboardShouldPersistTaps="handled">
+                <ScrollView
+                  style={styles.contactsList}
+                  contentContainerStyle={styles.contactsListContent}
+                  keyboardShouldPersistTaps="handled"
+                  keyboardDismissMode="on-drag"
+                  onScrollBeginDrag={() => Keyboard.dismiss()}
+                >
                   <View style={styles.contactsTopActions}>
                     <TouchableOpacity
                       style={[
                         styles.secondaryButton,
                         styles.contactsTopActionButton,
-                        groupsDisplayMode === 'new' && styles.contactsTopActionButtonActive,
+                        showCreateGroupModal && styles.contactsTopActionButtonActive,
                       ]}
-                      onPress={() => setGroupsDisplayMode('new')}
+                      onPress={() => setShowCreateGroupModal(true)}
                     >
                       <Text style={styles.secondaryButtonText}>New</Text>
                     </TouchableOpacity>
@@ -4315,195 +4581,318 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                       <Text style={styles.secondaryButtonText}>Summary</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
-                      style={[
-                        styles.secondaryButton,
-                        styles.contactsTopActionButton,
-                        groupsDisplayMode === 'detail' && styles.contactsTopActionButtonActive,
-                      ]}
-                      onPress={() => setGroupsDisplayMode('detail')}
+                      style={[styles.secondaryButton, styles.contactsTopActionButton]}
+                      onPress={() => setShowCloneGroupModal(true)}
                     >
-                      <Text style={styles.secondaryButtonText}>Detail</Text>
+                      <Text style={styles.secondaryButtonText}>Clone</Text>
                     </TouchableOpacity>
                   </View>
-
-                  {groupsDisplayMode === 'new' ? (
-                    <>
-                      <Text style={styles.sectionTitle}>Create group</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={newGroupName}
-                        onChangeText={setNewGroupName}
-                        placeholder="Family, Team, Clients..."
-                      />
-                      <Text style={styles.fieldLabel}>Group description</Text>
-                      <TextInput
-                        style={[styles.input, styles.contactsNotesInput]}
-                        value={newGroupDescription}
-                        onChangeText={setNewGroupDescription}
-                        placeholder="Describe this group"
-                        multiline
-                      />
-                      <TouchableOpacity style={styles.primaryButton} onPress={() => void createContactGroup()}>
-                        <Text style={styles.primaryButtonText}>Create group</Text>
-                      </TouchableOpacity>
-                    </>
-                  ) : null}
 
                   {groupsDisplayMode === 'summary' ? (
                     <>
                       <Text style={styles.sectionTitle}>Groups summary</Text>
                       {contactGroups.length ? contactGroups.map((group) => (
-                        <TouchableOpacity
-                          key={group.id}
-                          style={styles.contactsSummaryRow}
-                          onPress={() => setActiveSummaryGroupId(group.id)}
-                          activeOpacity={0.8}
-                        >
-                          <Text style={[styles.contactsSummaryRowText, styles.groupsSummaryRowText]} numberOfLines={1}>{`${group.name} (${getGroupMemberCount(group)} members)`}</Text>
-                        </TouchableOpacity>
+                        <View key={group.id} style={styles.groupSummaryRow}>
+                          <TouchableOpacity
+                            style={styles.groupSummaryRowPressable}
+                            onPress={() => {
+                              setSelectedGroupId(group.id);
+                              setGroupsDisplayMode('manage');
+                              setContactsMessage(null);
+                            }}
+                            activeOpacity={0.8}
+                          >
+                            <Text style={[styles.contactsSummaryRowText, styles.groupsSummaryRowText]} numberOfLines={1}>{`${group.name} (${getGroupMemberCount(group)} members)`}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.deleteButton, styles.groupSummaryDeleteButton]}
+                            onPress={() => setGroupDeleteCandidateId(group.id)}
+                          >
+                            <Text style={styles.deleteButtonText}>Delete</Text>
+                          </TouchableOpacity>
+                        </View>
                       )) : <Text style={styles.contactsEmptySubtext}>No groups yet. Use New to create one.</Text>}
                     </>
                   ) : null}
 
-                  {groupsDisplayMode === 'detail' ? (
-                    <>
-                      <Text style={styles.sectionTitle}>Groups</Text>
-                      {contactGroups.length ? contactGroups.map((group) => (
-                        <View key={group.id} style={styles.contactRowCard}>
-                          <Text style={styles.contactRowName}>{group.name}</Text>
-                          <Text style={styles.contactRowMeta}>{`${getGroupMemberCount(group)} members`}</Text>
-                          {group.description ? <Text style={styles.contactRowMeta}>{group.description}</Text> : null}
-                          <View style={styles.contactsCardActionsRow}>
-                            <TouchableOpacity
-                              style={[styles.secondaryButton, styles.contactInlineActionButton]}
-                              onPress={() => {
-                                setSelectedGroupId(group.id);
-                                setContactsMessage(null);
-                              }}
-                            >
-                              <Text style={styles.secondaryButtonText}>Manage</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                              style={[styles.secondaryButton, styles.contactInlineActionButton]}
-                              onPress={() => setActiveSummaryGroupId(group.id)}
-                            >
-                              <Text style={styles.secondaryButtonText}>Summary</Text>
-                            </TouchableOpacity>
+                  {groupsDisplayMode === 'manage' && selectedGroup ? (
+                    <View style={styles.groupsManageScreen}>
+                      <Text style={styles.sectionTitle}>{selectedGroup.name}</Text>
+                      <Text style={styles.contactRowMeta}>{`${getGroupMemberCount(selectedGroup)} members`}</Text>
+
+                      <View style={styles.contactsSummaryDetailsCard}>
+                        <Text style={styles.fieldLabel}>Group name</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={selectedGroupNameDraft}
+                          onChangeText={setSelectedGroupNameDraft}
+                          placeholder="Group name"
+                        />
+                        <TouchableOpacity style={styles.secondaryButton} onPress={() => void saveSelectedGroupName()}>
+                          <Text style={styles.secondaryButtonText}>{groupNameSaveState === 'saved' ? 'Saved' : 'Change Name'}</Text>
+                        </TouchableOpacity>
+
+                        <Text style={styles.fieldLabel}>Group description</Text>
+                        <TextInput
+                          style={[styles.input, styles.contactsNotesInput]}
+                          value={selectedGroupDescriptionDraft}
+                          onChangeText={setSelectedGroupDescriptionDraft}
+                          placeholder="Describe this group"
+                          multiline
+                        />
+                        <TouchableOpacity style={styles.secondaryButton} onPress={() => void saveSelectedGroupDescription()}>
+                          <Text style={styles.secondaryButtonText}>{groupDescriptionSaveState === 'saved' ? 'Saved' : 'Change Description'}</Text>
+                        </TouchableOpacity>
+
+                        <View style={styles.groupsManageColumns}>
+                          <View style={styles.groupsManageColumn}>
+                            <Text style={styles.sectionTitle}>Group members</Text>
+                            <TextInput
+                              style={[styles.input, styles.groupSearchInput]}
+                              value={groupMembersSearch}
+                              onChangeText={setGroupMembersSearch}
+                              placeholder="Search members"
+                              placeholderTextColor="#94a3b8"
+                              autoCapitalize="none"
+                              autoCorrect={false}
+                            />
+                            {selectedGroupMembers.length ? (
+                              <>
+                                {selectedGroupMembersPageItems.length ? selectedGroupMembersPageItems.map((entry) => (
+                                  <View key={entry.id} style={styles.contactRowCard}>
+                                    <View style={styles.groupMemberHeaderRow}>
+                                      <Text style={styles.contactRowName}>{getContactDisplayName(entry)}</Text>
+                                      <TouchableOpacity
+                                        style={styles.secondaryButton}
+                                        onPress={() => void removeContactFromSelectedGroup(entry.id)}
+                                      >
+                                        <Text style={styles.secondaryButtonText}>Remove</Text>
+                                      </TouchableOpacity>
+                                    </View>
+                                    <Text style={styles.contactRowMeta}>{getContactPrimaryChannelLabel(entry)}</Text>
+                                  </View>
+                                )) : <Text style={styles.contactsEmptySubtext}>{groupMembersSearch.trim() ? 'No members match your search.' : 'No members on this page.'}</Text>}
+
+                                <View style={styles.groupsManagePaginationRow}>
+                                  <TouchableOpacity
+                                    style={[styles.secondaryButton, styles.groupsManagePageButton, selectedGroupMembersPage === 0 && styles.groupsManagePageButtonDisabled]}
+                                    disabled={selectedGroupMembersPage === 0}
+                                    onPress={() => setSelectedGroupMembersPage((page) => Math.max(0, page - 1))}
+                                  >
+                                    <Text style={styles.secondaryButtonText}>Prev</Text>
+                                  </TouchableOpacity>
+
+                                  <Text style={styles.contactRowMeta}>{`${selectedGroupMembersPage + 1}/${selectedGroupMembersPageCount}`}</Text>
+
+                                  <TouchableOpacity
+                                    style={[styles.secondaryButton, styles.groupsManagePageButton, selectedGroupMembersPage >= selectedGroupMembersPageCount - 1 && styles.groupsManagePageButtonDisabled]}
+                                    disabled={selectedGroupMembersPage >= selectedGroupMembersPageCount - 1}
+                                    onPress={() => setSelectedGroupMembersPage((page) => Math.min(selectedGroupMembersPageCount - 1, page + 1))}
+                                  >
+                                    <Text style={styles.secondaryButtonText}>Next</Text>
+                                  </TouchableOpacity>
+                                </View>
+                              </>
+                            ) : <Text style={styles.contactsEmptySubtext}>{groupMembersSearch.trim() ? 'No members match your search.' : 'No members in this group yet.'}</Text>}
+                          </View>
+
+                          <View style={styles.groupsManageColumn}>
+                            <Text style={styles.sectionTitle}>{`Add contact to ${selectedGroup.name}`}</Text>
+                            <TextInput
+                              style={[styles.input, styles.groupSearchInput]}
+                              value={groupAddContactsSearch}
+                              onChangeText={setGroupAddContactsSearch}
+                              placeholder="Search contacts"
+                              placeholderTextColor="#94a3b8"
+                              autoCapitalize="none"
+                              autoCorrect={false}
+                            />
+                            {contactsAvailableForSelectedGroup.length ? (
+                              <>
+                                {selectedGroupAddContactsPageItems.length ? selectedGroupAddContactsPageItems.map((entry) => (
+                                  <View key={entry.id} style={styles.contactRowCard}>
+                                    <View style={styles.groupMemberHeaderRow}>
+                                      <View style={styles.accountInlineField}>
+                                        <Text style={styles.contactRowName}>{getContactDisplayName(entry)}</Text>
+                                        <Text style={styles.contactRowMeta}>{getContactPrimaryChannelLabel(entry)}</Text>
+                                      </View>
+                                      <TouchableOpacity
+                                        style={[styles.primaryButton, styles.groupsManageAddButton]}
+                                        onPress={() => void addSelectedContactToSelectedGroup(entry.id)}
+                                      >
+                                        <Text style={styles.primaryButtonText}>Add</Text>
+                                      </TouchableOpacity>
+                                    </View>
+                                  </View>
+                                )) : <Text style={styles.contactsEmptySubtext}>{groupAddContactsSearch.trim() ? 'No contacts match your search.' : 'No contacts on this page.'}</Text>}
+
+                                <View style={styles.groupsManagePaginationRow}>
+                                  <TouchableOpacity
+                                    style={[styles.secondaryButton, styles.groupsManagePageButton, selectedGroupAddContactsPage === 0 && styles.groupsManagePageButtonDisabled]}
+                                    disabled={selectedGroupAddContactsPage === 0}
+                                    onPress={() => setSelectedGroupAddContactsPage((page) => Math.max(0, page - 1))}
+                                  >
+                                    <Text style={styles.secondaryButtonText}>Prev</Text>
+                                  </TouchableOpacity>
+
+                                  <Text style={styles.contactRowMeta}>{`${selectedGroupAddContactsPage + 1}/${selectedGroupAddContactsPageCount}`}</Text>
+
+                                  <TouchableOpacity
+                                    style={[styles.secondaryButton, styles.groupsManagePageButton, selectedGroupAddContactsPage >= selectedGroupAddContactsPageCount - 1 && styles.groupsManagePageButtonDisabled]}
+                                    disabled={selectedGroupAddContactsPage >= selectedGroupAddContactsPageCount - 1}
+                                    onPress={() => setSelectedGroupAddContactsPage((page) => Math.min(selectedGroupAddContactsPageCount - 1, page + 1))}
+                                  >
+                                    <Text style={styles.secondaryButtonText}>Next</Text>
+                                  </TouchableOpacity>
+                                </View>
+                              </>
+                            ) : (
+                              <Text style={styles.contactsEmptySubtext}>{groupAddContactsSearch.trim() ? 'No contacts match your search.' : 'No remaining contacts to add.'}</Text>
+                            )}
                           </View>
                         </View>
-                      )) : <Text style={styles.contactsEmptySubtext}>No groups yet. Use New to create one.</Text>}
+                      </View>
 
-                      <Text style={styles.contactsEmptySubtext}>Select Manage on a group card to open the popup.</Text>
-                    </>
+                      <View style={styles.modalActionsRow}>
+                        <TouchableOpacity
+                          style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
+                          onPress={() => {
+                            setSelectedGroupId('');
+                            setGroupsDisplayMode('summary');
+                          }}
+                        >
+                          <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Back to Summary</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.deleteButton, styles.contactsSummaryActionButton]}
+                          onPress={() => setGroupDeleteCandidateId(selectedGroup.id)}
+                        >
+                          <Text style={styles.deleteButtonText} numberOfLines={1}>Delete</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
                   ) : null}
                 </ScrollView>
               ) : null}
             </View>
           </View>
 
-          {selectedGroup && groupsDisplayMode === 'detail' ? (
+          <Modal
+            transparent
+            visible={showCloneGroupModal}
+            animationType="fade"
+            onRequestClose={() => setShowCloneGroupModal(false)}
+          >
             <View style={styles.modalOverlay}>
               <View style={[styles.modalCard, styles.contactsSummaryModalCard]}>
-                <Text style={styles.modalTitle}>{selectedGroup.name}</Text>
-                <Text style={styles.contactRowMeta}>{`${getGroupMemberCount(selectedGroup)} members`}</Text>
-
-                <View style={styles.contactsSummaryDetailsCard}>
-                  <Text style={styles.fieldLabel}>Group description</Text>
-                  <TextInput
-                    style={[styles.input, styles.contactsNotesInput]}
-                    value={selectedGroupDescriptionDraft}
-                    onChangeText={setSelectedGroupDescriptionDraft}
-                    placeholder="Describe this group"
-                    multiline
-                  />
-                  <TouchableOpacity style={styles.secondaryButton} onPress={() => void saveSelectedGroupDescription()}>
-                    <Text style={styles.secondaryButtonText}>Save Description</Text>
-                  </TouchableOpacity>
-
-                  <Text style={styles.sectionTitle}>{`Add contact to ${selectedGroup.name}`}</Text>
-                  {contactsAvailableForSelectedGroup.length ? (
-                    <>
-                      <View style={styles.pickerWrapper}>
-                        <Picker
-                          selectedValue={selectedContactIdToAdd}
-                          onValueChange={(value) => setSelectedContactIdToAdd(String(value || ''))}
-                          style={styles.picker}
-                        >
-                          <Picker.Item label="Select contact" value="" />
-                          {contactsAvailableForSelectedGroup.map((entry) => (
-                            <Picker.Item key={entry.id} label={`${getContactDisplayName(entry)} (${getContactPrimaryChannelLabel(entry)})`} value={entry.id} />
-                          ))}
-                        </Picker>
-                      </View>
-                      <TouchableOpacity style={styles.primaryButton} onPress={() => void addSelectedContactToSelectedGroup()}>
-                        <Text style={styles.primaryButtonText}>Add to group</Text>
-                      </TouchableOpacity>
-                    </>
-                  ) : (
-                    <Text style={styles.contactsEmptySubtext}>No remaining contacts to add.</Text>
-                  )}
-
-                  <Text style={styles.sectionTitle}>Group members</Text>
-                  {selectedGroupMembers.length ? selectedGroupMembers.map((entry) => (
-                    <View key={entry.id} style={styles.contactRowCard}>
-                      <View style={styles.groupMemberHeaderRow}>
-                        <Text style={styles.contactRowName}>{getContactDisplayName(entry)}</Text>
-                        <TouchableOpacity
-                          style={styles.secondaryButton}
-                          onPress={() => void removeContactFromSelectedGroup(entry.id)}
-                        >
-                          <Text style={styles.secondaryButtonText}>Remove</Text>
-                        </TouchableOpacity>
-                      </View>
-                      <Text style={styles.contactRowMeta}>{getContactPrimaryChannelLabel(entry)}</Text>
-                    </View>
-                  )) : <Text style={styles.contactsEmptySubtext}>No members in this group yet.</Text>}
-                </View>
-
-                <View style={styles.modalActionsRow}>
-                  <TouchableOpacity style={[styles.secondaryButton, styles.contactsSummaryActionButton]} onPress={() => setSelectedGroupId('')}>
-                    <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Close</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </View>
-          ) : null}
-
-          {activeSummaryGroup ? (
-            <View style={styles.modalOverlay}>
-              <View style={[styles.modalCard, styles.contactsSummaryModalCard]}>
-                <Text style={styles.modalTitle}>{activeSummaryGroup.name}</Text>
-                <Text style={styles.contactRowMeta}>{`${getGroupMemberCount(activeSummaryGroup)} members`}</Text>
-                {activeSummaryGroup.description ? <Text style={styles.contactRowMeta}>{activeSummaryGroup.description}</Text> : null}
-
-                <View style={styles.contactsSummaryDetailsCard}>
-                  <Text style={styles.sectionTitle}>Members</Text>
-                  {activeSummaryGroupMembers.length ? activeSummaryGroupMembers.map((member) => (
-                    <View key={member.id} style={styles.groupSummaryMemberRow}>
-                      <Text style={styles.contactRowName}>{getContactDisplayName(member)}</Text>
-                      <Text style={styles.contactRowMeta}>{getContactPrimaryChannelLabel(member)}</Text>
-                    </View>
-                  )) : <Text style={styles.contactsEmptySubtext}>No members in this group yet.</Text>}
-                </View>
-
+                <Text style={styles.modalTitle}>Clone group</Text>
+                <Text style={styles.fieldLabel}>Choose a group to duplicate</Text>
+                <ScrollView style={styles.cloneGroupModalList} contentContainerStyle={styles.cloneGroupModalListContent}>
+                  {contactGroups.length ? contactGroups.map((group) => (
+                    <TouchableOpacity
+                      key={group.id}
+                      style={styles.contactRowCard}
+                      onPress={() => { void cloneContactGroup(group.id); }}
+                    >
+                      <Text style={styles.contactRowName}>{group.name}</Text>
+                      <Text style={styles.contactRowMeta}>{`${getGroupMemberCount(group)} members`}</Text>
+                    </TouchableOpacity>
+                  )) : <Text style={styles.contactsEmptySubtext}>No groups available to clone.</Text>}
+                </ScrollView>
                 <View style={styles.modalActionsRow}>
                   <TouchableOpacity
-                    style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
-                    onPress={() => {
-                      setSelectedGroupId(activeSummaryGroup.id);
-                      setGroupsDisplayMode('detail');
-                      setActiveSummaryGroupId(null);
-                    }}
+                    style={[styles.secondaryButton, styles.modalActionButton]}
+                    onPress={() => setShowCloneGroupModal(false)}
                   >
-                    <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Detail</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={[styles.secondaryButton, styles.contactsSummaryActionButton]} onPress={() => setActiveSummaryGroupId(null)}>
-                    <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Close</Text>
+                    <Text style={styles.secondaryButtonText}>Cancel</Text>
                   </TouchableOpacity>
                 </View>
               </View>
             </View>
-          ) : null}
+          </Modal>
+
+          <Modal
+            transparent
+            visible={groupDeleteCandidateId !== null}
+            animationType="fade"
+            onRequestClose={() => setGroupDeleteCandidateId(null)}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, styles.contactsSummaryModalCard]}>
+                <Text style={styles.modalTitle}>Delete group?</Text>
+                <Text style={styles.deleteHint}>
+                  {contactGroups.find((group) => group.id === groupDeleteCandidateId)?.name
+                    ? `This will permanently delete "${contactGroups.find((group) => group.id === groupDeleteCandidateId)?.name}" and remove its members from the group.`
+                    : 'This will permanently delete this group.'}
+                </Text>
+                <Text style={styles.deleteHint}>Please confirm this action.</Text>
+                <View style={styles.modalActionsRow}>
+                  <TouchableOpacity
+                    style={[styles.deleteButton, styles.modalActionButton]}
+                    onPress={() => {
+                      if (groupDeleteCandidateId) {
+                        void deleteSelectedGroup(groupDeleteCandidateId);
+                      }
+                    }}
+                  >
+                    <Text style={styles.deleteButtonText}>Yes, delete</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.secondaryButton, styles.modalActionButton]}
+                    onPress={() => setGroupDeleteCandidateId(null)}
+                  >
+                    <Text style={styles.secondaryButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal
+            transparent
+            visible={showCreateGroupModal}
+            animationType="fade"
+            onRequestClose={() => {
+              setShowCreateGroupModal(false);
+              setNewGroupName('');
+              setNewGroupDescription('');
+            }}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, styles.contactsSummaryModalCard]}>
+                <Text style={styles.modalTitle}>Create group</Text>
+                <TextInput
+                  style={styles.input}
+                  value={newGroupName}
+                  onChangeText={setNewGroupName}
+                  placeholder="Family, Team, Clients..."
+                />
+                <Text style={styles.fieldLabel}>Group description</Text>
+                <TextInput
+                  style={[styles.input, styles.contactsNotesInput]}
+                  value={newGroupDescription}
+                  onChangeText={setNewGroupDescription}
+                  placeholder="Describe this group"
+                  multiline
+                />
+                <View style={styles.modalActionsRow}>
+                  <TouchableOpacity style={[styles.primaryButton, styles.modalActionButton]} onPress={() => void createContactGroup()}>
+                    <Text style={styles.primaryButtonText}>Create group</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.secondaryButton, styles.modalActionButton]}
+                    onPress={() => {
+                      setShowCreateGroupModal(false);
+                      setNewGroupName('');
+                      setNewGroupDescription('');
+                    }}
+                  >
+                    <Text style={styles.secondaryButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
 
           <Modal
             transparent
@@ -4518,7 +4907,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
                   <View style={styles.contactsSummaryDetailsCard}>
                     <Text style={styles.contactRowName}>{getContactDisplayName(activeSummaryContact)}</Text>
-                    <Text style={styles.contactRowMeta}>{getContactPrimaryChannelLabel(activeSummaryContact)}</Text>
+                    {activeSummaryContact.email ? <Text style={styles.contactRowMeta}>{activeSummaryContact.email}</Text> : null}
+                    {activeSummaryContact.mobileNumber ? <Text style={styles.contactRowMeta}>{activeSummaryContact.mobileNumber}</Text> : null}
                     {activeSummaryContact.company ? <Text style={styles.contactRowMeta}>{`Company: ${activeSummaryContact.company}`}</Text> : null}
                     {activeSummaryContact.birthDate ? <Text style={styles.contactRowMeta}>{`Birth date: ${activeSummaryContact.birthDate}`}</Text> : null}
                     {activeSummaryContact.address ? <Text style={styles.contactRowMeta}>{`Address: ${activeSummaryContact.address}`}</Text> : null}
@@ -4526,49 +4916,30 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
                   </View>
 
                   <View style={styles.modalActionsRow}>
-                    {activeSummaryContact.deletedAt ? (
-                      <>
-                        <TouchableOpacity
-                          style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
-                          onPress={() => void restoreDeletedContact(activeSummaryContact.id)}
-                        >
-                          <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Restore</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.deleteButton, styles.contactsSummaryActionButton]}
-                          onPress={() => void permanentlyDeleteContact(activeSummaryContact.id)}
-                        >
-                          <Text style={styles.deleteButtonText} numberOfLines={1}>Delete forever</Text>
-                        </TouchableOpacity>
-                      </>
-                    ) : (
-                      <>
-                        <TouchableOpacity
-                          style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
-                          onPress={() => {
-                            openEditContactEditor(activeSummaryContact);
-                            setActiveSummaryContactId(null);
-                          }}
-                        >
-                          <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Edit</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
-                          onPress={() => void toggleFavoriteContact(activeSummaryContact.id)}
-                        >
-                          <Text style={styles.contactsSummaryActionText} numberOfLines={1}>{activeSummaryContact.isFavorite ? 'Unfavorite' : 'Favorite'}</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.deleteButton, styles.contactsSummaryActionButton]}
-                          onPress={() => {
-                            void softDeleteContact(activeSummaryContact.id);
-                            setActiveSummaryContactId(null);
-                          }}
-                        >
-                          <Text style={styles.deleteButtonText} numberOfLines={1}>Delete</Text>
-                        </TouchableOpacity>
-                      </>
-                    )}
+                    <TouchableOpacity
+                      style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
+                      onPress={() => {
+                        openEditContactEditor(activeSummaryContact);
+                        setActiveSummaryContactId(null);
+                      }}
+                    >
+                      <Text style={styles.contactsSummaryActionText} numberOfLines={1}>Edit</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
+                      onPress={() => void toggleFavoriteContact(activeSummaryContact.id)}
+                    >
+                      <Text style={styles.contactsSummaryActionText} numberOfLines={1}>{activeSummaryContact.isFavorite ? 'Unfavorite' : 'Favorite'}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.deleteButton, styles.contactsSummaryActionButton]}
+                      onPress={() => {
+                        void permanentlyDeleteContact(activeSummaryContact.id);
+                        setActiveSummaryContactId(null);
+                      }}
+                    >
+                      <Text style={styles.deleteButtonText} numberOfLines={1}>Delete</Text>
+                    </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.secondaryButton, styles.contactsSummaryActionButton]}
                       onPress={() => setActiveSummaryContactId(null)}
@@ -4660,7 +5031,7 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
               </View>
             </View>
             <TouchableOpacity style={styles.secondaryButton} onPress={closeContactSupportModal}>
-              <Text style={styles.secondaryButtonText}>Back to Account</Text>
+              <Text style={styles.secondaryButtonText}>Back to Settings</Text>
             </TouchableOpacity>
           </View>
 
@@ -4731,64 +5102,53 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
           <View style={styles.accountHeaderLeft}>
             <Image source={require('./assets/icon.png')} style={styles.accountHeaderLogo} resizeMode="cover" />
             <View style={styles.accountHeaderTextWrap}>
-              <Text style={styles.accountTitle}>Account</Text>
+              <Text style={styles.accountTitle}>Settings</Text>
               <Text style={styles.accountSubtitle}>{user.email}</Text>
             </View>
           </View>
-          <TouchableOpacity style={styles.secondaryButton} onPress={handleBack}>
+          <TouchableOpacity style={styles.secondaryButton} onPress={handleSettingsBack}>
             <Text style={styles.secondaryButtonText}>Back</Text>
           </TouchableOpacity>
         </View>
 
-        <View style={styles.accountShell}>
-          <View style={styles.accountNav}>
-            <TouchableOpacity
-              style={[styles.accountNavButton, activeAccountAction === 'profile' && styles.accountNavButtonActive]}
-              onPress={() => setActiveAccountAction('profile')}
-            >
-              <Text style={[styles.accountNavButtonText, activeAccountAction === 'profile' && styles.accountNavButtonTextActive]}>Profile</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.accountNavButton}
-              onPress={() => {
-                void handleOpenContacts();
-              }}
-            >
-              <Text style={styles.accountNavButtonText}>Contacts</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.accountNavButton, activeAccountAction === 'settings' && styles.accountNavButtonActive]}
-              onPress={() => setActiveAccountAction('settings')}
-            >
-              <Text style={[styles.accountNavButtonText, activeAccountAction === 'settings' && styles.accountNavButtonTextActive]}>Settings</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.accountNavButton, activeAccountAction === 'calendar-sync' && styles.accountNavButtonActive]}
-              onPress={() => setActiveAccountAction('calendar-sync')}
-            >
-              <Text style={[styles.accountNavButtonText, activeAccountAction === 'calendar-sync' && styles.accountNavButtonTextActive]}>Calendar Sync</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.accountNavButton}
-              onPress={() => {
-                setMessage(null);
-                setContactSupportError(null);
-                setShowContactSupportModal(true);
-              }}
-            >
-              <Text style={styles.accountNavButtonText}>Contact Us</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.accountNavButton} onPress={handleBack}>
-              <Text style={styles.accountNavButtonText}>Close</Text>
-            </TouchableOpacity>
-          </View>
+        <View style={styles.accountMainPane}>
+          {activeAccountAction === 'none' ? (
+          <View style={styles.settingsLinksWrap}>
+            <View style={styles.settingsLinkItem}>
+              <TouchableOpacity style={styles.settingsLinkButton} onPress={() => setActiveAccountAction('profile')}>
+                <Text style={styles.settingsLinkText}>Account</Text>
+              </TouchableOpacity>
+              <Text style={styles.settingsLinkDescription}>Update your profile details and manage account security.</Text>
+            </View>
 
-          <View style={styles.accountMainPane}>
-            {message ? <Text style={styles.message}>{message}</Text> : null}
+            <View style={styles.settingsLinkItem}>
+              <TouchableOpacity style={styles.settingsLinkButton} onPress={() => setActiveAccountAction('settings')}>
+                <Text style={styles.settingsLinkText}>Preferences</Text>
+              </TouchableOpacity>
+              <Text style={styles.settingsLinkDescription}>Choose reminder delivery and default time settings.</Text>
+            </View>
+
+            <View style={styles.settingsLinkItem}>
+              <TouchableOpacity
+                style={styles.settingsLinkButton}
+                onPress={() => {
+                  setMessage(null);
+                  setContactSupportError(null);
+                  setShowContactSupportModal(true);
+                }}
+              >
+                <Text style={styles.settingsLinkText}>Contact Us</Text>
+              </TouchableOpacity>
+              <Text style={styles.settingsLinkDescription}>Send a message to support if you need help.</Text>
+            </View>
+          </View>
+          ) : null}
+
+            {activeAccountAction !== 'none' && message ? <Text style={styles.message}>{message}</Text> : null}
 
             {activeAccountAction === 'profile' ? (
               <>
-                <Text style={styles.sectionTitle}>Personal details</Text>
+                <Text style={styles.sectionTitle}>Profile</Text>
                 <View style={styles.accountDetailsColumns}>
                   <View style={styles.accountDetailsPrimaryColumn}>
                     <View style={styles.accountProfileFieldStack}>
@@ -4860,8 +5220,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
                 <View style={styles.passwordSection}>
                   <View style={styles.accountActionButtonsRow}>
-                    <TouchableOpacity style={[styles.passwordToggleRow, styles.accountActionButton]} onPress={() => setShowPasswordModal(true)} activeOpacity={0.8}>
-                      <Text style={styles.passwordToggleText}>Change Password</Text>
+                    <TouchableOpacity style={[styles.passwordToggleRow, styles.accountActionButton, styles.accountChangePasswordButton]} onPress={() => setShowPasswordModal(true)} activeOpacity={0.8}>
+                      <Text style={styles.accountChangePasswordButtonText}>Change Password</Text>
                     </TouchableOpacity>
                     <TouchableOpacity style={[styles.deleteButton, styles.accountActionButton]} onPress={() => void handleDelete()} disabled={isSaving}>
                       <Text style={styles.deleteButtonText}>Delete account</Text>
@@ -4990,8 +5350,8 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
 
             {activeAccountAction === 'calendar-sync' ? (
               <View style={styles.passwordSection}>
+                <Text style={styles.sectionTitle}>Calendar sync</Text>
                 <View style={styles.calendarSyncHeaderInline}>
-                  <Text style={styles.sectionTitle}>Calendar sync</Text>
                   <TouchableOpacity
                     style={[
                       styles.calendarSyncAutoToggle,
@@ -5248,10 +5608,11 @@ function AccountScreen({ user, onBack, onUserUpdated, onDeleteAccount, onReminde
               </View>
             ) : null}
 
-            <TouchableOpacity style={styles.primaryButton} onPress={handleSaveProfile} disabled={isSaving}>
-              <Text style={styles.primaryButtonText}>{isSaving ? 'Saving…' : 'Save Details'}</Text>
-            </TouchableOpacity>
-          </View>
+            {activeAccountAction === 'profile' ? (
+              <TouchableOpacity style={styles.primaryButton} onPress={handleSaveProfile} disabled={isSaving}>
+                <Text style={styles.primaryButtonText}>{isSaving ? 'Saving…' : 'Save Details'}</Text>
+              </TouchableOpacity>
+            ) : null}
         </View>
       </View>
       ) : null}
@@ -5272,10 +5633,98 @@ export default function App() {
   const [authMode, setAuthMode] = useState<AuthMode>('signin');
   const [currentUser, setCurrentUser] = useState<StoredUser | null>(null);
   const [showAccount, setShowAccount] = useState(false);
+  const [requestedAccountAction, setRequestedAccountAction] = useState<'contacts' | 'calendar-sync' | null>(null);
+  const [shouldReturnToLandingFromAccount, setShouldReturnToLandingFromAccount] = useState(false);
   const [isMigratingData, setIsMigratingData] = useState(false);
   const [isRestoringSession, setIsRestoringSession] = useState(true);
+  const [showTitleScreen, setShowTitleScreen] = useState(true);
   const [migrationSummary, setMigrationSummary] = useState<string | null>(null);
   const [accountReminderTimeZone, setAccountReminderTimeZone] = useState(getDeviceTimeZone());
+  const [biometricUnlockState, setBiometricUnlockState] = useState<'checking' | 'ready' | 'unsupported' | 'failed'>('checking');
+  const titleScreenScale = useRef(new Animated.Value(0.6)).current;
+  const titleScreenOpacity = useRef(new Animated.Value(0)).current;
+  const titleScreenShimmerX = useRef(new Animated.Value(-170)).current;
+  const titleScreenSparkleOpacity = useRef(new Animated.Value(0.15)).current;
+
+  useEffect(() => {
+    if (currentUser) {
+      setShowTitleScreen(false);
+      return;
+    }
+
+    const titleScreenTimer = setTimeout(() => {
+      Animated.timing(titleScreenOpacity, {
+        toValue: 0,
+        duration: 900,
+        useNativeDriver: true,
+      }).start(() => setShowTitleScreen(false));
+    }, 3300);
+
+    return () => clearTimeout(titleScreenTimer);
+  }, [currentUser, titleScreenOpacity]);
+
+  useEffect(() => {
+    if (currentUser) {
+      titleScreenOpacity.setValue(1);
+      titleScreenScale.setValue(1);
+      titleScreenShimmerX.setValue(-170);
+      titleScreenSparkleOpacity.setValue(0.15);
+      return;
+    }
+
+    Animated.parallel([
+      Animated.timing(titleScreenOpacity, {
+        toValue: 1,
+        duration: 1100,
+        useNativeDriver: true,
+      }),
+      Animated.spring(titleScreenScale, {
+        toValue: 1,
+        tension: 18,
+        friction: 5,
+        useNativeDriver: true,
+      }),
+    ]).start();
+
+    const sparkleLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(titleScreenSparkleOpacity, {
+          toValue: 0.9,
+          duration: 500,
+          useNativeDriver: true,
+        }),
+        Animated.timing(titleScreenSparkleOpacity, {
+          toValue: 0.15,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    sparkleLoop.start();
+
+    const shimmerLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(titleScreenShimmerX, {
+          toValue: 240,
+          duration: 1700,
+          useNativeDriver: true,
+        }),
+        Animated.timing(titleScreenShimmerX, {
+          toValue: -170,
+          duration: 0,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    shimmerLoop.start();
+
+    return () => {
+      sparkleLoop.stop();
+      shimmerLoop.stop();
+    };
+  }, [currentUser, titleScreenOpacity, titleScreenScale, titleScreenShimmerX, titleScreenSparkleOpacity]);
 
   useEffect(() => {
     let isMounted = true;
@@ -5368,6 +5817,57 @@ export default function App() {
   }, [currentUser?.id]);
 
   useEffect(() => {
+    if (!currentUser?.id) {
+      setBiometricUnlockState('ready');
+      return;
+    }
+
+    if (isMigratingData || isRestoringSession) {
+      setBiometricUnlockState('checking');
+      return;
+    }
+
+    let isMounted = true;
+
+    (async () => {
+      try {
+        const hasHardware = await LocalAuthentication.hasHardwareAsync();
+        const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (!hasHardware || !isEnrolled) {
+          setBiometricUnlockState('unsupported');
+          return;
+        }
+
+        const result = await LocalAuthentication.authenticateAsync({
+          promptMessage: 'Unlock Remind Me This with Face ID',
+          fallbackLabel: 'Use passcode',
+          disableDeviceFallback: false,
+        });
+
+        if (!isMounted) {
+          return;
+        }
+
+        setBiometricUnlockState(result.success ? 'ready' : 'failed');
+      } catch (error) {
+        console.warn('Biometric unlock check failed', error);
+        if (isMounted) {
+          setBiometricUnlockState('failed');
+        }
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentUser?.id, isMigratingData, isRestoringSession]);
+
+  useEffect(() => {
     let isMounted = true;
 
     const runMigration = async () => {
@@ -5426,12 +5926,116 @@ export default function App() {
     };
   }, []);
 
+  if (showTitleScreen) {
+    return (
+      <SafeAreaView style={styles.titleSplashContainer}>
+        <Animated.View style={styles.titleSplashBackdrop} />
+        <Animated.View
+          style={[
+            styles.titleSplashLogoWrap,
+            {
+              opacity: titleScreenOpacity,
+              transform: [{ scale: titleScreenScale }],
+            },
+          ]}
+        >
+          <Image source={require('./assets/icon.png')} style={styles.titleSplashLogo} resizeMode="cover" />
+          <Animated.View
+            style={[
+              styles.titleSplashShimmer,
+              {
+                transform: [{ translateX: titleScreenShimmerX }, { rotate: '25deg' }],
+              },
+            ]}
+          />
+          <Animated.View
+            style={[
+              styles.titleSplashSparkle,
+              {
+                opacity: titleScreenSparkleOpacity,
+                transform: [{ translateX: -12 }, { translateY: -12 }, { rotate: '45deg' }],
+              },
+            ]}
+          />
+        </Animated.View>
+        <Text style={styles.titleSplashBrand}>Remind Me This</Text>
+        <StatusBar style="auto" />
+      </SafeAreaView>
+    );
+  }
+
   if (isMigratingData || isRestoringSession) {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.migrationSplash}>
           <Text style={styles.migrationSplashTitle}>{isRestoringSession ? 'Restoring your session...' : 'Preparing your account data...'}</Text>
           <Text style={styles.migrationSplashText}>{isRestoringSession ? 'Reopening your app where you left off.' : 'Running one-time migration to persistent database storage.'}</Text>
+        </View>
+        <StatusBar style="auto" />
+      </SafeAreaView>
+    );
+  }
+
+  if (currentUser && biometricUnlockState !== 'ready') {
+    const biometricFailure = biometricUnlockState === 'failed';
+    const biometricUnsupported = biometricUnlockState === 'unsupported';
+
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.migrationSplash}>
+          <Text style={styles.migrationSplashTitle}>
+            {biometricFailure ? 'Face ID not accepted' : biometricUnsupported ? 'Face ID unavailable' : 'Unlocking with Face ID...'}
+          </Text>
+          <Text style={styles.migrationSplashText}>
+            {biometricFailure
+              ? 'You can retry Face ID or continue without biometrics.'
+              : biometricUnsupported
+                ? 'This device does not have Face ID or it is not set up yet.'
+                : 'Checking your biometric credentials before opening your account.'}
+          </Text>
+          <View style={styles.biometricUnlockActionsRow}>
+            <TouchableOpacity
+              style={styles.primaryButton}
+              onPress={() => {
+                if (biometricFailure || biometricUnsupported) {
+                  setBiometricUnlockState('checking');
+                }
+
+                void (async () => {
+                  try {
+                    const hasHardware = await LocalAuthentication.hasHardwareAsync();
+                    const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+
+                    if (!hasHardware || !isEnrolled) {
+                      setBiometricUnlockState('unsupported');
+                      return;
+                    }
+
+                    const result = await LocalAuthentication.authenticateAsync({
+                      promptMessage: 'Unlock Remind Me This with Face ID',
+                      fallbackLabel: 'Use passcode',
+                      disableDeviceFallback: false,
+                    });
+
+                    setBiometricUnlockState(result.success ? 'ready' : 'failed');
+                  } catch (error) {
+                    console.warn('Biometric retry failed', error);
+                    setBiometricUnlockState('failed');
+                  }
+                })();
+              }}
+            >
+              <Text style={styles.primaryButtonText}>{biometricFailure || biometricUnsupported ? 'Retry Face ID' : 'Continue'}</Text>
+            </TouchableOpacity>
+            {(biometricFailure || biometricUnsupported) ? (
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                onPress={() => setBiometricUnlockState('ready')}
+              >
+                <Text style={styles.secondaryButtonText}>Continue</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
         </View>
         <StatusBar style="auto" />
       </SafeAreaView>
@@ -5473,7 +6077,17 @@ export default function App() {
         onBack={() => setShowAccount(false)}
         onUserUpdated={(user) => setCurrentUser(user)}
         onReminderTimeZoneUpdated={setAccountReminderTimeZone}
+        initialAccountAction={requestedAccountAction}
+        returnToLanding={shouldReturnToLandingFromAccount}
+        onInitialActionHandled={() => undefined}
+        onBackToLanding={() => {
+          setShouldReturnToLandingFromAccount(false);
+          setRequestedAccountAction(null);
+          setShowAccount(false);
+        }}
         onDeleteAccount={() => {
+          setShouldReturnToLandingFromAccount(false);
+          setRequestedAccountAction(null);
           setCurrentUser(null);
           setShowAccount(false);
           setAuthMode('signin');
@@ -5490,7 +6104,7 @@ export default function App() {
           </View>
           <View style={styles.headerActions}>
             <TouchableOpacity style={styles.secondaryButton} onPress={() => setShowAccount(true)}>
-              <Text style={styles.secondaryButtonText}>Account</Text>
+              <Text style={styles.secondaryButtonText}>Settings</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.signOutButton}
@@ -5508,6 +6122,16 @@ export default function App() {
           userId={currentUser.id}
           userEmail={currentUser.email}
           defaultReminderTimeZone={accountReminderTimeZone}
+          onOpenContacts={() => {
+            setRequestedAccountAction('contacts');
+            setShouldReturnToLandingFromAccount(true);
+            setShowAccount(true);
+          }}
+          onOpenCalendarSync={() => {
+            setRequestedAccountAction('calendar-sync');
+            setShouldReturnToLandingFromAccount(true);
+            setShowAccount(true);
+          }}
         />
       </View>
     );
@@ -5639,6 +6263,11 @@ const styles = StyleSheet.create({
     color: '#64748b',
     marginBottom: 10,
   },
+  userAgreementCaption: {
+    color: '#64748b',
+    fontSize: 12,
+    marginBottom: 8,
+  },
   bootstrapNote: {
     backgroundColor: '#ecfeff',
     color: '#0f766e',
@@ -5721,6 +6350,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
+  },
+  groupSearchInput: {
+    marginBottom: 8,
   },
   passwordInputWrap: {
     flexDirection: 'row',
@@ -5854,6 +6486,71 @@ const styles = StyleSheet.create({
     color: '#0f172a',
     fontWeight: '600',
   },
+  titleSplashContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f8fafc',
+  },
+  titleSplashBackdrop: {
+    position: 'absolute',
+    inset: 0,
+    backgroundColor: '#edf6ff',
+  },
+  titleSplashLogoWrap: {
+    width: 170,
+    height: 170,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 38,
+    backgroundColor: '#ffffff',
+    shadowColor: '#1d4ed8',
+    shadowOpacity: 0.22,
+    shadowRadius: 28,
+    shadowOffset: { width: 0, height: 16 },
+    elevation: 16,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.35)',
+  },
+  titleSplashLogo: {
+    width: 132,
+    height: 132,
+    borderRadius: 30,
+  },
+  titleSplashShimmer: {
+    position: 'absolute',
+    top: -20,
+    left: -30,
+    width: 64,
+    height: 220,
+    backgroundColor: 'rgba(255,255,255,0.82)',
+    shadowColor: '#ffffff',
+    shadowOpacity: 0.95,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  titleSplashSparkle: {
+    position: 'absolute',
+    right: 18,
+    top: 18,
+    width: 24,
+    height: 24,
+    backgroundColor: '#dbeafe',
+    borderRadius: 6,
+    transform: [{ rotate: '45deg' }],
+    shadowColor: '#60a5fa',
+    shadowOpacity: 0.9,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  titleSplashBrand: {
+    marginTop: 18,
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#0f172a',
+    letterSpacing: 0.2,
+  },
   migrationSplash: {
     flex: 1,
     justifyContent: 'center',
@@ -5911,38 +6608,6 @@ const styles = StyleSheet.create({
   accountHeaderTextWrap: {
     flex: 1,
   },
-  accountShell: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
-  accountNav: {
-    width: 88,
-    borderWidth: 1,
-    borderColor: '#d9e2f0',
-    borderRadius: 12,
-    padding: 6,
-    backgroundColor: '#f8fafc',
-  },
-  accountNavButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderRadius: 10,
-    marginBottom: 5,
-    backgroundColor: '#e2e8f0',
-  },
-  accountNavButtonActive: {
-    backgroundColor: '#bfdbfe',
-  },
-  accountNavButtonText: {
-    color: '#0f172a',
-    fontWeight: '700',
-    fontSize: 10,
-    textAlign: 'left',
-  },
-  accountNavButtonTextActive: {
-    color: '#1d4ed8',
-  },
   accountMainPane: {
     flex: 1,
     borderWidth: 1,
@@ -5950,6 +6615,33 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 12,
     backgroundColor: '#ffffff',
+  },
+  settingsLinksWrap: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    paddingBottom: 10,
+    marginBottom: 10,
+    gap: 10,
+  },
+  settingsLinkItem: {
+    gap: 2,
+  },
+  settingsLinkButton: {
+    alignSelf: 'flex-start',
+  },
+  settingsLinkText: {
+    color: '#2563eb',
+    fontSize: 14,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+  settingsLinkTextActive: {
+    color: '#1d4ed8',
+    fontWeight: '700',
+  },
+  settingsLinkDescription: {
+    color: '#64748b',
+    fontSize: 12,
   },
   accountDetailsColumns: {
     flexDirection: 'row',
@@ -6073,6 +6765,14 @@ const styles = StyleSheet.create({
     marginTop: 4,
     marginBottom: 8,
   },
+  biometricUnlockActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 16,
+  },
   primaryButtonDisabled: {
     backgroundColor: '#93c5fd',
   },
@@ -6103,6 +6803,14 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 160,
   },
+  accountChangePasswordButton: {
+    backgroundColor: '#f59e0b',
+    borderColor: '#d97706',
+  },
+  accountChangePasswordButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+  },
   contactsModalCard: {
     maxWidth: 980,
   },
@@ -6112,9 +6820,11 @@ const styles = StyleSheet.create({
   },
   contactsStandalonePanel: {
     width: '100%',
+    maxWidth: 860,
+    alignSelf: 'center',
     backgroundColor: '#fff',
     borderRadius: 16,
-    padding: 16,
+    padding: 10,
     shadowColor: '#0f172a',
     shadowOpacity: 0.08,
     shadowRadius: 10,
@@ -6123,48 +6833,48 @@ const styles = StyleSheet.create({
   },
   contactsShell: {
     width: '100%',
-    flexDirection: 'row',
-    gap: 12,
-    minHeight: 420,
-  },
-  contactsSidebar: {
-    width: 84,
-    borderWidth: 1,
-    borderColor: '#d9e2f0',
-    borderRadius: 12,
-    padding: 6,
-    backgroundColor: '#f8fafc',
-    alignSelf: 'stretch',
-  },
-  contactsSidebarButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 4,
-    borderRadius: 10,
-    marginBottom: 6,
-    backgroundColor: '#e2e8f0',
-  },
-  contactsSidebarButtonActive: {
-    backgroundColor: '#bfdbfe',
-  },
-  contactsSidebarButtonText: {
-    color: '#0f172a',
-    fontWeight: '700',
-    fontSize: 11,
-    textAlign: 'center',
+    flex: 1,
+    minHeight: 190,
   },
   contactsMainPane: {
     flex: 1,
+    width: '100%',
+    minHeight: 170,
     borderWidth: 1,
     borderColor: '#d9e2f0',
     borderRadius: 12,
-    padding: 12,
+    padding: 8,
     backgroundColor: '#ffffff',
   },
   contactsBody: {
-    minHeight: 420,
+    flex: 1,
+    minHeight: 260,
     justifyContent: 'center',
     alignItems: 'center',
     width: '100%',
+  },
+  contactsLinksWrap: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    paddingBottom: 10,
+    marginBottom: 10,
+    gap: 10,
+  },
+  contactsLinkItem: {
+    gap: 2,
+  },
+  contactsLinkButton: {
+    alignSelf: 'flex-start',
+  },
+  contactsLinkText: {
+    color: '#2563eb',
+    fontSize: 14,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+  contactsLinkDescription: {
+    color: '#64748b',
+    fontSize: 12,
   },
   contactsTopActions: {
     flexDirection: 'row',
@@ -6182,7 +6892,8 @@ const styles = StyleSheet.create({
   },
   contactsList: {
     width: '100%',
-    maxHeight: 460,
+    flex: 1,
+    minHeight: 240,
   },
   contactsListContent: {
     paddingBottom: 6,
@@ -6209,6 +6920,28 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     backgroundColor: '#f8fafc',
   },
+  groupSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  groupSummaryRowPressable: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#d9e2f0',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#f8fafc',
+  },
+  groupSummaryDeleteButton: {
+    minWidth: 82,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   contactsSummaryRowText: {
     color: '#2563eb',
     fontWeight: '600',
@@ -6220,6 +6953,15 @@ const styles = StyleSheet.create({
   },
   contactsSummaryModalCard: {
     maxWidth: 560,
+  },
+  cloneGroupModalList: {
+    maxHeight: 280,
+    width: '100%',
+    marginTop: 8,
+    marginBottom: 12,
+  },
+  cloneGroupModalListContent: {
+    paddingBottom: 8,
   },
   contactSummaryModalOverlay: {
     paddingTop: 110,
@@ -6270,6 +7012,45 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
     padding: 12,
     marginTop: 4,
+  },
+  groupsManageScreen: {
+    flex: 1,
+    width: '100%',
+    minHeight: '100%',
+    height: '100%',
+  },
+  groupsManageColumns: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginTop: 4,
+  },
+  groupsManageColumn: {
+    flex: 1,
+    minWidth: 280,
+  },
+  groupsManagePaginationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 10,
+    gap: 8,
+  },
+  groupsManagePageButton: {
+    minWidth: 72,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  groupsManagePageButtonDisabled: {
+    opacity: 0.45,
+  },
+  groupsManageAddButton: {
+    marginTop: 0,
+    marginBottom: 0,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
   },
   groupSummaryMemberRow: {
     paddingVertical: 6,
@@ -6561,11 +7342,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 4,
   },
-  calendarSyncProviderLabel: {
-    color: '#0f172a',
-    fontWeight: '700',
-    fontSize: 14,
-  },
   calendarSyncStatusPill: {
     borderRadius: 999,
     paddingHorizontal: 10,
@@ -6708,7 +7484,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   modalOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(15, 23, 42, 0.35)',
     justifyContent: 'center',
     alignItems: 'center',

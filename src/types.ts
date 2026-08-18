@@ -29,7 +29,7 @@ export interface SpecialDateEvent {
   eventAllDay: boolean;
   reminderAllDay: boolean;
   frequency: ReminderFrequency;
-  reminderMode?: 'none' | 'static' | 'variable';
+  reminderMode?: 'none' | 'default' | 'static' | 'variable';
   notes?: string;
   eventLocation?: EventLocationAddress;
   notified?: boolean;

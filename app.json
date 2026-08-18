@@ -21,6 +21,12 @@
           "calendarPermission": "Allow Remind Me This to access your calendars so it can sync your reminders.",
           "remindersPermission": "Allow Remind Me This to access reminders."
         }
+      ],
+      [
+        "expo-contacts",
+        {
+          "contactsPermission": "Allow Remind Me This to access your contacts so you can import them into your reminder contact list."
+        }
       ]
     ],
     "ios": {
@@ -41,7 +47,8 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.READ_CALENDAR",
-        "android.permission.WRITE_CALENDAR"
+        "android.permission.WRITE_CALENDAR",
+        "android.permission.READ_CONTACTS"
       ]
     },
     "web": {
