@@ -267,6 +267,49 @@ const smsProvider: SmsProvider = (() => {
   return new NoOpSmsProvider();
 })();
 
+// In-memory fixed-window rate limiter for the mobile verification flow.
+// Resets on process restart and is per-instance only (not shared across
+// multiple dynos) — acceptable for this app's current single-instance scale.
+interface RateLimitBucket {
+  count: number;
+  windowStart: number;
+}
+
+const rateLimitBuckets = new Map<string, RateLimitBucket>();
+
+const isRateLimited = (key: string, maxAttempts: number, windowMs: number): boolean => {
+  const now = Date.now();
+  const bucket = rateLimitBuckets.get(key);
+
+  if (!bucket || now - bucket.windowStart > windowMs) {
+    rateLimitBuckets.set(key, { count: 1, windowStart: now });
+    return false;
+  }
+
+  bucket.count += 1;
+  return bucket.count > maxAttempts;
+};
+
+const clearRateLimit = (key: string) => {
+  rateLimitBuckets.delete(key);
+};
+
+setInterval(() => {
+  const now = Date.now();
+  const maxWindowMs = 60 * 60 * 1000;
+  rateLimitBuckets.forEach((bucket, key) => {
+    if (now - bucket.windowStart > maxWindowMs) {
+      rateLimitBuckets.delete(key);
+    }
+  });
+}, 15 * 60 * 1000).unref();
+
+const MOBILE_VERIFICATION_START_PER_USER = { max: 5, windowMs: 60 * 60 * 1000 };
+const MOBILE_VERIFICATION_START_PER_USER_SHORT = { max: 1, windowMs: 30 * 1000 };
+const MOBILE_VERIFICATION_START_PER_NUMBER = { max: 5, windowMs: 60 * 60 * 1000 };
+const MOBILE_VERIFICATION_START_PER_IP = { max: 10, windowMs: 60 * 60 * 1000 };
+const MOBILE_VERIFICATION_VERIFY_ATTEMPTS = { max: 5, windowMs: 10 * 60 * 1000 };
+
 const normalizePhoneNumberForComparison = (value: string) => String(value || '').replace(/\D/g, '').slice(0, 10);
 
 const getSafeTimeZone = (value?: string) => {
@@ -1659,6 +1702,15 @@ app.post('/users/:userId/mobile-verification/start', async (req, res) => {
       return res.status(400).json({ error: 'valid mobile number is required for verification' });
     }
 
+    if (isRateLimited(`mobile-verify-start:ip:${req.ip}`, MOBILE_VERIFICATION_START_PER_IP.max, MOBILE_VERIFICATION_START_PER_IP.windowMs)
+      || isRateLimited(`mobile-verify-start:user-short:${userId}`, MOBILE_VERIFICATION_START_PER_USER_SHORT.max, MOBILE_VERIFICATION_START_PER_USER_SHORT.windowMs)
+      || isRateLimited(`mobile-verify-start:user:${userId}`, MOBILE_VERIFICATION_START_PER_USER.max, MOBILE_VERIFICATION_START_PER_USER.windowMs)
+      || isRateLimited(`mobile-verify-start:number:${normalizedMobile}`, MOBILE_VERIFICATION_START_PER_NUMBER.max, MOBILE_VERIFICATION_START_PER_NUMBER.windowMs)) {
+      return res.status(429).json({ error: 'Too many verification code requests. Please wait and try again.' });
+    }
+
+    clearRateLimit(`mobile-verify-attempts:${userId}`);
+
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
     const verificationExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
@@ -1707,6 +1759,10 @@ app.post('/users/:userId/mobile-verification/verify', async (req, res) => {
       return res.status(400).json({ error: 'verification code must be 6 digits' });
     }
 
+    if (isRateLimited(`mobile-verify-attempts:${userId}`, MOBILE_VERIFICATION_VERIFY_ATTEMPTS.max, MOBILE_VERIFICATION_VERIFY_ATTEMPTS.windowMs)) {
+      return res.status(429).json({ error: 'Too many incorrect attempts. Request a new verification code.' });
+    }
+
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -1740,6 +1796,8 @@ app.post('/users/:userId/mobile-verification/verify', async (req, res) => {
         mobileVerificationCodeExpiresAt: null,
       },
     });
+
+    clearRateLimit(`mobile-verify-attempts:${userId}`);
 
     return res.json({ success: true, mobileVerified: true });
   } catch (error) {
