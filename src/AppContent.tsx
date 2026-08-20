@@ -19,6 +19,7 @@ import {
   View,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
+import * as Contacts from 'expo-contacts/legacy';
 import {
   createShareInvite,
   findUserByEmail,
@@ -39,6 +40,7 @@ import {
   loadReminderSoundSettings,
   saveEvents,
   sendShareEmailNotification,
+  sendShareSmsNotification,
   sendReminderEmailNotification,
   sendReminderSmsNotification,
   subscribeApiStorageStatus,
@@ -846,32 +848,6 @@ const normalizeStateCode = (value: string) => {
 const getStateLabelFromCode = (code: string) => {
   const option = usStateOptions.find((entry) => entry.code === code);
   return option ? option.label : code;
-};
-
-const openExternalComposer = async (url: string) => {
-  const isMailOrSmsUrl = /^mailto:|^sms:/i.test(url);
-
-  if (Platform.OS === 'web') {
-    // VS Code's embedded browser can navigate to raw mailto/sms URLs and appear blank.
-    // Return false so caller can use a fallback instead of hanging the app page.
-    if (isMailOrSmsUrl) {
-      return false;
-    }
-
-    const openFn = (globalThis as { open?: (url?: string, target?: string, features?: string) => Window | null }).open;
-    if (typeof openFn === 'function') {
-      const opened = openFn(url, '_blank', 'noopener,noreferrer');
-      return Boolean(opened);
-    }
-  }
-
-  const canOpen = await Linking.canOpenURL(url);
-  if (!canOpen) {
-    return false;
-  }
-
-  await Linking.openURL(url);
-  return true;
 };
 
 const getAcceptLinkForCurrentPlatform = (recipientUserId: string, eventId: string) => {
@@ -2100,8 +2076,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [sharingEvent, setSharingEvent] = useState<SpecialDateEvent | null>(null);
   const [shareContacts, setShareContacts] = useState<ShareContact[]>([]);
   const [shareGroups, setShareGroups] = useState<ShareGroup[]>([]);
-  const [selectedShareContactId, setSelectedShareContactId] = useState('');
-  const [selectedShareGroupId, setSelectedShareGroupId] = useState('');
+  const [shareQuickAddPanel, setShareQuickAddPanel] = useState<'contact' | 'group' | null>(null);
   const [shareManualEmail, setShareManualEmail] = useState('');
   const [shareManualPhone, setShareManualPhone] = useState('');
   const [shareRecipients, setShareRecipients] = useState<ShareRecipient[]>([]);
@@ -2142,17 +2117,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const shareSelectableContacts = useMemo(
     () => shareContacts.filter((contact) => !contact.deletedAt),
     [shareContacts],
-  );
-  const shareContactOptions = useMemo(
-    () => shareSelectableContacts.map((contact) => ({
-      label: `${contact.firstName}${contact.lastName ? ` ${contact.lastName}` : ''}`,
-      value: contact.id,
-    })),
-    [shareSelectableContacts],
-  );
-  const shareGroupOptions = useMemo(
-    () => shareGroups.map((group) => ({ label: group.name, value: group.id })),
-    [shareGroups],
   );
   const activeClockIntervalMinutes = useMemo(
     () => normalizeClockIntervalMinutes(defaultReminderTime.clockIntervalMinutes),
@@ -2319,8 +2283,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       const snapshot = normalizeShareContactsSnapshot(rawContacts);
       setShareContacts(snapshot.contacts);
       setShareGroups(snapshot.groups);
-      setSelectedShareContactId((current) => current || snapshot.contacts[0]?.id || '');
-      setSelectedShareGroupId((current) => current || snapshot.groups[0]?.id || '');
     }).catch((error) => {
       console.warn('Unable to load share contacts', error);
       if (isActive) {
@@ -2351,12 +2313,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setShareRecipients((current) => current.filter((recipient) => recipient.key !== key));
   }, []);
 
-  const addSelectedShareContact = useCallback(() => {
-    const contact = shareSelectableContacts.find((entry) => entry.id === selectedShareContactId);
-    if (!contact) {
-      return;
-    }
-
+  const addContactRecipient = useCallback((contact: ShareContact) => {
     appendShareRecipients([{
       key: `contact:${contact.id}`,
       label: `${contact.firstName}${contact.lastName ? ` ${contact.lastName}` : ''}`,
@@ -2364,14 +2321,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       phone: contact.mobileNumber ? formatPhoneNumberInput(contact.mobileNumber) : undefined,
       source: 'contact',
     }]);
-  }, [appendShareRecipients, selectedShareContactId, shareSelectableContacts]);
+  }, [appendShareRecipients]);
 
-  const addSelectedShareGroup = useCallback(() => {
-    const group = shareGroups.find((entry) => entry.id === selectedShareGroupId);
-    if (!group) {
-      return;
-    }
-
+  const addGroupRecipients = useCallback((group: ShareGroup) => {
     const groupRecipients = group.contactIds
       .map((contactId) => shareSelectableContacts.find((entry) => entry.id === contactId) || null)
       .filter((entry): entry is ShareContact => entry !== null)
@@ -2384,7 +2336,61 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       }));
 
     appendShareRecipients(groupRecipients);
-  }, [appendShareRecipients, selectedShareGroupId, shareGroups, shareSelectableContacts]);
+  }, [appendShareRecipients, shareSelectableContacts]);
+
+  const pickDeviceContactForShare = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      setValidationMessage('Device contacts are not available in the web build. Use an iPhone or iPad app build.');
+      return;
+    }
+
+    try {
+      const permission = await Contacts.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        setValidationMessage('Allow Contacts access on your iPhone to add a contact to this share.');
+        return;
+      }
+
+      const selectedContact = await Contacts.presentContactPickerAsync();
+      if (!selectedContact) {
+        return;
+      }
+
+      const fullContact = selectedContact.id
+        ? await Contacts.getContactByIdAsync(String(selectedContact.id), [
+            Contacts.Fields.Name,
+            Contacts.Fields.FirstName,
+            Contacts.Fields.LastName,
+            Contacts.Fields.Emails,
+            Contacts.Fields.PhoneNumbers,
+          ])
+        : selectedContact;
+
+      const source = fullContact || selectedContact;
+      const rawName = String(source.name || '').trim();
+      const firstName = String(source.firstName || '').trim() || rawName;
+      const lastName = String(source.lastName || '').trim();
+      const email = String(source.emails?.[0]?.email || '').trim().toLowerCase();
+      const mobileNumber = String(source.phoneNumbers?.[0]?.number || '').trim();
+
+      if (!email && !mobileNumber) {
+        setValidationMessage('That iPhone contact does not have an email or mobile number to share with.');
+        return;
+      }
+
+      appendShareRecipients([{
+        key: `contact:device:${source.id || Date.now()}`,
+        label: `${firstName}${lastName ? ` ${lastName}` : ''}` || 'iPhone contact',
+        email: email || undefined,
+        phone: mobileNumber ? formatPhoneNumberInput(mobileNumber) : undefined,
+        source: 'contact',
+      }]);
+      setShareQuickAddPanel(null);
+    } catch (error) {
+      console.warn('Unable to pick an iPhone contact for sharing', error);
+      setValidationMessage('Unable to open iPhone contacts right now.');
+    }
+  }, [appendShareRecipients]);
 
   const addManualEmailRecipient = useCallback(() => {
     const normalizedEmail = shareManualEmail.trim().toLowerCase();
@@ -4252,6 +4258,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setShareManualPhone('');
     setShareRecipients([]);
     setShareMessage('');
+    setShareQuickAddPanel(null);
     setValidationMessage(null);
     setCurrentView('share');
   };
@@ -4270,6 +4277,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setShareManualPhone('');
     setShareRecipients([]);
     setShareMessage('');
+    setShareQuickAddPanel(null);
     setValidationMessage(null);
     setCurrentView('manage-events');
   };
@@ -4386,12 +4394,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       }
 
       let matchedRecipientUserId = '';
+      let matchedRecipientHasVerifiedPhone = false;
       let acceptLinkForKnownRecipient: string | undefined;
 
       if (normalizedEmail) {
         const matchedUser = await findUserByEmail(normalizedEmail);
         if (matchedUser?.id) {
           matchedRecipientUserId = matchedUser.id;
+          matchedRecipientHasVerifiedPhone = Boolean(matchedUser.mobileNumberVerified);
           acceptLinkForKnownRecipient = getAcceptLinkForCurrentPlatform(matchedUser.id, sharingEvent.id);
         }
       }
@@ -4400,13 +4410,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         const matchedByPhoneUser = await findUserByPhone(normalizedRecipientPhone);
         if (matchedByPhoneUser?.id) {
           matchedRecipientUserId = matchedByPhoneUser.id;
+          matchedRecipientHasVerifiedPhone = Boolean(matchedByPhoneUser.mobileNumberVerified);
           acceptLinkForKnownRecipient = getAcceptLinkForCurrentPlatform(matchedByPhoneUser.id, sharingEvent.id);
         }
       }
 
       const sharePayload = buildShareDetailsMessage(sharingEvent, senderName, shareMessage, acceptLinkForKnownRecipient);
-
-      const shouldAlsoUseContactChannels = recipient.source === 'contact' || recipient.source === 'group';
 
       if (matchedRecipientUserId) {
         inviteRecipients.add(matchedRecipientUserId);
@@ -4414,9 +4423,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         launchedAnyChannel = true;
       }
 
+      // Even when the recipient already has an account, still send the email/text so they
+      // get an actual notification on their phone/inbox — the in-app invite popup alone is
+      // only visible if they happen to open the app while signed in.
       let deliveredToRecipient = false;
 
-      if (!matchedRecipientUserId && normalizedEmail && validateEmail(normalizedEmail)) {
+      if (normalizedEmail && validateEmail(normalizedEmail)) {
         if (sentEmails.has(normalizedEmail)) {
           deliveryErrors.push(`Skipped duplicate email for ${recipient.label}.`);
         } else {
@@ -4439,25 +4451,25 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         }
       }
 
-      if (!matchedRecipientUserId && normalizedRecipientPhone && validatePhoneNumber(recipient.phone || '')) {
+      // Text is only ever sent to a matched recipient whose own account already has a
+      // validated mobile number — never to an arbitrary phone number a sender types in.
+      // That keeps share SMS within the same consent boundary as reminder SMS.
+      if (matchedRecipientUserId && matchedRecipientHasVerifiedPhone && normalizedRecipientPhone) {
         if (sentPhones.has(normalizedRecipientPhone)) {
           deliveryErrors.push(`Skipped duplicate phone for ${recipient.label}.`);
         } else {
           sentPhones.add(normalizedRecipientPhone);
-          const smsUrl = `sms:${normalizedRecipientPhone}?body=${encodeURIComponent(sharePayload.text)}`;
-          try {
-            const openedSms = await openExternalComposer(smsUrl);
-            if (openedSms) {
-              launchedAnyChannel = true;
-              deliveredToRecipient = true;
-              successfulDeliveries.push(`Text to ${recipient.label}`);
-            } else {
-              deliveryErrors.push(`Text messaging is not available for ${recipient.label}.`);
-              shareDraftParts.push(`TEXT\nTo: ${recipient.phone}\n\n${sharePayload.text}`);
-            }
-          } catch {
-            deliveryErrors.push(`Unable to open text composer for ${recipient.label}.`);
-            shareDraftParts.push(`TEXT\nTo: ${recipient.phone}\n\n${sharePayload.text}`);
+          const smsSent = await sendShareSmsNotification({
+            recipientUserId: matchedRecipientUserId,
+            body: sharePayload.text,
+          });
+
+          if (smsSent) {
+            launchedAnyChannel = true;
+            deliveredToRecipient = true;
+            successfulDeliveries.push(`Text to ${recipient.label}`);
+          } else {
+            deliveryErrors.push(`Unable to send text to ${recipient.label}.`);
           }
         }
       }
@@ -4812,6 +4824,24 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     return getHolidayEntries(calendarDefaults, [currentYear, currentYear + 1]);
   }, [calendarDefaults]);
 
+  const filteredHolidayEntriesForCalendar = useMemo(() => (
+    holidayEntries.filter((holiday) => {
+      if (!savedEventsFilterTypes.length) {
+        return true;
+      }
+      if (savedEventsFilterTypes.includes('holidays-public') && holiday.category === 'us-public') {
+        return true;
+      }
+      if (savedEventsFilterTypes.includes('holidays-observances') && holiday.category === 'observance') {
+        return true;
+      }
+      if (savedEventsFilterTypes.includes('holidays-religious') && holiday.category !== 'us-public' && holiday.category !== 'observance') {
+        return true;
+      }
+      return false;
+    })
+  ), [holidayEntries, savedEventsFilterTypes]);
+
   const savedEventsSummaryRows = useMemo(() => {
     const eventRows: SavedEventsSummaryRow[] = filteredSavedEvents.map((event) => {
       const eventDate = isAllDaySpecialDateEvent(event)
@@ -4897,7 +4927,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     const targetDay = selectedCalendarDate.getDate();
     const targetMonth = selectedCalendarDate.getMonth();
     const targetYear = selectedCalendarDate.getFullYear();
-    const entries: Array<{ kind: 'event'; event: SpecialDateEvent }> = [];
+    const entries: Array<{ kind: 'event'; event: SpecialDateEvent } | { kind: 'holiday'; holiday: HolidayEntry }> = [];
 
     filteredSavedEvents.forEach((event) => {
       const eventDate = isAllDaySpecialDateEvent(event)
@@ -4908,8 +4938,22 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       }
     });
 
+    filteredHolidayEntriesForCalendar.forEach((holiday) => {
+      if (holiday.date.getFullYear() === targetYear && holiday.date.getMonth() === targetMonth && holiday.date.getDate() === targetDay) {
+        entries.push({ kind: 'holiday', holiday });
+      }
+    });
+
     return entries;
-  }, [filteredSavedEvents, selectedCalendarDate]);
+  }, [filteredSavedEvents, filteredHolidayEntriesForCalendar, selectedCalendarDate]);
+
+  useEffect(() => {
+    if (savedEventsView !== 'calendar') {
+      setCalendarMonth(new Date());
+      setSelectedCalendarDate(null);
+      setExpandedCalendarEventId(null);
+    }
+  }, [savedEventsView]);
 
   useEffect(() => {
     if (!shouldShowSavedEventsSubtypeFilter) {
@@ -5551,13 +5595,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           {savedEventTypeOptions.map((option) => {
             const optionStyle = getSavedEventsFilterOptionStyle(option.value);
             const isSelected = option.value === 'all' ? savedEventsFilterTypes.length === 0 : savedEventsFilterTypes.includes(option.value);
+            const isAllOption = option.value === 'all';
 
             return (
               <TouchableOpacity
                 key={option.value}
                 style={[
                   styles.filterPill,
-                  optionStyle.color ? { backgroundColor: optionStyle.color } : styles.filterPillNeutral,
+                  isAllOption
+                    ? styles.filterPillAll
+                    : optionStyle.color ? { backgroundColor: optionStyle.color } : styles.filterPillNeutral,
                   isSelected && styles.filterPillSelected,
                 ]}
                 onPress={() => {
@@ -5567,7 +5614,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 activeOpacity={0.8}
               >
                 {optionStyle.icon ? <Text style={styles.filterPillIcon}>{optionStyle.icon}</Text> : null}
-                <Text style={[styles.filterPillText, optionStyle.color ? styles.filterPillTextColored : styles.filterPillTextNeutral]}>
+                <Text
+                  style={[
+                    styles.filterPillText,
+                    isAllOption
+                      ? styles.filterPillTextOnBlack
+                      : optionStyle.color ? styles.filterPillTextColored : styles.filterPillTextNeutral,
+                  ]}
+                >
                   {option.label}
                 </Text>
               </TouchableOpacity>
@@ -5745,6 +5799,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                   : new Date(event.eventDateTime);
                 return day.toDateString() === eventDate.toDateString();
               });
+              const hasHoliday = filteredHolidayEntriesForCalendar.some((holiday) => (
+                day.toDateString() === holiday.date.toDateString()
+              ));
               const isSelected = selectedCalendarDate && day.toDateString() === selectedCalendarDate.toDateString();
               const isToday = day.toDateString() === new Date().toDateString();
 
@@ -5759,6 +5816,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                   }}
                 >
                   <Text style={[styles.dayText, isToday && styles.todayDayCellText, isSelected && styles.selectedDayText]}>{day.getDate()}</Text>
+                  {hasHoliday ? <View style={styles.dayCellHolidayDot} /> : null}
                 </TouchableOpacity>
               );
             })}
@@ -5767,7 +5825,23 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           {selectedCalendarDate ? (
             <View style={styles.calendarDateBelowPanel}>
               {selectedDateEntries.length ? (
-                selectedDateEntries.map(({ event }, index) => {
+                selectedDateEntries.map((entry, index) => {
+                  if (entry.kind === 'holiday') {
+                    const { holiday } = entry;
+                    return (
+                      <View
+                        key={holiday.id}
+                        style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: holiday.color }]}
+                      >
+                        <Text style={styles.summaryLinkIcon}>{holiday.icon}</Text>
+                        <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
+                          {holiday.name}
+                        </Text>
+                      </View>
+                    );
+                  }
+
+                  const { event } = entry;
                   const isExpanded = expandedCalendarEventId === event.id;
 
                   if (!isExpanded) {
@@ -5825,7 +5899,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 })
               ) : (
                 <View style={styles.calendarDateDetailCard}>
-                  <Text style={styles.helperText}>No events scheduled on this date.</Text>
+                  <Text style={styles.helperText}>No events or holidays on this date.</Text>
                 </View>
               )}
             </View>
@@ -6750,9 +6824,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       {sharingEvent ? (
         <View style={styles.card}>
           <Text style={styles.label}>Event</Text>
-          <Text style={styles.helperText}>{sharingEvent.title}</Text>
-          <Text style={styles.helperText}>{sharingEvent.people}</Text>
-          <Text style={styles.helperText}>{new Date(sharingEvent.eventDateTime).toLocaleString()}</Text>
+          <View style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: getEventSummaryColor(sharingEvent) }]}>
+            <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(sharingEvent)}</Text>
+            <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
+              {formatEventDateOnly(sharingEvent)} ({formatEventCountdownLabel(sharingEvent)}) • {sharingEvent.title} • {sharingEvent.people}{formatEventSummaryRowTimeSuffix(sharingEvent)}
+            </Text>
+          </View>
         </View>
       ) : null}
 
@@ -6774,6 +6851,71 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         ) : (
           <Text style={styles.helperText}>No recipients added yet.</Text>
         )}
+
+        <View style={styles.savedEventDetailsActionRow}>
+          <TouchableOpacity
+            style={styles.savedEventDetailActionPill}
+            onPress={() => setShareQuickAddPanel((current) => (current === 'contact' ? null : 'contact'))}
+          >
+            <Text style={styles.savedEventDetailActionText}>Add Contact</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.savedEventDetailActionPill}
+            onPress={() => setShareQuickAddPanel((current) => (current === 'group' ? null : 'group'))}
+          >
+            <Text style={styles.savedEventDetailActionText}>Add Group</Text>
+          </TouchableOpacity>
+        </View>
+
+        {shareQuickAddPanel === 'contact' ? (
+          <View style={styles.dropdownList}>
+            <TouchableOpacity
+              style={styles.dropdownListItem}
+              onPress={() => { void pickDeviceContactForShare(); }}
+            >
+              <Text style={styles.dropdownListItemText}>📱 Pick from iPhone Contacts</Text>
+            </TouchableOpacity>
+            {shareSelectableContacts.length ? (
+              shareSelectableContacts.map((contact) => (
+                <TouchableOpacity
+                  key={contact.id}
+                  style={styles.dropdownListItem}
+                  onPress={() => {
+                    addContactRecipient(contact);
+                    setShareQuickAddPanel(null);
+                  }}
+                >
+                  <Text style={styles.dropdownListItemText}>
+                    {contact.firstName}{contact.lastName ? ` ${contact.lastName}` : ''}
+                  </Text>
+                </TouchableOpacity>
+              ))
+            ) : (
+              <Text style={[styles.helperText, styles.dropdownListItem]}>No saved contacts yet.</Text>
+            )}
+          </View>
+        ) : null}
+
+        {shareQuickAddPanel === 'group' ? (
+          <View style={styles.dropdownList}>
+            {shareGroups.length ? (
+              shareGroups.map((group) => (
+                <TouchableOpacity
+                  key={group.id}
+                  style={styles.dropdownListItem}
+                  onPress={() => {
+                    addGroupRecipients(group);
+                    setShareQuickAddPanel(null);
+                  }}
+                >
+                  <Text style={styles.dropdownListItemText}>{group.name} ({group.contactIds.length})</Text>
+                </TouchableOpacity>
+              ))
+            ) : (
+              <Text style={[styles.helperText, styles.dropdownListItem]}>No groups saved yet. Create one in Settings → Groups.</Text>
+            )}
+          </View>
+        ) : null}
 
         <Text style={styles.label}>Add email</Text>
         <TextInput
@@ -7299,6 +7441,12 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   filterPillNeutral: {
     backgroundColor: colors.surfaceSubtle,
+  },
+  filterPillAll: {
+    backgroundColor: '#000000',
+  },
+  filterPillTextOnBlack: {
+    color: '#ffffff',
   },
   filterPillSelected: {
     borderColor: colors.textPrimary,
@@ -8294,6 +8442,13 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.dangerText,
     backgroundColor: colors.dangerBg,
+  },
+  dayCellHolidayDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: colors.warning,
+    marginTop: 2,
   },
   selectedDayCell: {
     backgroundColor: colors.primary,

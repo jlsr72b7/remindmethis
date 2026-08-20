@@ -1146,6 +1146,22 @@ export async function sendShareEmailNotification(payload: {
   }
 }
 
+export async function sendShareSmsNotification(payload: {
+  recipientUserId: string;
+  body: string;
+}) {
+  try {
+    await apiRequest<{ success: boolean }>('/notifications/share-sms', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return true;
+  } catch (error) {
+    console.warn('Share SMS notification failed', error);
+    return false;
+  }
+}
+
 export async function sendContactSupportMessage(payload: {
   userId?: string;
   userEmail?: string;
