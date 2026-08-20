@@ -469,12 +469,12 @@ const sendReminderSms = async (phoneNumber: string, payload: {
   );
 
   const messageLines = [
-    `Reminder: ${payload.eventTitle}`,
+    `Remind Me This: ${payload.eventTitle}`,
     `Who/What: ${payload.people}`,
     `Event date: ${eventDateLabel}`,
     ...(eventTimeLabel ? [`Event time: ${eventTimeLabel}`] : []),
     payload.notes ? `Notes: ${payload.notes}` : null,
-    'Automated message, please do not reply.',
+    'Msg and data rates may apply. Reply STOP to opt out, HELP for help.',
   ].filter(Boolean) as string[];
 
   await smsProvider.sendText(phoneNumber, messageLines.join('\n'));
