@@ -1318,6 +1318,16 @@ const isSameCalendarDay = (left: Date, right: Date) => (
   && left.getDate() === right.getDate()
 );
 
+// Timed events can only be reminded up to and including their start instant.
+// All-day events have no meaningful "start instant", so any time on the
+// event's own calendar day is a valid reminder time (but not a later day).
+const isReminderTimeWithinEventWindow = (reminderDate: Date, eventDate: Date, eventAllDay: boolean) => {
+  if (eventAllDay) {
+    return reminderDate.getTime() <= eventDate.getTime() || isSameCalendarDay(reminderDate, eventDate);
+  }
+  return reminderDate.getTime() <= eventDate.getTime();
+};
+
 const isAllDaySpecialDateEvent = (event: SpecialDateEvent) => {
   const normalizedTitle = event.title.toLowerCase().trim();
   if (normalizedTitle.endsWith(' party')) {
@@ -2992,6 +3002,19 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       return;
     }
 
+    const isAllDayForReminderCheck = isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay);
+    const eventDateForReminderCheck = new Date(form.eventDateTime);
+    if (isAllDayForReminderCheck) {
+      eventDateForReminderCheck.setHours(0, 0, 0, 0);
+    }
+
+    if (!isReminderTimeWithinEventWindow(nextReminderDate, eventDateForReminderCheck, isAllDayForReminderCheck)) {
+      setValidationMessage(isAllDayForReminderCheck
+        ? 'Reminder time cannot be after the day of the event.'
+        : 'Reminder time cannot be after the event start time.');
+      return;
+    }
+
     const isDuplicatePending = pendingVariableReminders.some((item) => new Date(item.reminderDateTime).getTime() === storedReminderTime);
 
     if (isDuplicatePending) {
@@ -3304,6 +3327,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         reminderDateValue.setHours(0, 0, 0, 0);
       }
       const reminderDateTimeInUtc = convertWallDateInTimeZoneToUtcIso(reminderDateValue, form.reminderTimeZone);
+
+      if (form.reminderMode === 'variable' && pendingVariableReminders.some((item) => (
+        !isReminderTimeWithinEventWindow(new Date(item.reminderDateTime), eventDateValue, isAllDay)
+      ))) {
+        setValidationMessage(isAllDay
+          ? 'One or more reminders are set after the day of the event.'
+          : 'One or more reminders are set after the event start time.');
+        return;
+      }
 
       const duplicateEvent = events.find((event) => isTrueDuplicateEvent(event, {
         title: resolvedEventType,
@@ -3951,6 +3983,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         reminderDateValue.setHours(0, 0, 0, 0);
       }
       const reminderDateTimeInUtc = convertWallDateInTimeZoneToUtcIso(reminderDateValue, form.reminderTimeZone);
+
+      if (form.reminderMode === 'variable' && pendingVariableReminders.some((item) => (
+        !isReminderTimeWithinEventWindow(new Date(item.reminderDateTime), eventDateValue, isAllDay)
+      ))) {
+        setValidationMessage(isAllDay
+          ? 'One or more reminders are set after the day of the event.'
+          : 'One or more reminders are set after the event start time.');
+        return;
+      }
 
       const duplicateEvent = events.find((event) => event.id !== editingEvent.id && isTrueDuplicateEvent(event, {
         title: resolvedEventType,

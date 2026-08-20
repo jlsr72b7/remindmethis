@@ -846,11 +846,22 @@ const processReminderQueue = async () => {
               || normalizedTitle.includes('anniversary')
               || String(job.event.frequency || '').trim().toLowerCase() === 'yearly';
 
-            if (isAnnual) {
+            const nextEventDateTime = isAnnual
+              ? moveAnnualEventDateToNextOccurrence(job.event.title, job.event.eventDateTime, Boolean(job.event.eventAllDay))
+              : job.event.eventDateTime;
+            // A default (non-variable) reminder firing does not mean the event's
+            // actual date has occurred — it may be a month/week/day-before
+            // reminder that fires well ahead of the real date. Only roll the
+            // event forward once its own date has genuinely passed, otherwise
+            // this advances birthdays/anniversaries a full cycle early.
+            const eventHasOccurred = isAnnual
+              && nextEventDateTime.getTime() !== new Date(job.event.eventDateTime).getTime();
+
+            if (eventHasOccurred) {
               await tx.event.update({
                 where: { id: job.event.id },
                 data: {
-                  eventDateTime: moveAnnualEventDateToNextOccurrence(job.event.title, job.event.eventDateTime, Boolean(job.event.eventAllDay)),
+                  eventDateTime: nextEventDateTime,
                   reminderDateTime: moveAnnualEventDateToNextOccurrence(job.event.title, job.event.reminderDateTime, Boolean(job.event.reminderAllDay)),
                   notified: false,
                   lastReminderTriggeredAt: null,
@@ -1055,19 +1066,25 @@ const isExpiredNonYearlyEvent = (title: string, eventDateTime: Date, frequency: 
 const moveAnnualEventDateToNextOccurrence = (title: string, eventDateTime: Date, eventAllDay: boolean) => {
   const normalizedTitle = String(title || '').trim().toLowerCase();
   const isAnnual = normalizedTitle.includes('birthday') || normalizedTitle.includes('anniversary');
-  const timestamp = new Date(eventDateTime).getTime();
+  const original = new Date(eventDateTime);
+  const timestamp = original.getTime();
   if (!isAnnual || !Number.isFinite(timestamp)) {
-    return new Date(eventDateTime);
+    return original;
   }
 
-  const candidate = new Date(eventDateTime);
-  if (eventAllDay) {
-    candidate.setHours(0, 0, 0, 0);
-  }
-
+  // Compare by calendar day (not wall-clock hour) for all-day items, but never
+  // discard the original hour/minute when returning a value: reminder
+  // timestamps for an all-day event still carry a real time-of-day (e.g. 9am),
+  // and zeroing it out here would both corrupt the scheduled time and make it
+  // look artificially "already passed", triggering a premature year rollover.
   const now = new Date();
-  if (candidate.getTime() >= now.getTime()) {
-    return candidate;
+  const comparisonDate = new Date(original);
+  if (eventAllDay) {
+    comparisonDate.setHours(0, 0, 0, 0);
+  }
+
+  if (comparisonDate.getTime() >= now.getTime()) {
+    return original;
   }
 
   const withSafeYear = (source: Date, year: number) => {
@@ -1080,16 +1097,14 @@ const moveAnnualEventDateToNextOccurrence = (title: string, eventDateTime: Date,
     return nextDate;
   };
 
-  let nextOccurrence = withSafeYear(candidate, now.getFullYear());
+  let nextOccurrence = withSafeYear(original, now.getFullYear());
+  let nextComparison = new Date(nextOccurrence);
   if (eventAllDay) {
-    nextOccurrence.setHours(0, 0, 0, 0);
+    nextComparison.setHours(0, 0, 0, 0);
   }
 
-  if (nextOccurrence.getTime() < now.getTime()) {
-    nextOccurrence = withSafeYear(candidate, now.getFullYear() + 1);
-    if (eventAllDay) {
-      nextOccurrence.setHours(0, 0, 0, 0);
-    }
+  if (nextComparison.getTime() < now.getTime()) {
+    nextOccurrence = withSafeYear(original, now.getFullYear() + 1);
   }
 
   return nextOccurrence;
