@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { FlatList, Modal, Platform, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { ThemeColors, useTheme } from './theme';
 
 interface TimePickerModalProps {
   visible: boolean;
@@ -25,6 +26,8 @@ export default function TimePickerModal({
   onSave,
   onCancel,
 }: TimePickerModalProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createTimePickerStyles(colors), [colors]);
   const [draftDate, setDraftDate] = useState<Date>(new Date(initialDate));
   const [webHour, setWebHour] = useState<number>(12);
   const [webMinute, setWebMinute] = useState<number>(0);
@@ -270,14 +273,14 @@ export default function TimePickerModal({
   );
 }
 
-const styles = StyleSheet.create({
+const createTimePickerStyles = (colors: ThemeColors) => StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.35)',
+    backgroundColor: colors.overlay,
     justifyContent: 'flex-end',
   },
   sheet: {
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderTopLeftRadius: 32,
     borderTopRightRadius: 32,
     paddingTop: 10,
@@ -289,20 +292,20 @@ const styles = StyleSheet.create({
     width: 56,
     height: 6,
     borderRadius: 999,
-    backgroundColor: '#9ca3af',
+    backgroundColor: colors.textPlaceholder,
     alignSelf: 'center',
     marginBottom: 14,
   },
   title: {
     fontSize: 48,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
     textAlign: 'center',
   },
   subtitle: {
     marginTop: 8,
     marginBottom: 10,
-    color: '#111827',
+    color: colors.textPrimary,
     fontSize: 18,
   },
   pickerWrap: {
@@ -321,16 +324,16 @@ const styles = StyleSheet.create({
   webColumn: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: colors.borderStrong,
     borderRadius: 14,
     padding: 10,
     alignItems: 'center',
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   webLabel: {
     fontSize: 14,
     fontWeight: '700',
-    color: '#334155',
+    color: colors.textSecondary,
     marginBottom: 6,
   },
   webWheelFrame: {
@@ -339,7 +342,7 @@ const styles = StyleSheet.create({
     position: 'relative',
     overflow: 'hidden',
     borderRadius: 10,
-    backgroundColor: '#f1f5f9',
+    backgroundColor: colors.surfaceSubtle,
   },
   webWheelHighlight: {
     position: 'absolute',
@@ -349,8 +352,8 @@ const styles = StyleSheet.create({
     height: WHEEL_ITEM_HEIGHT,
     borderTopWidth: 1,
     borderBottomWidth: 1,
-    borderColor: '#93c5fd',
-    backgroundColor: '#dbeafe',
+    borderColor: colors.primarySoft,
+    backgroundColor: colors.borderTint,
     opacity: 0.65,
     zIndex: 1,
   },
@@ -365,36 +368,36 @@ const styles = StyleSheet.create({
   webWheelText: {
     fontSize: 28,
     fontWeight: '700',
-    color: '#64748b',
+    color: colors.textTertiary,
   },
   webWheelTextActive: {
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
   },
   periodButton: {
     width: '100%',
     paddingVertical: 10,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#bfdbfe',
+    borderColor: colors.borderTint,
     alignItems: 'center',
     marginBottom: 8,
   },
   periodButtonActive: {
-    backgroundColor: '#0ea5e9',
-    borderColor: '#0ea5e9',
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
   },
   periodButtonText: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
   },
   periodButtonTextActive: {
-    color: '#fff',
+    color: colors.surface,
   },
   saveButton: {
     marginTop: 18,
     borderRadius: 999,
-    backgroundColor: '#0ea5e9',
+    backgroundColor: colors.primary,
     paddingVertical: 14,
     alignItems: 'center',
     justifyContent: 'center',
@@ -402,7 +405,7 @@ const styles = StyleSheet.create({
     width: '65%',
   },
   saveButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontSize: 20,
     fontWeight: '700',
     letterSpacing: 0.8,

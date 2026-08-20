@@ -15,6 +15,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
@@ -55,8 +56,30 @@ import {
 import { getDeviceTimeZone } from './timeZones';
 import TimePickerModal from './TimePickerModal';
 import { EventLocationAddress, ReminderFrequency, SpecialDateEvent, VariableReminderEntry } from './types';
+import { WIDGET_APP_GROUP_ID, WIDGET_DATA_KEY, WidgetSyncPayload } from './widgetSync';
+import WidgetBridgeModule from '../modules/widget-bridge/src/WidgetBridgeModule';
+import {
+  CalendarDefaultsSettings,
+  DEFAULT_CALENDAR_DEFAULTS_SETTINGS,
+  getCalendarDefaultsStorageKey,
+  getHolidayEntries,
+  HolidayEntry,
+  normalizeCalendarDefaultsSettings,
+  OBSERVANCE_HOLIDAY_COLOR,
+  OBSERVANCE_HOLIDAY_FILTER_ICON,
+  RELIGIOUS_HOLIDAY_FILTER_COLOR,
+  RELIGIOUS_HOLIDAY_FILTER_ICON,
+  US_PUBLIC_HOLIDAY_COLOR,
+  US_PUBLIC_HOLIDAY_ICON,
+} from './holidays';
+import { ThemeColors, useTheme } from './theme';
+import TooltipButton from './TooltipButton';
 
-type EventTypeValue = 'birthday' | 'party' | 'wedding' | 'anniversary' | 'medical' | 'dental' | 'work' | 'school' | 'other';
+type SavedEventsSummaryRow =
+  | { kind: 'event'; id: string; date: Date; event: SpecialDateEvent }
+  | { kind: 'holiday'; id: string; date: Date; holiday: HolidayEntry };
+
+type EventTypeValue = 'birthday' | 'party' | 'wedding' | 'anniversary' | 'medical' | 'dental' | 'work' | 'school' | 'travel' | 'sports' | 'other';
 type PartySubtypeValue = 'birthday' | 'anniversary' | 'retirement' | 'engagement' | 'holiday' | 'other';
 type MedicalSubtypeValue = 'appointment' | 'surgery' | 'blood-work' | 'radiology' | 'rehab' | 'other';
 type DentalSubtypeValue = 'cleaning' | 'extraction' | 'check-up' | 'root-canal' | 'bridge' | 'dentures' | 'cavities' | 'implants' | 'crown' | 'fitting' | 'other';
@@ -64,7 +87,7 @@ type WorkSubtypeValue = 'meeting' | 'review' | 'conference' | 'demo' | 'workshop
 type SchoolSubtypeValue = 'quiz' | 'test' | 'paper-due' | 'project-due' | 'class-presentation' | 'other';
 type ReminderModeValue = 'none' | 'default' | 'static' | 'variable';
 type TimePickerTarget = 'event-start' | 'event-end' | 'static-reminder' | 'pending-reminder';
-type SavedEventsFilterType = EventTypeValue | 'all';
+type SavedEventsFilterType = EventTypeValue | 'holidays-public' | 'holidays-observances' | 'holidays-religious' | 'all';
 type ReminderCandidate = {
   event: SpecialDateEvent;
   entry: VariableReminderEntry | null;
@@ -203,6 +226,8 @@ const eventTypeLabels: Record<EventTypeValue, string> = {
   dental: 'Dental',
   work: 'Work',
   school: 'School',
+  travel: 'Travel',
+  sports: 'Sports',
   other: 'Other',
 };
 
@@ -515,6 +540,138 @@ const getEventTitle = (
   }
 
   return eventTypeLabels[eventType];
+};
+
+type EventSummaryCategory =
+  | 'birthday'
+  | 'anniversary'
+  | 'wedding'
+  | 'medical'
+  | 'dental'
+  | 'work'
+  | 'school'
+  | 'travel'
+  | 'sports'
+  | 'retirement'
+  | 'engagement'
+  | 'holiday'
+  | 'party'
+  | 'other';
+
+const EVENT_SUMMARY_COLORS: Record<EventSummaryCategory, string> = {
+  birthday: '#4169E1',
+  anniversary: '#5B2C87',
+  medical: '#DC2626',
+  school: '#16A34A',
+  work: '#EA580C',
+  dental: '#8B4513',
+  wedding: '#B8860B',
+  party: '#5DADE2',
+  engagement: '#EC4899',
+  retirement: '#8E8E93',
+  holiday: '#A68A64',
+  travel: '#0D9488',
+  sports: '#9F1239',
+  other: '#C2410C',
+};
+
+const EVENT_SUMMARY_ICONS: Record<EventSummaryCategory, string> = {
+  birthday: '🎂',
+  anniversary: '💑',
+  wedding: '💒',
+  medical: '🩺',
+  dental: '🦷',
+  work: '💼',
+  school: '🎓',
+  retirement: '🏖️',
+  engagement: '💍',
+  holiday: '🎊',
+  party: '🎉',
+  travel: '✈️',
+  sports: '⚽',
+  other: '📌',
+};
+
+const schoolSubtypeTitleSet = new Set(
+  Object.entries(schoolSubtypeLabels).filter(([key]) => key !== 'other').map(([, label]) => label),
+);
+
+const getEventSummaryCategory = (event: SpecialDateEvent): EventSummaryCategory => {
+  const normalizedTitle = event.title.toLowerCase().trim();
+
+  if (normalizedTitle === 'birthday' || normalizedTitle === 'birthday party' || normalizedTitle.endsWith('birthday party')) {
+    return 'birthday';
+  }
+
+  if (normalizedTitle === 'anniversary' || normalizedTitle === 'anniversary party' || normalizedTitle.endsWith('anniversary party')) {
+    return 'anniversary';
+  }
+
+  if (normalizedTitle === 'wedding') {
+    return 'wedding';
+  }
+
+  if (normalizedTitle === 'medical' || normalizedTitle.startsWith('medical ')) {
+    return 'medical';
+  }
+
+  if (normalizedTitle === 'dental' || normalizedTitle.startsWith('dental ')) {
+    return 'dental';
+  }
+
+  if (normalizedTitle === 'work' || normalizedTitle.startsWith('work ')) {
+    return 'work';
+  }
+
+  if (normalizedTitle === 'school' || schoolSubtypeTitleSet.has(event.title.trim())) {
+    return 'school';
+  }
+
+  if (normalizedTitle === 'travel' || normalizedTitle.startsWith('travel ')) {
+    return 'travel';
+  }
+
+  if (normalizedTitle === 'sports' || normalizedTitle.startsWith('sports ')) {
+    return 'sports';
+  }
+
+  if (normalizedTitle === 'retirement party') {
+    return 'retirement';
+  }
+
+  if (normalizedTitle === 'engagement party') {
+    return 'engagement';
+  }
+
+  if (normalizedTitle === 'holiday party') {
+    return 'holiday';
+  }
+
+  if (normalizedTitle === 'party') {
+    return 'party';
+  }
+
+  return 'other';
+};
+
+const getEventSummaryColor = (event: SpecialDateEvent): string => EVENT_SUMMARY_COLORS[getEventSummaryCategory(event)];
+
+const getEventSummaryIcon = (event: SpecialDateEvent): string => EVENT_SUMMARY_ICONS[getEventSummaryCategory(event)];
+
+const getSavedEventsFilterOptionStyle = (value: SavedEventsFilterType): { color: string | null; icon: string | null } => {
+  if (value === 'all') {
+    return { color: null, icon: null };
+  }
+  if (value === 'holidays-public') {
+    return { color: US_PUBLIC_HOLIDAY_COLOR, icon: US_PUBLIC_HOLIDAY_ICON };
+  }
+  if (value === 'holidays-observances') {
+    return { color: OBSERVANCE_HOLIDAY_COLOR, icon: OBSERVANCE_HOLIDAY_FILTER_ICON };
+  }
+  if (value === 'holidays-religious') {
+    return { color: RELIGIOUS_HOLIDAY_FILTER_COLOR, icon: RELIGIOUS_HOLIDAY_FILTER_ICON };
+  }
+  return { color: EVENT_SUMMARY_COLORS[value], icon: EVENT_SUMMARY_ICONS[value] };
 };
 
 const normalizeDuplicateText = (value: string) => String(value || '').trim().toLowerCase();
@@ -1745,8 +1902,6 @@ interface AppContentProps {
   userId?: string;
   userEmail?: string;
   defaultReminderTimeZone?: string;
-  onOpenContacts?: () => void;
-  onOpenCalendarSync?: () => void;
   pendingBirthdayImports?: ContactBirthdayImport[];
   onBirthdayImportsProcessed?: () => void;
 }
@@ -1849,7 +2004,11 @@ const normalizeShareContactsSnapshot = (raw: string | null): { contacts: ShareCo
   }
 };
 
-export default function AppContent({ userId, userEmail, defaultReminderTimeZone, onOpenContacts, onOpenCalendarSync, pendingBirthdayImports, onBirthdayImportsProcessed }: AppContentProps) {
+export default function AppContent({ userId, userEmail, defaultReminderTimeZone, pendingBirthdayImports, onBirthdayImportsProcessed }: AppContentProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createAppContentStyles(colors), [colors]);
+  const { height: windowHeight } = useWindowDimensions();
+  const summaryPageSize = Math.max(5, Math.floor((windowHeight - 310) / 60));
   const apiStorageEnabled = isApiStorageEnabled();
   const effectiveReminderTimeZone = defaultReminderTimeZone || DEVICE_TIME_ZONE;
   const [events, setEvents] = useState<SpecialDateEvent[]>([]);
@@ -1877,7 +2036,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [isDeletingConfirmedItem, setIsDeletingConfirmedItem] = useState(false);
   const [isDeletingConfirmedEvent, setIsDeletingConfirmedEvent] = useState(false);
   const [remindersForEventId, setRemindersForEventId] = useState<string | null>(null);
-  const [currentView, setCurrentView] = useState<'landing' | 'create' | 'share' | 'manage-events' | 'manage-reminders'>('landing');
+  const [currentView, setCurrentView] = useState<'create' | 'share' | 'manage-events' | 'manage-reminders'>('manage-events');
+  const [calendarDefaults, setCalendarDefaults] = useState<CalendarDefaultsSettings>(DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
   const [landingTickerVersion, setLandingTickerVersion] = useState(0);
   const previousViewRef = useRef(currentView);
   const [viewVersion, setViewVersion] = useState(0);
@@ -1894,13 +2054,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [savedRemindersView, setSavedRemindersView] = useState<'list' | 'calendar' | 'summary'>('summary');
   const [isManageEventsVisible, setIsManageEventsVisible] = useState(false);
   const [isManageRemindersVisible, setIsManageRemindersVisible] = useState(false);
-  const [savedEventsFilterType, setSavedEventsFilterType] = useState<SavedEventsFilterType>('all');
+  const [savedEventsFilterTypes, setSavedEventsFilterTypes] = useState<SavedEventsFilterType[]>([]);
   const [savedEventsFilterSubtype, setSavedEventsFilterSubtype] = useState<string>('all');
   const [isSavedEventsTypeFilterVisible, setIsSavedEventsTypeFilterVisible] = useState(false);
   const [isSavedEventsSubtypeFilterVisible, setIsSavedEventsSubtypeFilterVisible] = useState(false);
   const [savedEventsSummaryPage, setSavedEventsSummaryPage] = useState(0);
   const [savedRemindersSummaryPage, setSavedRemindersSummaryPage] = useState(0);
   const [selectedCalendarDate, setSelectedCalendarDate] = useState<Date | null>(null);
+  const [expandedCalendarEventId, setExpandedCalendarEventId] = useState<string | null>(null);
   const [selectedReminderCalendarDate, setSelectedReminderCalendarDate] = useState<Date | null>(null);
   const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
   const [savedRemindersCalendarMonth, setSavedRemindersCalendarMonth] = useState<Date>(new Date());
@@ -3244,7 +3405,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         return;
       }
 
-      setCurrentView('landing');
+      setCurrentView('manage-events');
 
       const savedMessage = variableReminderEntries.length > 0
         ? 'Your event and reminder(s) have been saved.'
@@ -3296,7 +3457,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setSelectedEventPopupDate(null);
     setSelectedReminderPopup(null);
     setSelectedReminderCalendarDate(null);
-    setCurrentView('landing');
+    setCurrentView('manage-events');
     setSelectedSummaryEventId(activeReminderEntry.event.id);
   };
 
@@ -3498,17 +3659,52 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     return `Event: ${eventDateLabel} • ${formatEventTimeOnlyLabel(event)}`;
   };
 
+  const formatDateOnlyLabel = (date: Date) => (
+    date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  );
+
+  const formatCountdownLabelForDate = (date: Date) => {
+    const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const diffDays = Math.round((startOfDay.getTime() - startOfToday.getTime()) / (24 * 60 * 60 * 1000));
+
+    if (diffDays === 0) {
+      return 'Today';
+    }
+    if (diffDays === 1) {
+      return '1 day';
+    }
+    if (diffDays > 1) {
+      return `${diffDays} days`;
+    }
+    if (diffDays === -1) {
+      return '1 day ago';
+    }
+    return `${Math.abs(diffDays)} days ago`;
+  };
+
   const formatEventDateOnly = (event: SpecialDateEvent) => {
     const isAllDay = isAllDaySpecialDateEvent(event);
     const startDate = isAllDay
       ? getLocalDateFromUtcDay(event.eventDateTime)
       : new Date(event.eventDateTime);
 
-    return startDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    return formatDateOnlyLabel(startDate);
   };
 
   const formatEventDateLabel = (event: SpecialDateEvent) => {
     return `Event Date: ${formatEventDateOnly(event)}`;
+  };
+
+  const formatEventCountdownLabel = (event: SpecialDateEvent) => {
+    const isAllDay = isAllDaySpecialDateEvent(event);
+    const startDate = isAllDay
+      ? getLocalDateFromUtcDay(event.eventDateTime)
+      : new Date(event.eventDateTime);
+
+    return formatCountdownLabelForDate(startDate);
   };
 
   const formatEventTimeOnlyLabel = (event: SpecialDateEvent) => {
@@ -3526,6 +3722,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
     return startTimeLabel;
   };
+
+  const formatEventSummaryRowTimeSuffix = (event: SpecialDateEvent) => (
+    isAllDaySpecialDateEvent(event) ? '' : ` • ${formatEventTimeOnlyLabel(event)}`
+  );
 
   const handleSelectEventType = useCallback((nextEventType: EventTypeValue) => {
     const nextIsAllDay = nextEventType === 'birthday' || nextEventType === 'anniversary';
@@ -3855,7 +4055,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         return;
       }
 
-      setCurrentView('landing');
+      setCurrentView('manage-events');
 
       Alert.alert('Updated', 'The event has been updated.');
     } finally {
@@ -4030,7 +4230,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setShareRecipients([]);
     setShareMessage('');
     setValidationMessage(null);
-    setCurrentView('landing');
+    setCurrentView('manage-events');
   };
 
   const buildShareDetailsMessage = (
@@ -4105,7 +4305,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     }
     if (!sharingEvent) {
       setValidationMessage('Please select an event to share.');
-      setCurrentView('landing');
+      setCurrentView('manage-events');
       return;
     }
 
@@ -4368,7 +4568,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setIsReminderAddedFlash(false);
     setForm(getResetFormState(effectiveReminderTimeZone));
     setValidationMessage(null);
-    setCurrentView('landing');
+    setCurrentView('manage-events');
   };
 
   const selectDate = (selectedDay: number) => {
@@ -4419,56 +4619,89 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   );
 
   const savedEventTypeOptions = useMemo<Array<{ label: string; value: SavedEventsFilterType }>>(
-    () => [{ label: 'All', value: 'all' }, ...eventTypeOptions],
+    () => [
+      { label: 'All', value: 'all' },
+      ...eventTypeOptions,
+      { label: 'Public Holidays', value: 'holidays-public' },
+      { label: 'Observances', value: 'holidays-observances' },
+      { label: 'Religious Holidays', value: 'holidays-religious' },
+    ],
     [],
   );
 
+  const toggleSavedEventsFilterType = (value: SavedEventsFilterType) => {
+    if (value === 'all') {
+      setSavedEventsFilterTypes([]);
+      return;
+    }
+    setSavedEventsFilterTypes((current) => (
+      current.includes(value) ? current.filter((entry) => entry !== value) : [...current, value]
+    ));
+  };
+
+  // Subtype filtering only makes sense when exactly one (subtype-capable) type is selected.
+  const singleSelectedType: SavedEventsFilterType = savedEventsFilterTypes.length === 1 ? savedEventsFilterTypes[0] : 'all';
+
+  const savedEventsFilterLabel = useMemo(() => {
+    if (!savedEventsFilterTypes.length) {
+      return 'All';
+    }
+    return savedEventsFilterTypes
+      .map((value) => savedEventTypeOptions.find((option) => option.value === value)?.label)
+      .filter(Boolean)
+      .join(', ');
+  }, [savedEventsFilterTypes, savedEventTypeOptions]);
+
   const selectedSavedEventsSubtypeLabel = useMemo(() => {
-    if (savedEventsFilterType === 'party') {
+    if (singleSelectedType === 'party') {
       return partySubtypeLabels[savedEventsFilterSubtype as PartySubtypeValue] || '';
     }
-    if (savedEventsFilterType === 'school') {
+    if (singleSelectedType === 'school') {
       return schoolSubtypeLabels[savedEventsFilterSubtype as SchoolSubtypeValue] || '';
     }
-    if (savedEventsFilterType === 'medical') {
+    if (singleSelectedType === 'medical') {
       return medicalSubtypeLabels[savedEventsFilterSubtype as MedicalSubtypeValue] || '';
     }
-    if (savedEventsFilterType === 'dental') {
+    if (singleSelectedType === 'dental') {
       return dentalSubtypeLabels[savedEventsFilterSubtype as DentalSubtypeValue] || '';
     }
-    if (savedEventsFilterType === 'work') {
+    if (singleSelectedType === 'work') {
       return workSubtypeLabels[savedEventsFilterSubtype as WorkSubtypeValue] || '';
     }
     return '';
-  }, [savedEventsFilterSubtype, savedEventsFilterType]);
+  }, [savedEventsFilterSubtype, singleSelectedType]);
 
   const savedEventsSubtypeOptions = useMemo<Array<{ label: string; value: string }>>(() => {
-    if (savedEventsFilterType === 'party') {
+    if (singleSelectedType === 'party') {
       return [{ label: 'All', value: 'all' }, ...Object.entries(partySubtypeLabels).map(([value, label]) => ({ value, label }))];
     }
-    if (savedEventsFilterType === 'school') {
+    if (singleSelectedType === 'school') {
       return [{ label: 'All', value: 'all' }, ...Object.entries(schoolSubtypeLabels).map(([value, label]) => ({ value, label }))];
     }
-    if (savedEventsFilterType === 'medical') {
+    if (singleSelectedType === 'medical') {
       return [{ label: 'All', value: 'all' }, ...Object.entries(medicalSubtypeLabels).map(([value, label]) => ({ value, label }))];
     }
-    if (savedEventsFilterType === 'dental') {
+    if (singleSelectedType === 'dental') {
       return [{ label: 'All', value: 'all' }, ...Object.entries(dentalSubtypeLabels).map(([value, label]) => ({ value, label }))];
     }
-    if (savedEventsFilterType === 'work') {
+    if (singleSelectedType === 'work') {
       return [{ label: 'All', value: 'all' }, ...Object.entries(workSubtypeLabels).map(([value, label]) => ({ value, label }))];
     }
     return [{ label: 'All', value: 'all' }];
-  }, [savedEventsFilterType]);
+  }, [singleSelectedType]);
 
-  const shouldShowSavedEventsSubtypeFilter = savedEventsFilterType !== 'all' && eventTypeHasSubtype(savedEventsFilterType);
+  const shouldShowSavedEventsSubtypeFilter = singleSelectedType !== 'all'
+    && singleSelectedType !== 'holidays-public'
+    && singleSelectedType !== 'holidays-observances'
+    && singleSelectedType !== 'holidays-religious'
+    && eventTypeHasSubtype(singleSelectedType);
 
   const filteredSavedEvents = useMemo(() => {
     return savedEvents.filter((event) => {
       const inferred = getEventFormState(event);
       const inferredType = inferred.eventType;
 
-      if (savedEventsFilterType !== 'all' && inferredType !== savedEventsFilterType) {
+      if (savedEventsFilterTypes.length && !savedEventsFilterTypes.includes(inferredType)) {
         return false;
       }
 
@@ -4479,7 +4712,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       const inferredSubtype = getSubtypeValueForEventType(inferred, inferredType);
       return inferredSubtype === savedEventsFilterSubtype;
     });
-  }, [savedEvents, savedEventsFilterSubtype, savedEventsFilterType, shouldShowSavedEventsSubtypeFilter]);
+  }, [savedEvents, savedEventsFilterSubtype, savedEventsFilterTypes, shouldShowSavedEventsSubtypeFilter]);
 
   const eventDatesByDay = useMemo(() => {
     const dates = new Set<string>();
@@ -4533,16 +4766,54 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     }, []);
   }, [savedReminders]);
 
+  const holidayEntries = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    return getHolidayEntries(calendarDefaults, [currentYear, currentYear + 1]);
+  }, [calendarDefaults]);
+
+  const savedEventsSummaryRows = useMemo(() => {
+    const eventRows: SavedEventsSummaryRow[] = filteredSavedEvents.map((event) => {
+      const eventDate = isAllDaySpecialDateEvent(event)
+        ? getLocalDateFromUtcDay(event.eventDateTime)
+        : new Date(event.eventDateTime);
+      return { kind: 'event', id: event.id, date: eventDate, event };
+    });
+
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const holidayRows: SavedEventsSummaryRow[] = holidayEntries
+      .filter((holiday) => holiday.date.getTime() >= startOfToday.getTime())
+      .filter((holiday) => {
+        if (!savedEventsFilterTypes.length) {
+          return true;
+        }
+        if (savedEventsFilterTypes.includes('holidays-public') && holiday.category === 'us-public') {
+          return true;
+        }
+        if (savedEventsFilterTypes.includes('holidays-observances') && holiday.category === 'observance') {
+          return true;
+        }
+        if (savedEventsFilterTypes.includes('holidays-religious') && holiday.category !== 'us-public' && holiday.category !== 'observance') {
+          return true;
+        }
+        return false;
+      })
+      .map((holiday) => ({ kind: 'holiday', id: holiday.id, date: holiday.date, holiday }));
+
+    return [...eventRows, ...holidayRows].sort((left, right) => left.date.getTime() - right.date.getTime());
+  }, [filteredSavedEvents, holidayEntries, savedEventsFilterTypes]);
+
   const savedEventsSummaryPages = useMemo(() => {
-    return filteredSavedEvents.reduce<Array<SpecialDateEvent[]>>((pages, event, index) => {
-      const pageIndex = Math.floor(index / 10);
+    return savedEventsSummaryRows.reduce<Array<SavedEventsSummaryRow[]>>((pages, row, index) => {
+      const pageIndex = Math.floor(index / summaryPageSize);
       if (!pages[pageIndex]) {
         pages[pageIndex] = [];
       }
-      pages[pageIndex].push(event);
+      pages[pageIndex].push(row);
       return pages;
     }, []);
-  }, [filteredSavedEvents]);
+  }, [savedEventsSummaryRows, summaryPageSize]);
 
   const savedRemindersSummaryPages = useMemo(() => {
     return savedReminders.reduce<Array<Array<{ event: SpecialDateEvent; occurrence: Date }>>>((pages, reminder, index) => {
@@ -4616,7 +4887,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setSavedEventsSummaryPage(0);
     setSelectedCalendarDate(null);
     setSelectedEventPopupDate(null);
-  }, [savedEventsFilterSubtype, savedEventsFilterType]);
+  }, [savedEventsFilterSubtype, savedEventsFilterTypes]);
 
   const closeSavedEventsFilters = () => {
     setIsSavedEventsTypeFilterVisible(false);
@@ -5003,13 +5274,103 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     return `Event: ${eventFormatter.format(nextReminder.eventDate)} • ${nextReminder.event.title} • ${nextReminder.event.people || 'No one listed'} • Reminder: ${reminderFormatter.format(nextReminder.reminderDate)}`;
   }, [events, getOccurrenceDateForReminderCandidate]);
 
+  const widgetSyncPayload = useMemo<WidgetSyncPayload>(() => {
+    const now = Date.now();
+    const dateTimeFormatter = new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    const dateOnlyFormatter = new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+    });
+
+    const upcomingEvent = [...events]
+      .filter((event) => new Date(event.eventDateTime).getTime() >= now)
+      .sort((left, right) => new Date(left.eventDateTime).getTime() - new Date(right.eventDateTime).getTime())[0];
+
+    const nextEvent = upcomingEvent ? {
+      title: upcomingEvent.title,
+      people: upcomingEvent.people || '',
+      dateLabel: dateTimeFormatter.format(new Date(upcomingEvent.eventDateTime)),
+    } : null;
+
+    const nextReminderCandidate = events
+      .flatMap((event) => getReminderCandidates(event).map((candidate) => ({
+        event,
+        reminderDate: new Date(candidate.reminderDateTime),
+        eventDate: getOccurrenceDateForReminderCandidate(event, new Date(candidate.reminderDateTime)),
+      })))
+      .filter((entry) => entry.reminderDate.getTime() >= now)
+      .sort((left, right) => left.reminderDate.getTime() - right.reminderDate.getTime())[0];
+
+    const nextReminder = nextReminderCandidate ? {
+      title: nextReminderCandidate.event.title,
+      people: nextReminderCandidate.event.people || '',
+      eventDateLabel: dateOnlyFormatter.format(nextReminderCandidate.eventDate),
+      reminderDateLabel: dateTimeFormatter.format(nextReminderCandidate.reminderDate),
+    } : null;
+
+    return {
+      nextEvent,
+      nextReminder,
+      updatedAt: new Date().toISOString(),
+    };
+  }, [events, getOccurrenceDateForReminderCandidate]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'ios' || !hasLoadedInitialEvents) {
+      return;
+    }
+
+    try {
+      WidgetBridgeModule.setSharedData(WIDGET_APP_GROUP_ID, WIDGET_DATA_KEY, JSON.stringify(widgetSyncPayload));
+      WidgetBridgeModule.reloadWidgets();
+    } catch (error) {
+      console.warn('Widget sync failed', error);
+    }
+  }, [widgetSyncPayload, hasLoadedInitialEvents]);
+
+  useEffect(() => {
+    const handleDeepLink = (url: string | null) => {
+      if (url && url.startsWith('remindmethis://')) {
+        setCurrentView('manage-events');
+      }
+    };
+
+    const subscription = Linking.addEventListener('url', (event) => handleDeepLink(event.url));
+    Linking.getInitialURL().then(handleDeepLink);
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
   useEffect(() => {
     const nextView = currentView;
-    if (nextView === 'landing' && previousViewRef.current !== 'landing') {
+    if (nextView === 'manage-events' && previousViewRef.current !== 'manage-events') {
       setLandingTickerVersion((value) => value + 1);
     }
     previousViewRef.current = nextView;
   }, [currentView]);
+
+  useEffect(() => {
+    if (currentView !== 'manage-events' || !userId) {
+      return;
+    }
+
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(getCalendarDefaultsStorageKey(userId));
+        setCalendarDefaults(raw ? normalizeCalendarDefaultsSettings(JSON.parse(raw)) : DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
+      } catch (error) {
+        console.warn('Unable to load calendar defaults settings', error);
+        setCalendarDefaults(DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
+      }
+    })();
+  }, [currentView, userId]);
 
   useEffect(() => {
     const TICKER_SPEED_PX_PER_SEC = 65;
@@ -5062,143 +5423,51 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     };
   }, [landingTickerVersion, nextEventTickerX, nextReminderTickerX, nextEventTickerTextWidth, nextReminderTickerTextWidth, tickerStartX]);
 
-  const renderLandingView = () => (
-    <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.subtitle}>Track birthdays, anniversaries, and other meaningful dates.</Text>
+  const openNewEventEditor = () => {
+    const now = getDefaultDate();
+    setHasInitializedReminderScheduleView(false);
+    setHasTouchedStaticReminderSchedule(false);
+    setEditingEvent(null);
+    resetTypeSelectionUi();
+    setPendingVariableReminders([]);
+    setSeededVariableDraftIds([]);
+    setForm(getResetFormState(effectiveReminderTimeZone));
+    setPickerMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+    setStaticReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+    setPendingReminderDateTime(new Date(now));
+    setPendingReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+    setValidationMessage(null);
+    setCurrentView('create');
+  };
 
+  const renderManageEventsView = () => (
+    <View style={styles.manageEventsScreen}>
+    <ScrollView
+      style={styles.manageEventsScroll}
+      contentContainerStyle={[styles.container, savedEventsView === 'summary' && savedEventsSummaryPages.length > 1 && styles.manageEventsScrollContentWithFooter]}
+      keyboardShouldPersistTaps="handled"
+    >
       {apiStorageStatusMessage ? (
         <View style={styles.apiStatusBanner}>
           <Text style={styles.apiStatusBannerText}>{apiStorageStatusMessage}</Text>
         </View>
       ) : null}
 
-      <View style={styles.landingLinksWrap}>
-        <View style={styles.landingLinkItem}>
-          <TouchableOpacity
-            style={styles.landingLinkButton}
-            onPress={() => {
-              const now = getDefaultDate();
-              setHasInitializedReminderScheduleView(false);
-              setHasTouchedStaticReminderSchedule(false);
-              setEditingEvent(null);
-              resetTypeSelectionUi();
-              setPendingVariableReminders([]);
-              setSeededVariableDraftIds([]);
-              setForm(getResetFormState(effectiveReminderTimeZone));
-              setPickerMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-              setStaticReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-              setPendingReminderDateTime(new Date(now));
-              setPendingReminderMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-              setValidationMessage(null);
-              setCurrentView('create');
-            }}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.landingLinkText}>New event</Text>
-          </TouchableOpacity>
-          <Text style={styles.landingLinkDescription}>Create a new event and set up its reminders.</Text>
-
-        </View>
-
-        <View style={styles.landingLinkItem}>
-          <TouchableOpacity
-            style={styles.landingLinkButton}
-            onPress={() => {
-              setSavedEventsView('summary');
-              setCurrentView('manage-events');
-            }}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.landingLinkText}>Manage Events</Text>
-          </TouchableOpacity>
-          <Text style={styles.landingLinkDescription}>Review, update, and organize your saved events and event details.</Text>
-        </View>
-
-        <View style={styles.landingLinkItem}>
-          <TouchableOpacity
-            style={styles.landingLinkButton}
-            onPress={() => {
-              onOpenContacts?.();
-            }}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.landingLinkText}>Contacts</Text>
-          </TouchableOpacity>
-          <Text style={styles.landingLinkDescription}>Manage contacts, favorites, and groups.</Text>
-        </View>
-
-        <View style={styles.landingLinkItem}>
-          <TouchableOpacity
-            style={styles.landingLinkButton}
-            onPress={() => {
-              onOpenCalendarSync?.();
-            }}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.landingLinkText}>Calendar Sync</Text>
-          </TouchableOpacity>
-          <Text style={styles.landingLinkDescription}>Connect and manage Google, Apple, and Outlook calendar syncing.</Text>
-        </View>
-      </View>
-
-      <View style={styles.landingTickerSection}>
-        <Text style={styles.landingTickerTitle}>Next Event</Text>
-        <View style={styles.landingTickerWrap}>
-          <Animated.View key={`next-event-ticker-${landingTickerVersion}`} style={[styles.landingTickerRow, { transform: [{ translateX: nextEventTickerX }] }]}>
-            <Text
-              style={styles.landingTickerText}
-              onLayout={(event) => setNextEventTickerTextWidth(event.nativeEvent.layout.width)}
-            >
-              {nextEventTickerMessage}
-            </Text>
-          </Animated.View>
-        </View>
-      </View>
-
-      <View style={styles.landingTickerSection}>
-        <Text style={styles.landingTickerTitle}>Next Reminder</Text>
-        <View style={styles.landingTickerWrap}>
-          <Animated.View key={`next-reminder-ticker-${landingTickerVersion}`} style={[styles.landingTickerRow, { transform: [{ translateX: nextReminderTickerX }] }]}>
-            <Text
-              style={styles.landingTickerText}
-              onLayout={(event) => setNextReminderTickerTextWidth(event.nativeEvent.layout.width)}
-            >
-              {nextReminderTickerMessage}
-            </Text>
-          </Animated.View>
-        </View>
-      </View>
-    </ScrollView>
-  );
-
-  const renderManageEventsView = () => (
-    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-      <View style={styles.manageEventsHeaderRow}>
-        <Text style={styles.manageEventsTitle}>Manage Events</Text>
-      </View>
-      <Text style={styles.subtitle}>Review and organize your saved events.</Text>
-
       <View style={[styles.viewControlsRow, styles.viewControlsRowCentered]}>
-        {([
-          { key: 'summary', label: 'Summary' },
-          { key: 'calendar', label: 'Calendar' },
-        ] as const).map((tab) => (
-          <TouchableOpacity
-            key={tab.key}
-            style={[styles.toggleButton, styles.viewControlsCompactButton, savedEventsView === tab.key && styles.toggleButtonActive]}
-            onPress={() => setSavedEventsView(tab.key)}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.toggleButtonText}>{tab.label}</Text>
-          </TouchableOpacity>
-        ))}
-        <TouchableOpacity
+        <TooltipButton
+          label="Create a new event"
           style={[styles.toggleButton, styles.viewControlsCompactButton]}
-          onPress={() => setCurrentView('landing')}
-          activeOpacity={0.8}
+          onPress={openNewEventEditor}
         >
-          <Text style={styles.toggleButtonText}>Back</Text>
-        </TouchableOpacity>
+          <Text style={styles.toggleButtonIcon}>➕</Text>
+        </TooltipButton>
+        <TooltipButton
+          label={savedEventsView === 'calendar' ? 'List View' : 'Calendar View'}
+          style={[styles.toggleButton, styles.viewControlsCompactButton]}
+          onPress={() => setSavedEventsView(savedEventsView === 'calendar' ? 'summary' : 'calendar')}
+        >
+          <Text style={styles.toggleButtonIcon}>{savedEventsView === 'calendar' ? '📋' : '📅'}</Text>
+        </TooltipButton>
       </View>
 
       {(isSavedEventsTypeFilterVisible || isSavedEventsSubtypeFilterVisible) ? (
@@ -5216,8 +5485,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             }}
             activeOpacity={0.6}
           >
-            <Text style={[styles.filterLinkText, savedEventsFilterType !== 'all' && styles.filterLinkTextActive]}>
-              Event: {savedEventTypeOptions.find((option) => option.value === savedEventsFilterType)?.label || 'All'}
+            <Text style={[styles.filterLinkText, savedEventsFilterTypes.length > 0 && styles.filterLinkTextActive]}>
+              Event: {savedEventsFilterLabel}
             </Text>
           </TouchableOpacity>
 
@@ -5237,31 +5506,32 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       </View>
 
       {isSavedEventsTypeFilterVisible ? (
-        <View style={styles.dropdownList}>
-          {savedEventTypeOptions.map((option) => (
-            <TouchableOpacity
-              key={option.value}
-              style={[
-                styles.dropdownListItem,
-                savedEventsFilterType === option.value && styles.dropdownListItemSelected,
-              ]}
-              onPress={() => {
-                setSavedEventsFilterType(option.value);
-                setSavedEventsFilterSubtype('all');
-                closeSavedEventsFilters();
-              }}
-              activeOpacity={0.8}
-            >
-              <Text
+        <View style={styles.filterPillList}>
+          {savedEventTypeOptions.map((option) => {
+            const optionStyle = getSavedEventsFilterOptionStyle(option.value);
+            const isSelected = option.value === 'all' ? savedEventsFilterTypes.length === 0 : savedEventsFilterTypes.includes(option.value);
+
+            return (
+              <TouchableOpacity
+                key={option.value}
                 style={[
-                  styles.dropdownListItemText,
-                  savedEventsFilterType === option.value && styles.dropdownListItemTextSelected,
+                  styles.filterPill,
+                  optionStyle.color ? { backgroundColor: optionStyle.color } : styles.filterPillNeutral,
+                  isSelected && styles.filterPillSelected,
                 ]}
+                onPress={() => {
+                  toggleSavedEventsFilterType(option.value);
+                  setSavedEventsFilterSubtype('all');
+                }}
+                activeOpacity={0.8}
               >
-                {option.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
+                {optionStyle.icon ? <Text style={styles.filterPillIcon}>{optionStyle.icon}</Text> : null}
+                <Text style={[styles.filterPillText, optionStyle.color ? styles.filterPillTextColored : styles.filterPillTextNeutral]}>
+                  {option.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
       ) : null}
 
@@ -5294,21 +5564,36 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       ) : null}
 
       {savedEventsView === 'summary' ? (
-        filteredSavedEvents.length ? (
+        savedEventsSummaryRows.length ? (
           <>
-            {currentSavedEventsSummaryPageItems.map((event) => {
+            {currentSavedEventsSummaryPageItems.map((row) => {
+              if (row.kind === 'holiday') {
+                const { holiday } = row;
+                return (
+                  <View key={row.id} style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: holiday.color }]}>
+                    <Text style={styles.summaryLinkIcon}>{holiday.icon}</Text>
+                    <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
+                      {formatDateOnlyLabel(holiday.date)} ({formatCountdownLabelForDate(holiday.date)}) • {holiday.name}
+                    </Text>
+                  </View>
+                );
+              }
+
+              const event = row.event;
               const isSelected = selectedSummaryEventId === event.id;
               const selectedEvent = isSelected ? events.find((item) => item.id === event.id) ?? null : null;
+              const summaryColor = getEventSummaryColor(event);
 
               return (
-                <View key={event.id}>
+                <View key={row.id}>
                   <TouchableOpacity
-                    style={styles.summaryLink}
+                    style={[styles.summaryLink, summaryColor ? [styles.summaryLinkColored, { backgroundColor: summaryColor }] : null]}
                     onPress={() => setSelectedSummaryEventId(isSelected ? null : event.id)}
                     activeOpacity={0.8}
                   >
-                    <Text style={styles.summaryLinkText}>
-                      {formatEventDateOnly(event)} • {event.title} • {event.people} • {formatEventTimeOnlyLabel(event)}
+                    <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(event)}</Text>
+                    <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, summaryColor ? styles.summaryLinkTextColored : null]}>
+                      {formatEventDateOnly(event)} ({formatEventCountdownLabel(event)}) • {event.title} • {event.people}{formatEventSummaryRowTimeSuffix(event)}
                     </Text>
                   </TouchableOpacity>
 
@@ -5331,28 +5616,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 </View>
               );
             })}
-
-            {savedEventsSummaryPages.length > 1 ? (
-              <View style={styles.summaryPaginationRow}>
-                <TouchableOpacity
-                  style={[styles.summaryPagerButton, safeSavedEventsSummaryPage === 0 && styles.summaryPagerButtonDisabled]}
-                  onPress={() => setSavedEventsSummaryPage((page) => Math.max(0, page - 1))}
-                  disabled={safeSavedEventsSummaryPage === 0}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.summaryPagerButtonText}>Back</Text>
-                </TouchableOpacity>
-                <Text style={styles.summaryPagerPageText}>Page {safeSavedEventsSummaryPage + 1} of {savedEventsSummaryPages.length}</Text>
-                <TouchableOpacity
-                  style={[styles.summaryPagerButton, safeSavedEventsSummaryPage >= savedEventsSummaryPages.length - 1 && styles.summaryPagerButtonDisabled]}
-                  onPress={() => setSavedEventsSummaryPage((page) => Math.min(savedEventsSummaryPages.length - 1, page + 1))}
-                  disabled={safeSavedEventsSummaryPage >= savedEventsSummaryPages.length - 1}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.summaryPagerButtonText}>Next</Text>
-                </TouchableOpacity>
-              </View>
-            ) : null}
           </>
         ) : (
           <View style={styles.card}>
@@ -5442,60 +5705,83 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 return day.toDateString() === eventDate.toDateString();
               });
               const isSelected = selectedCalendarDate && day.toDateString() === selectedCalendarDate.toDateString();
+              const isToday = day.toDateString() === new Date().toDateString();
 
               return (
                 <TouchableOpacity
                   key={day.toISOString()}
-                  style={[styles.dayCell, hasEvent && styles.dayCellWithEvents, isSelected && styles.selectedDayCell]}
+                  style={[styles.dayCell, hasEvent && styles.dayCellWithEvents, isToday && styles.todayDayCell, isSelected && styles.selectedDayCell]}
                   onPress={() => {
                     setSelectedCalendarDate(day);
                     setSelectedEventPopupDate(null);
+                    setExpandedCalendarEventId(null);
                   }}
                 >
-                  <Text style={[styles.dayText, isSelected && styles.selectedDayText]}>{day.getDate()}</Text>
+                  <Text style={[styles.dayText, isToday && styles.todayDayCellText, isSelected && styles.selectedDayText]}>{day.getDate()}</Text>
                 </TouchableOpacity>
               );
             })}
           </View>
 
           {selectedCalendarDate ? (
-            <View style={styles.calendarDateOverlayPanel} pointerEvents="box-none">
+            <View style={styles.calendarDateBelowPanel}>
               {selectedDateEntries.length ? (
-                selectedDateEntries.map(({ event }, index) => (
-                  <View key={event.id} style={[styles.calendarDateDetailCard, index > 0 && styles.calendarDateDetailCardSpaced]}>
-                    <View style={styles.savedEventDetailsHeaderRow}>
-                      <Text style={styles.savedEventDetailsEventTitle}>{event.title}</Text>
+                selectedDateEntries.map(({ event }, index) => {
+                  const isExpanded = expandedCalendarEventId === event.id;
+
+                  if (!isExpanded) {
+                    return (
+                      <TouchableOpacity
+                        key={event.id}
+                        style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: getEventSummaryColor(event) }]}
+                        onPress={() => setExpandedCalendarEventId(event.id)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(event)}</Text>
+                        <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
+                          {formatEventDateOnly(event)} ({formatEventCountdownLabel(event)}) • {event.title} • {event.people}{formatEventSummaryRowTimeSuffix(event)}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  }
+
+                  return (
+                    <View key={event.id} style={[styles.calendarDateDetailCard, index > 0 && styles.calendarDateDetailCardSpaced]}>
+                      <View style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: getEventSummaryColor(event) }]}>
+                        <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(event)}</Text>
+                        <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
+                          {formatEventDateOnly(event)} ({formatEventCountdownLabel(event)}) • {event.title} • {event.people}{formatEventSummaryRowTimeSuffix(event)}
+                        </Text>
+                      </View>
                       <TouchableOpacity onPress={() => openRemindersForEvent(event)}>
                         <Text style={[styles.savedEventDetailsReminderCounter, !getReminderSummaryState(event).isActive && styles.reminderCountLinkDisabled]}>
                           {getReminderSummaryState(event).isActive ? `Reminders: ${getReminderSummaryState(event).count}` : 'Reminders: 0'}
                         </Text>
                       </TouchableOpacity>
-                    </View>
-                    <Text style={styles.savedEventDetailsPeople}>{event.people}</Text>
-                    <Text style={styles.savedEventDetailsMeta}>Event Date: {formatEventDateOnly(event)}</Text>
-                    <Text style={styles.savedEventDetailsMeta}>{formatEventTimeOnlyLabel(event)}</Text>
 
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.savedEventDetailsActionRow}>
-                      <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => {
-                        setSelectedCalendarDate(null);
-                      }}>
-                        <Text style={styles.savedEventDetailActionText}>Close</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => startShareForEvent(event)}>
-                        <Text style={styles.savedEventDetailActionText}>Share</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => {
-                        startEditingEvent(event);
-                        setSelectedCalendarDate(null);
-                      }}>
-                        <Text style={styles.savedEventDetailActionText}>Modify</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.savedEventDetailActionPillDanger} onPress={() => promptEventDelete(event.id)}>
-                        <Text style={styles.savedEventDetailActionTextDanger}>Delete</Text>
-                      </TouchableOpacity>
-                    </ScrollView>
-                  </View>
-                ))
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.savedEventDetailsActionRow}>
+                        <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => {
+                          setExpandedCalendarEventId(null);
+                        }}>
+                          <Text style={styles.savedEventDetailActionText}>Close</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => startShareForEvent(event)}>
+                          <Text style={styles.savedEventDetailActionText}>Share</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => {
+                          startEditingEvent(event);
+                          setSelectedCalendarDate(null);
+                          setExpandedCalendarEventId(null);
+                        }}>
+                          <Text style={styles.savedEventDetailActionText}>Modify</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.savedEventDetailActionPillDanger} onPress={() => promptEventDelete(event.id)}>
+                          <Text style={styles.savedEventDetailActionTextDanger}>Delete</Text>
+                        </TouchableOpacity>
+                      </ScrollView>
+                    </View>
+                  );
+                })
               ) : (
                 <View style={styles.calendarDateDetailCard}>
                   <Text style={styles.helperText}>No events scheduled on this date.</Text>
@@ -5508,11 +5794,34 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         </View>
       ) : null}
     </ScrollView>
+
+    {savedEventsView === 'summary' && savedEventsSummaryPages.length > 1 ? (
+      <View style={styles.summaryPaginationRow}>
+        <TouchableOpacity
+          style={[styles.summaryPagerButton, safeSavedEventsSummaryPage === 0 && styles.summaryPagerButtonDisabled]}
+          onPress={() => setSavedEventsSummaryPage((page) => Math.max(0, page - 1))}
+          disabled={safeSavedEventsSummaryPage === 0}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.summaryPagerButtonText}>Back</Text>
+        </TouchableOpacity>
+        <Text style={styles.summaryPagerPageText}>Page {safeSavedEventsSummaryPage + 1} of {savedEventsSummaryPages.length}</Text>
+        <TouchableOpacity
+          style={[styles.summaryPagerButton, safeSavedEventsSummaryPage >= savedEventsSummaryPages.length - 1 && styles.summaryPagerButtonDisabled]}
+          onPress={() => setSavedEventsSummaryPage((page) => Math.min(savedEventsSummaryPages.length - 1, page + 1))}
+          disabled={safeSavedEventsSummaryPage >= savedEventsSummaryPages.length - 1}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.summaryPagerButtonText}>Next</Text>
+        </TouchableOpacity>
+      </View>
+    ) : null}
+    </View>
   );
 
   const renderManageRemindersView = () => (
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-      <TouchableOpacity style={[styles.floatingActionButton, styles.floatingActionSecondaryButton]} onPress={() => setCurrentView('landing')} activeOpacity={0.8}>
+      <TouchableOpacity style={[styles.floatingActionButton, styles.floatingActionSecondaryButton]} onPress={() => setCurrentView('manage-events')} activeOpacity={0.8}>
         <Text style={styles.floatingActionSecondaryText}>Back</Text>
       </TouchableOpacity>
 
@@ -6644,7 +6953,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
   return (
     <>
-      {currentView === 'landing' ? renderLandingView() : currentView === 'share' ? renderShareView() : currentView === 'manage-events' ? renderManageEventsView() : currentView === 'manage-reminders' ? renderManageRemindersView() : renderCreateView()}
+      {currentView === 'share' ? renderShareView() : currentView === 'manage-events' ? renderManageEventsView() : currentView === 'manage-reminders' ? renderManageRemindersView() : renderCreateView()}
       {activeEventSummaryModal}
       {reminderEventModal}
       {confirmDeleteModal}
@@ -6691,11 +7000,21 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   );
 }
 
-const styles = StyleSheet.create({
+const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
   container: {
     padding: 24,
     paddingBottom: 40,
-    backgroundColor: '#f5f7ff',
+    backgroundColor: colors.surfaceTint,
+  },
+  manageEventsScreen: {
+    flex: 1,
+    position: 'relative',
+  },
+  manageEventsScroll: {
+    flex: 1,
+  },
+  manageEventsScrollContentWithFooter: {
+    paddingBottom: 76,
   },
   title: {
     fontSize: 26,
@@ -6704,48 +7023,13 @@ const styles = StyleSheet.create({
   },
   subtitle: {
     fontSize: 14,
-    color: '#5f6b7a',
+    color: colors.textSecondary,
     marginBottom: 16,
-  },
-  manageEventsHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    marginBottom: 4,
-  },
-  manageEventsTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    flexShrink: 1,
   },
   helperText: {
     fontSize: 13,
-    color: '#6b7280',
+    color: colors.textTertiary,
     marginBottom: 10,
-  },
-  landingLinksWrap: {
-    borderBottomWidth: 1,
-    borderBottomColor: '#e2e8f0',
-    paddingBottom: 10,
-    marginBottom: 16,
-    gap: 10,
-  },
-  landingLinkItem: {
-    gap: 2,
-  },
-  landingLinkButton: {
-    alignSelf: 'flex-start',
-  },
-  landingLinkText: {
-    color: '#2563eb',
-    fontSize: 14,
-    fontWeight: '600',
-    textDecorationLine: 'underline',
-  },
-  landingLinkDescription: {
-    color: '#64748b',
-    fontSize: 12,
   },
   landingTickerSection: {
     marginTop: 8,
@@ -6754,14 +7038,14 @@ const styles = StyleSheet.create({
   landingTickerTitle: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
     marginBottom: 6,
   },
   landingTickerWrap: {
     overflow: 'hidden',
-    backgroundColor: '#eef4ff',
+    backgroundColor: colors.surfaceTint,
     borderWidth: 1,
-    borderColor: '#cfe0ff',
+    borderColor: colors.borderTint,
     borderRadius: 10,
     height: 28,
     justifyContent: 'center',
@@ -6774,16 +7058,16 @@ const styles = StyleSheet.create({
   },
   landingTickerText: {
     fontSize: 13,
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '600',
   },
   card: {
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderRadius: 16,
     padding: 16,
     marginBottom: 16,
     position: 'relative',
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOpacity: 0.08,
     shadowRadius: 8,
     elevation: 2,
@@ -6792,25 +7076,25 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 680,
     alignSelf: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderRadius: 16,
     padding: 16,
     marginBottom: 16,
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOpacity: 0.08,
     shadowRadius: 8,
     elevation: 2,
   },
   shareEventDetailsCard: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     padding: 10,
     marginBottom: 10,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   preferenceToggleText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '600',
   },
   shareOptionRow: {
@@ -6824,16 +7108,16 @@ const styles = StyleSheet.create({
     height: 18,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#2563eb',
+    borderColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
   },
   shareRadioInner: {
     width: 10,
     height: 10,
     borderRadius: 999,
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
   },
   shareActionsRow: {
     flexDirection: 'row',
@@ -6842,11 +7126,11 @@ const styles = StyleSheet.create({
   },
   shareBuilderCard: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     padding: 12,
     marginBottom: 12,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   shareRecipientPickerRow: {
     flexDirection: 'row',
@@ -6857,18 +7141,18 @@ const styles = StyleSheet.create({
   shareRecipientPickerWrapper: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     overflow: 'hidden',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
   },
   shareRecipientInlineInput: {
     flex: 1,
     marginBottom: 0,
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
   },
   shareRecipientAddButton: {
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
     borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 14,
@@ -6876,7 +7160,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   shareRecipientAddButtonDisabled: {
-    backgroundColor: '#94a3b8',
+    backgroundColor: colors.textPlaceholder,
   },
   shareRecipientList: {
     gap: 8,
@@ -6887,10 +7171,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 8,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     padding: 10,
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
   },
   shareActionButton: {
     flex: 1,
@@ -6914,7 +7198,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   inlineSelectionValueText: {
-    color: '#2563eb',
+    color: colors.primary,
     fontSize: 14,
     fontWeight: '600',
     textDecorationLine: 'underline',
@@ -6929,30 +7213,68 @@ const styles = StyleSheet.create({
   },
   dropdownList: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     marginBottom: 8,
     overflow: 'hidden',
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
     zIndex: 20,
   },
   dropdownListItem: {
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#e2e8f0',
+    borderBottomColor: colors.border,
   },
   dropdownListItemSelected: {
-    backgroundColor: '#eff6ff',
+    backgroundColor: colors.surfaceTint,
   },
   dropdownListItemText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontSize: 14,
     fontWeight: '500',
   },
   dropdownListItemTextSelected: {
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
     fontWeight: '700',
+  },
+  filterPillList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 8,
+    position: 'relative',
+    zIndex: 20,
+    elevation: 20,
+  },
+  filterPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  filterPillNeutral: {
+    backgroundColor: colors.surfaceSubtle,
+  },
+  filterPillSelected: {
+    borderColor: colors.textPrimary,
+  },
+  filterPillIcon: {
+    fontSize: 14,
+    marginRight: 4,
+  },
+  filterPillText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  filterPillTextColored: {
+    color: colors.surface,
+  },
+  filterPillTextNeutral: {
+    color: colors.textPrimary,
   },
   savedEventsHeader: {
     flexDirection: 'row',
@@ -6973,18 +7295,18 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: colors.borderStrong,
   },
   refreshButtonText: {
-    color: '#334155',
+    color: colors.textSecondary,
     fontSize: 16,
     fontWeight: '700',
     lineHeight: 16,
   },
   toggleButton: {
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
     borderRadius: 999,
     paddingHorizontal: 16,
     paddingVertical: 10,
@@ -6994,12 +7316,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   toggleButtonActive: {
-    backgroundColor: '#bfdbfe',
+    backgroundColor: colors.borderTint,
   },
   toggleButtonText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontSize: 14,
     fontWeight: '700',
+  },
+  toggleButtonIcon: {
+    fontSize: 20,
+    textAlign: 'center',
   },
   viewControlsRow: {
     flexDirection: 'row',
@@ -7022,10 +7348,10 @@ const styles = StyleSheet.create({
   filterLinkText: {
     fontSize: 14,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
   },
   filterLinkTextActive: {
-    color: '#2563eb',
+    color: colors.primary,
   },
   savedEventsFilterRow: {
     flexDirection: 'row',
@@ -7035,7 +7361,7 @@ const styles = StyleSheet.create({
     marginTop: 16,
   },
   viewLabel: {
-    color: '#475569',
+    color: colors.textSecondary,
     fontSize: 12,
     fontWeight: '600',
   },
@@ -7047,16 +7373,16 @@ const styles = StyleSheet.create({
   savedEventAddressBlock: {
     marginTop: 6,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     padding: 8,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
     alignSelf: 'stretch',
     alignItems: 'stretch',
     width: '100%',
   },
   savedEventAddressLine: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontSize: 12,
     lineHeight: 16,
     textAlign: 'left',
@@ -7070,38 +7396,38 @@ const styles = StyleSheet.create({
   },
   input: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     padding: 10,
     marginBottom: 8,
   },
   validationBanner: {
-    backgroundColor: '#fee2e2',
-    borderColor: '#fca5a5',
+    backgroundColor: colors.dangerBg,
+    borderColor: colors.dangerBorder,
     borderWidth: 1,
     borderRadius: 10,
     padding: 10,
     marginBottom: 8,
   },
   validationBannerText: {
-    color: '#b91c1c',
+    color: colors.dangerPressed,
     fontWeight: '600',
   },
   apiStatusBanner: {
-    backgroundColor: '#fef3c7',
-    borderColor: '#f59e0b',
+    backgroundColor: colors.warningBg,
+    borderColor: colors.warning,
     borderWidth: 1,
     borderRadius: 10,
     padding: 10,
     marginBottom: 8,
   },
   apiStatusBannerText: {
-    color: '#92400e',
+    color: colors.warningText,
     fontWeight: '600',
   },
   pickerWrapper: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     marginBottom: 8,
     overflow: 'hidden',
@@ -7117,27 +7443,27 @@ const styles = StyleSheet.create({
     height: 18,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#2563eb',
+    borderColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
   },
   eventLocationRadioInner: {
     width: 10,
     height: 10,
     borderRadius: 999,
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
   },
   eventLocationToggleText: {
-    color: '#111827',
+    color: colors.textPrimary,
     fontSize: 14,
     fontWeight: '500',
   },
   eventLocationSuggestionsList: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
     marginBottom: 8,
     overflow: 'hidden',
   },
@@ -7145,15 +7471,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#e5e7eb',
+    borderBottomColor: colors.border,
   },
   eventLocationSuggestionMainText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontSize: 14,
     fontWeight: '600',
   },
   eventLocationSuggestionSecondaryText: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontSize: 12,
     marginTop: 2,
   },
@@ -7164,11 +7490,11 @@ const styles = StyleSheet.create({
   },
   eventLocationStatePickerWrapper: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     marginBottom: 8,
     overflow: 'hidden',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
   },
   eventLocationStateInput: {
     flex: 0.62,
@@ -7186,7 +7512,7 @@ const styles = StyleSheet.create({
     width: 20,
     height: 20,
     borderWidth: 1,
-    borderColor: '#2563eb',
+    borderColor: colors.primary,
     borderRadius: 4,
     marginRight: 8,
     justifyContent: 'center',
@@ -7196,7 +7522,7 @@ const styles = StyleSheet.create({
     width: 12,
     height: 12,
     borderRadius: 2,
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
   },
   checkboxUnchecked: {
     width: 12,
@@ -7205,7 +7531,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
   },
   checkboxLabel: {
-    color: '#111827',
+    color: colors.textPrimary,
   },
   timeRow: {
     flexDirection: 'row',
@@ -7224,15 +7550,15 @@ const styles = StyleSheet.create({
   },
   timeValueButton: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
     paddingVertical: 12,
     paddingHorizontal: 12,
     marginBottom: 8,
   },
   timeValueButtonText: {
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
     fontSize: 24,
     fontWeight: '700',
     textAlign: 'center',
@@ -7245,18 +7571,18 @@ const styles = StyleSheet.create({
   variableReminderCalendarCard: {
     flex: 1.2,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     padding: 10,
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
   },
   variableReminderClockCard: {
     flex: 0.8,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     padding: 9,
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
   },
   variableReminderHeader: {
     flexDirection: 'row',
@@ -7274,22 +7600,22 @@ const styles = StyleSheet.create({
   variableReminderYear: {
     fontSize: 11,
     lineHeight: 14,
-    color: '#6b7280',
+    color: colors.textTertiary,
     fontWeight: '600',
   },
   variableReminderMonth: {
     fontSize: 16,
     lineHeight: 20,
     fontWeight: '700',
-    color: '#111827',
+    color: colors.textPrimary,
   },
   variableReminderNav: {
     fontSize: 18,
-    color: '#2563eb',
+    color: colors.primary,
     paddingHorizontal: 8,
   },
   picker: {
-    color: '#111827',
+    color: colors.textPrimary,
   },
   notesInput: {
     minHeight: 70,
@@ -7321,17 +7647,17 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#0f172a',
+    shadowColor: colors.shadow,
     shadowOpacity: 0.08,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 4 },
     elevation: 2,
   },
   reminderModeScrollButtonSelected: {
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
   },
   reminderModeScrollButtonUnselected: {
-    backgroundColor: '#e5e7eb',
+    backgroundColor: colors.border,
   },
   reminderModeScrollButtonText: {
     fontSize: 15,
@@ -7340,10 +7666,10 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   reminderModeScrollButtonTextSelected: {
-    color: '#fff',
+    color: colors.surface,
   },
   reminderModeScrollButtonTextUnselected: {
-    color: '#374151',
+    color: colors.textSecondary,
   },
   reminderFrequencyScrollContainer: {
     marginBottom: 8,
@@ -7363,10 +7689,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: Platform.OS === 'ios' ? 8 : 12,
   },
   frequencyOptionSelected: {
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
   },
   frequencyOptionUnselected: {
-    backgroundColor: '#e5e7eb',
+    backgroundColor: colors.border,
   },
   frequencyOptionText: {
     fontSize: 13,
@@ -7377,10 +7703,10 @@ const styles = StyleSheet.create({
     fontSize: Platform.OS === 'ios' ? 12 : 13,
   },
   frequencyOptionTextSelected: {
-    color: '#fff',
+    color: colors.surface,
   },
   frequencyOptionTextUnselected: {
-    color: '#374151',
+    color: colors.textSecondary,
   },
   floatingActionStripWrap: {
     marginTop: 12,
@@ -7401,34 +7727,34 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#0f172a',
+    shadowColor: colors.shadow,
     shadowOpacity: 0.12,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 6 },
     elevation: 4,
   },
   floatingActionPrimaryButton: {
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
   },
   floatingActionSecondaryButton: {
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: colors.borderStrong,
   },
   floatingActionPrimaryText: {
-    color: '#fff',
+    color: colors.surface,
     fontWeight: '800',
     fontSize: 15,
     textAlign: 'center',
   },
   floatingActionSecondaryText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '700',
     fontSize: 15,
     textAlign: 'center',
   },
   primaryButton: {
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
     borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 12,
@@ -7436,11 +7762,11 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   primaryButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontWeight: '700',
   },
   addReminderButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontWeight: '700',
     fontSize: 11,
     textAlign: 'center',
@@ -7448,7 +7774,7 @@ const styles = StyleSheet.create({
   },
   reminderActionHint: {
     fontSize: 12,
-    color: '#6b7280',
+    color: colors.textTertiary,
     marginBottom: 6,
     width: '100%',
     alignSelf: 'stretch',
@@ -7457,7 +7783,7 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   deleteAllRemindersButton: {
-    backgroundColor: '#dc2626',
+    backgroundColor: colors.dangerText,
     alignSelf: 'stretch',
   },
   deleteAllRemindersButtonText: {
@@ -7465,7 +7791,7 @@ const styles = StyleSheet.create({
   },
   pendingReminderCard: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     padding: 10,
     marginBottom: 8,
@@ -7476,20 +7802,20 @@ const styles = StyleSheet.create({
   pendingReminderText: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#111827',
+    color: colors.textPrimary,
   },
   pendingReminderSubtext: {
     fontSize: 12,
-    color: '#6b7280',
+    color: colors.textTertiary,
     marginTop: 2,
   },
   pendingReminderRemove: {
-    color: '#dc2626',
+    color: colors.dangerText,
     fontWeight: '600',
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(17, 24, 39, 0.45)',
+    backgroundColor: colors.overlay,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
@@ -7499,7 +7825,7 @@ const styles = StyleSheet.create({
     maxWidth: 760,
     minWidth: 320,
     alignSelf: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderRadius: 16,
     padding: 20,
     gap: 8,
@@ -7513,7 +7839,7 @@ const styles = StyleSheet.create({
     fontSize: 26,
     lineHeight: 32,
     fontWeight: '800',
-    color: '#111827',
+    color: colors.textPrimary,
     marginBottom: 8,
     textAlign: 'left',
   },
@@ -7528,25 +7854,25 @@ const styles = StyleSheet.create({
     fontSize: 18,
     lineHeight: 18,
     fontWeight: '700',
-    color: '#111827',
+    color: colors.textPrimary,
     flexShrink: 1,
   },
   savedEventDetailsReminderCounter: {
     fontSize: 12,
     lineHeight: 14,
     fontWeight: '700',
-    color: '#2563eb',
+    color: colors.primary,
   },
   savedEventDetailsPeople: {
     fontSize: 16,
     lineHeight: 16,
-    color: '#111827',
+    color: colors.textPrimary,
     marginBottom: 0,
   },
   savedEventDetailsMeta: {
     fontSize: 15,
     lineHeight: 15,
-    color: '#111827',
+    color: colors.textPrimary,
     marginBottom: 0,
   },
   savedEventDetailsActionRow: {
@@ -7560,32 +7886,41 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
   },
   summaryPaginationRow: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 10,
     gap: 10,
+    paddingHorizontal: 24,
+    paddingTop: 10,
+    paddingBottom: 16,
+    backgroundColor: colors.surfaceTint,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
   },
   summaryPagerButton: {
     flex: 1,
     minHeight: 34,
     borderRadius: 8,
-    backgroundColor: '#f3f4f6',
+    backgroundColor: colors.surfaceSubtle,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 12,
   },
   summaryPagerButtonDisabled: {
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   summaryPagerButtonText: {
-    color: '#b91c1c',
+    color: colors.dangerPressed,
     fontSize: 14,
     fontWeight: '700',
   },
   summaryPagerPageText: {
     flexShrink: 0,
-    color: '#4b5563',
+    color: colors.textSecondary,
     fontSize: 14,
     fontWeight: '500',
     textAlign: 'center',
@@ -7595,12 +7930,12 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 20,
     fontWeight: '700',
-    color: '#111827',
+    color: colors.textPrimary,
     marginRight: 4,
   },
   savedEventDetailActionPill: {
     borderRadius: 999,
-    backgroundColor: '#e5e7eb',
+    backgroundColor: colors.border,
     paddingVertical: 12,
     paddingHorizontal: 18,
     minWidth: 104,
@@ -7610,7 +7945,7 @@ const styles = StyleSheet.create({
   },
   savedEventDetailActionPillDanger: {
     borderRadius: 999,
-    backgroundColor: '#fee2e2',
+    backgroundColor: colors.dangerBg,
     paddingVertical: 12,
     paddingHorizontal: 18,
     minWidth: 104,
@@ -7619,13 +7954,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   savedEventDetailActionText: {
-    color: '#111827',
+    color: colors.textPrimary,
     fontSize: 15,
     lineHeight: 20,
     fontWeight: '700',
   },
   savedEventDetailActionTextDanger: {
-    color: '#b91c1c',
+    color: colors.dangerPressed,
     fontSize: 15,
     lineHeight: 20,
     fontWeight: '700',
@@ -7633,7 +7968,7 @@ const styles = StyleSheet.create({
   savedReminderCloseButton: {
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#e0f2fe',
+    backgroundColor: colors.surfaceTint,
     borderRadius: 999,
     paddingVertical: 10,
     paddingHorizontal: 18,
@@ -7641,17 +7976,17 @@ const styles = StyleSheet.create({
     minWidth: 120,
   },
   savedReminderCloseText: {
-    color: '#2563eb',
+    color: colors.primary,
     fontSize: 20,
     fontWeight: '700',
   },
   savedReminderItemCard: {
     borderWidth: 1,
-    borderColor: '#e5e7eb',
+    borderColor: colors.border,
     borderRadius: 10,
     padding: 10,
     marginBottom: 10,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   savedReminderItemHeader: {
     flexDirection: 'row',
@@ -7662,17 +7997,17 @@ const styles = StyleSheet.create({
   savedReminderItemTitle: {
     fontSize: 15,
     fontWeight: '700',
-    color: '#111827',
+    color: colors.textPrimary,
     marginBottom: 4,
     lineHeight: 18,
   },
   savedReminderItemSubtext: {
     fontSize: 14,
-    color: '#475569',
+    color: colors.textSecondary,
     marginBottom: 2,
   },
   savedReminderDeleteButton: {
-    backgroundColor: '#fee2e2',
+    backgroundColor: colors.dangerBg,
     borderRadius: 8,
     paddingVertical: 8,
     paddingHorizontal: 12,
@@ -7681,7 +8016,7 @@ const styles = StyleSheet.create({
     minWidth: 136,
   },
   savedReminderDeleteButtonText: {
-    color: '#b91c1c',
+    color: colors.dangerPressed,
     fontWeight: '700',
     fontSize: 13,
   },
@@ -7690,26 +8025,26 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   savedReminderPrimaryButton: {
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: 'center',
     width: '100%',
   },
   savedReminderPrimaryButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontSize: 18,
     fontWeight: '800',
   },
   savedReminderDangerButton: {
-    backgroundColor: '#dc2626',
+    backgroundColor: colors.dangerText,
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: 'center',
     width: '100%',
   },
   savedReminderDangerButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontSize: 18,
     fontWeight: '800',
   },
@@ -7721,12 +8056,12 @@ const styles = StyleSheet.create({
   confirmDeleteTitle: {
     fontSize: 24,
     fontWeight: '800',
-    color: '#111827',
+    color: colors.textPrimary,
     marginBottom: 4,
   },
   confirmDeleteText: {
     fontSize: 14,
-    color: '#475569',
+    color: colors.textSecondary,
     marginBottom: 12,
   },
   confirmDeleteActionRow: {
@@ -7738,23 +8073,23 @@ const styles = StyleSheet.create({
   confirmDeleteCancelButton: {
     flex: 1,
     borderRadius: 10,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
     paddingVertical: 12,
     alignItems: 'center',
   },
   confirmDeleteCancelText: {
-    color: '#111827',
+    color: colors.textPrimary,
     fontWeight: '700',
   },
   confirmDeleteDeleteButton: {
     flex: 1,
     borderRadius: 10,
-    backgroundColor: '#dc2626',
+    backgroundColor: colors.dangerText,
     paddingVertical: 12,
     alignItems: 'center',
   },
   confirmDeleteDeleteButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontWeight: '700',
   },
   modalTitle: {
@@ -7765,7 +8100,7 @@ const styles = StyleSheet.create({
   activeReminderCard: {
     width: '100%',
     maxWidth: 360,
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderRadius: 0,
     paddingTop: 14,
     paddingBottom: 6,
@@ -7775,42 +8110,42 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: '700',
     textAlign: 'center',
-    color: '#111827',
+    color: colors.textPrimary,
     marginBottom: 8,
   },
   activeReminderEventTitle: {
     fontSize: 22,
     fontWeight: '500',
     textAlign: 'center',
-    color: '#111827',
+    color: colors.textPrimary,
     marginHorizontal: 16,
   },
   activeReminderEventDetails: {
     fontSize: 16,
     textAlign: 'center',
-    color: '#111827',
+    color: colors.textPrimary,
     marginHorizontal: 16,
     marginTop: 2,
   },
   activeReminderActions: {
     marginTop: 12,
     borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
+    borderTopColor: colors.border,
   },
   activeReminderActionButton: {
     paddingVertical: 10,
     borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
+    borderTopColor: colors.border,
     alignItems: 'center',
   },
   activeReminderActionText: {
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
     fontSize: 18,
     fontWeight: '500',
   },
   modalBody: {
     fontSize: 15,
-    color: '#111827',
+    color: colors.textPrimary,
   },
   shareInviteBodyText: {
     textAlign: 'center',
@@ -7846,7 +8181,7 @@ const styles = StyleSheet.create({
   },
   confirmActionDivider: {
     width: 1,
-    backgroundColor: '#cbd5e1',
+    backgroundColor: colors.borderStrong,
     marginHorizontal: 10,
   },
   modalHeader: {
@@ -7857,7 +8192,7 @@ const styles = StyleSheet.create({
   },
   modalNav: {
     fontSize: 20,
-    color: '#2563eb',
+    color: colors.primary,
     paddingHorizontal: 8,
   },
   weekRow: {
@@ -7868,7 +8203,7 @@ const styles = StyleSheet.create({
   weekDay: {
     width: '14%',
     textAlign: 'center',
-    color: '#6b7280',
+    color: colors.textTertiary,
     fontSize: 12,
   },
   calendarGrid: {
@@ -7880,21 +8215,18 @@ const styles = StyleSheet.create({
     position: 'relative',
     overflow: 'hidden',
   },
-  calendarDateOverlayPanel: {
-    ...StyleSheet.absoluteFill,
-    padding: 16,
-    backgroundColor: '#f8fafc',
-    zIndex: 5,
-    elevation: 5,
+  calendarDateBelowPanel: {
+    marginTop: 12,
+    gap: 4,
   },
   calendarDateDetailCard: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 14,
     paddingHorizontal: 16,
     paddingVertical: 18,
-    backgroundColor: '#fff',
-    shadowColor: '#0f172a',
+    backgroundColor: colors.surface,
+    shadowColor: colors.shadow,
     shadowOpacity: 0.08,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
@@ -7914,35 +8246,43 @@ const styles = StyleSheet.create({
   },
   dayCellWithEvents: {
     borderWidth: 1,
-    borderColor: '#93c5fd',
-    backgroundColor: '#eff6ff',
+    borderColor: colors.primarySoft,
+    backgroundColor: colors.surfaceTint,
   },
   dayCellWithReminder: {
     borderWidth: 1,
-    borderColor: '#ef4444',
-    backgroundColor: '#fef2f2',
+    borderColor: colors.dangerText,
+    backgroundColor: colors.dangerBg,
   },
   selectedDayCell: {
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
+  },
+  todayDayCell: {
+    backgroundColor: colors.warning,
+    borderWidth: 0,
+  },
+  todayDayCellText: {
+    color: colors.surface,
+    fontWeight: '700',
   },
   dayText: {
-    color: '#111827',
+    color: colors.textPrimary,
   },
   todayText: {
     fontWeight: '700',
-    color: '#2563eb',
+    color: colors.primary,
   },
   selectedDayText: {
-    color: '#fff',
+    color: colors.surface,
     fontWeight: '700',
   },
   nextReminder: {
     fontSize: 16,
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
   },
   eventRow: {
     paddingVertical: 10,
-    borderTopColor: '#e5e7eb',
+    borderTopColor: colors.border,
     borderTopWidth: 1,
   },
   eventContentRow: {
@@ -7958,32 +8298,54 @@ const styles = StyleSheet.create({
   summaryLink: {
     paddingVertical: 6,
   },
+  summaryLinkColored: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 56,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginBottom: 4,
+  },
   summaryLinkText: {
-    color: '#2563eb',
+    color: colors.primary,
     fontWeight: '600',
     textDecorationLine: 'underline',
     flexShrink: 1,
   },
+  summaryLinkTextWrap: {
+    flex: 1,
+    lineHeight: 18,
+  },
+  summaryLinkTextColored: {
+    color: colors.surface,
+    textDecorationLine: 'none',
+  },
+  summaryLinkIcon: {
+    fontSize: 24,
+    marginRight: 8,
+  },
   reminderCountLink: {
-    color: '#2563eb',
+    color: colors.primary,
     fontWeight: '600',
     textDecorationLine: 'underline',
   },
   reminderCountLinkDisabled: {
-    color: '#64748b',
+    color: colors.textTertiary,
     textDecorationLine: 'none',
   },
   notesText: {
-    color: '#6b7280',
+    color: colors.textTertiary,
     fontSize: 13,
     marginTop: 4,
   },
   frequency: {
-    color: '#0f766e',
+    color: colors.accentTeal,
     marginTop: 2,
   },
   noActiveReminderText: {
-    color: '#dc2626',
+    color: colors.dangerText,
     fontWeight: '700',
   },
   actionColumn: {
@@ -7992,7 +8354,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   actionButton: {
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
     paddingHorizontal: 9,
     paddingVertical: 6,
     borderRadius: 7,
@@ -8000,17 +8362,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   actionButtonText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '600',
     fontSize: 12,
   },
   actionButtonDisabled: {
-    backgroundColor: '#cbd5e1',
+    backgroundColor: colors.borderStrong,
     opacity: 0.7,
   },
   reminderListItem: {
     borderWidth: 1,
-    borderColor: '#e5e7eb',
+    borderColor: colors.border,
     borderRadius: 10,
     padding: 10,
     marginBottom: 8,
@@ -8023,13 +8385,13 @@ const styles = StyleSheet.create({
   },
   reminderListDate: {
     fontWeight: '600',
-    color: '#111827',
+    color: colors.textPrimary,
     flexShrink: 1,
     flexWrap: 'nowrap',
   },
   reminderListNotes: {
     fontSize: 12,
-    color: '#6b7280',
+    color: colors.textTertiary,
     marginTop: 2,
     flexShrink: 1,
     flexWrap: 'nowrap',
@@ -8037,13 +8399,13 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   reminderDeleteButton: {
-    backgroundColor: '#fee2e2',
+    backgroundColor: colors.dangerBg,
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,
   },
   reminderDeleteButtonText: {
-    color: '#b91c1c',
+    color: colors.dangerPressed,
     fontSize: 12,
     fontWeight: '600',
   },

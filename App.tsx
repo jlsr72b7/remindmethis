@@ -5,6 +5,7 @@ import * as Contacts from 'expo-contacts/legacy';
 import {
   Alert,
   Animated,
+  Dimensions,
   Image,
   Keyboard,
   KeyboardAvoidingView,
@@ -24,6 +25,16 @@ import { Picker } from '@react-native-picker/picker';
 import * as Calendar from 'expo-calendar/legacy';
 import AppContent from './src/AppContent';
 import TimePickerModal from './src/TimePickerModal';
+import {
+  CalendarDefaultsSettings,
+  DEFAULT_CALENDAR_DEFAULTS_SETTINGS,
+  getCalendarDefaultsStorageKey,
+  HOLIDAY_RELIGION_LABELS,
+  HolidayReligion,
+  normalizeCalendarDefaultsSettings,
+} from './src/holidays';
+import { lightColors, ThemeColors, ThemeProvider, useTheme } from './src/theme';
+import TooltipButton from './src/TooltipButton';
 import {
   CalendarSyncPermission,
   CalendarSyncProvider,
@@ -110,13 +121,13 @@ class AppErrorBoundary extends React.Component<React.PropsWithChildren, AppError
   render() {
     if (this.state.hasError) {
       return (
-        <SafeAreaView style={styles.container}>
-          <View style={styles.migrationSplash}>
-            <Text style={styles.migrationSplashTitle}>App encountered a startup error</Text>
-            <Text style={styles.migrationSplashText}>
+        <SafeAreaView style={fallbackErrorStyles.container}>
+          <View style={fallbackErrorStyles.migrationSplash}>
+            <Text style={fallbackErrorStyles.migrationSplashTitle}>App encountered a startup error</Text>
+            <Text style={fallbackErrorStyles.migrationSplashText}>
               {this.state.errorMessage || 'A rendering problem occurred during startup.'}
             </Text>
-            <Text style={styles.migrationSplashText}>
+            <Text style={fallbackErrorStyles.migrationSplashText}>
               Reload the app. If this persists, backend can stay off and local mode should still work.
             </Text>
           </View>
@@ -244,13 +255,18 @@ const getContactPrimaryChannelLabel = (contact: { email?: string; mobileNumber?:
 };
 
 const formatImportedBirthDate = (birthday?: { month?: number | null; day?: number | null; year?: number | null } | null) => {
-  const month = Number(birthday?.month || 0);
-  const day = Number(birthday?.day || 0);
-  const year = Number(birthday?.year || 0);
+  const hasMonth = typeof birthday?.month === 'number' && Number.isFinite(birthday.month);
+  const hasDay = typeof birthday?.day === 'number' && Number.isFinite(birthday.day);
+  const hasYear = typeof birthday?.year === 'number' && Number.isFinite(birthday.year) && birthday.year > 0;
 
-  if (!month || !day || !year) {
+  if (!hasMonth || !hasDay || !hasYear) {
     return '';
   }
+
+  // expo-contacts returns month zero-indexed (0 = January) to match JS Date convention.
+  const month = Number(birthday!.month) + 1;
+  const day = Number(birthday!.day);
+  const year = Number(birthday!.year);
 
   return `${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}/${String(year).padStart(4, '0')}`;
 };
@@ -356,6 +372,8 @@ interface AuthScreenProps {
 }
 
 function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: AuthScreenProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createAppStyles(colors), [colors]);
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
@@ -1134,6 +1152,13 @@ interface DeviceContactImportCandidate {
 }
 
 type ContactsView = 'none' | 'contacts' | 'favorites' | 'groups';
+
+const CONTACTS_PANEL_TITLES: Record<ContactsView, string> = {
+  none: 'Contact Management',
+  contacts: 'Contacts',
+  favorites: 'Favorites',
+  groups: 'Groups',
+};
 type ContactsDisplayMode = 'detail' | 'summary';
 type GroupsDisplayMode = 'new' | 'summary' | 'manage';
 type AccountAction = 'none' | 'profile' | 'settings' | 'calendar-sync';
@@ -1164,6 +1189,8 @@ function AccountScreen({
   onBackToLanding,
   onContactBirthdaysImported,
 }: AccountScreenProps) {
+  const { colors, mode: themeMode, setMode: setThemeMode } = useTheme();
+  const styles = useMemo(() => createAppStyles(colors), [colors]);
   const initialNameParts = useMemo(() => splitNameParts(user.fullName || ''), [user.fullName]);
   const initialAddressParts = useMemo(() => parseAddressParts(user.address || ''), [user.address]);
   const [firstName, setFirstName] = useState(initialNameParts.firstName);
@@ -1203,6 +1230,7 @@ function AccountScreen({
   const [defaultReminderTimeZone, setDefaultReminderTimeZone] = useState(getDeviceTimeZone());
   const [defaultReminderTimeZoneDraft, setDefaultReminderTimeZoneDraft] = useState(getDeviceTimeZone());
   const [isSavingReminderTimeZone, setIsSavingReminderTimeZone] = useState(false);
+  const [calendarDefaults, setCalendarDefaults] = useState<CalendarDefaultsSettings>(DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
   const [calendarSyncProviderDraft, setCalendarSyncProviderDraft] = useState<CalendarSyncProvider>('none');
   const [googleCalendarPermission, setGoogleCalendarPermission] = useState<CalendarSyncPermission>('write');
   const [googleCalendarId, setGoogleCalendarId] = useState('');
@@ -1232,6 +1260,10 @@ function AccountScreen({
   const [isPushingGoogleCalendar, setIsPushingGoogleCalendar] = useState(false);
   const [isPushingAppleCalendar, setIsPushingAppleCalendar] = useState(false);
   const [showContactsModal, setShowContactsModal] = useState(false);
+  const [contactsBackupTickerVersion, setContactsBackupTickerVersion] = useState(0);
+  const contactsBackupTickerStartX = Dimensions.get('window').width;
+  const contactsBackupTickerX = useRef(new Animated.Value(contactsBackupTickerStartX)).current;
+  const [contactsBackupTickerTextWidth, setContactsBackupTickerTextWidth] = useState(0);
   const [contacts, setContacts] = useState<AccountContact[]>([]);
   const [contactGroups, setContactGroups] = useState<ContactGroup[]>([]);
   const [contactsLastSyncedAt, setContactsLastSyncedAt] = useState<string | null>(null);
@@ -1250,6 +1282,7 @@ function AccountScreen({
   const [activeSummaryContactId, setActiveSummaryContactId] = useState<string | null>(null);
   const [contactAddressPredictions, setContactAddressPredictions] = useState<GoogleAddressPrediction[]>([]);
   const [contactAddressAutocompleteSessionToken] = useState(() => `addr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const ignoreContactsBackTapUntilRef = useRef(0);
   const skipNextContactAutocompleteFetchRef = useRef(0);
   const isSelectingAccountAddressPredictionRef = useRef(false);
   const accountAddressBlurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1789,6 +1822,14 @@ function AccountScreen({
         setIsAppleSyncPaused(false);
       }
 
+      try {
+        const rawCalendarDefaults = await AsyncStorage.getItem(getCalendarDefaultsStorageKey(user.id));
+        setCalendarDefaults(rawCalendarDefaults ? normalizeCalendarDefaultsSettings(JSON.parse(rawCalendarDefaults)) : DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
+      } catch (error) {
+        console.warn('Unable to load account calendar defaults settings', error);
+        setCalendarDefaults(DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
+      }
+
       await Promise.all([
         refreshGoogleConnectionStatus(),
         refreshOutlookConnectionStatus(),
@@ -1796,6 +1837,30 @@ function AccountScreen({
       ]);
     })();
   }, [user.id, onReminderTimeZoneUpdated, refreshGoogleConnectionStatus, refreshOutlookConnectionStatus, refreshAppleConnectionStatus]);
+
+  const persistCalendarDefaults = useCallback(async (nextSettings: CalendarDefaultsSettings) => {
+    setCalendarDefaults(nextSettings);
+    try {
+      await AsyncStorage.setItem(getCalendarDefaultsStorageKey(user.id), JSON.stringify(nextSettings));
+    } catch (error) {
+      console.warn('Unable to save account calendar defaults settings', error);
+    }
+  }, [user.id]);
+
+  const handleToggleUsPublicHolidays = () => {
+    void persistCalendarDefaults({ ...calendarDefaults, usPublicEnabled: !calendarDefaults.usPublicEnabled });
+  };
+
+  const handleToggleObservances = () => {
+    void persistCalendarDefaults({ ...calendarDefaults, observancesEnabled: !calendarDefaults.observancesEnabled });
+  };
+
+  const handleToggleHolidayReligion = (religion: HolidayReligion) => {
+    const nextReligions = calendarDefaults.religions.includes(religion)
+      ? calendarDefaults.religions.filter((entry) => entry !== religion)
+      : [...calendarDefaults.religions, religion];
+    void persistCalendarDefaults({ ...calendarDefaults, religions: nextReligions });
+  };
 
   const openCalendarSyncEditor = (provider: CalendarSyncProvider) => {
     setCalendarSyncProviderDraft(provider);
@@ -3387,6 +3452,11 @@ function AccountScreen({
       setContactsMessage('Unable to load iPhone contacts right now.');
     } finally {
       setIsLoadingDeviceContacts(false);
+      setActiveContactsView('contacts');
+      // The iPhone contact picker dismissing sometimes delivers a stray tap to whatever is
+      // underneath (the Back button), which would otherwise bounce us out to the Contacts/
+      // Favorites/Groups menu right after re-asserting the contacts list above.
+      ignoreContactsBackTapUntilRef.current = Date.now() + 800;
     }
   }, [importDeviceContacts, mapDeviceContactToImportCandidate]);
 
@@ -3814,7 +3884,6 @@ function AccountScreen({
   };
 
   const handleOpenContacts = async () => {
-    await loadContacts();
     setActiveContactsView('none');
     setGroupsDisplayMode('summary');
     setNewGroupName('');
@@ -3823,6 +3892,8 @@ function AccountScreen({
     setContactsMessage(null);
     resetContactEditor();
     setShowContactsModal(true);
+    setContactsBackupTickerVersion((value) => value + 1);
+    await loadContacts();
   };
 
   const closeContactsPanel = () => {
@@ -3831,6 +3902,10 @@ function AccountScreen({
   };
 
   const handleContactsBack = () => {
+    if (Date.now() < ignoreContactsBackTapUntilRef.current) {
+      return;
+    }
+
     if (isEditingContact) {
       resetContactEditor();
       return;
@@ -3910,6 +3985,40 @@ function AccountScreen({
 
     onInitialActionHandled?.();
   }, [initialAccountAction, onInitialActionHandled]);
+
+  useEffect(() => {
+    if (!showContactsModal) {
+      return;
+    }
+
+    const TICKER_SPEED_PX_PER_SEC = 65;
+    const TICKER_END_BUFFER = 20;
+
+    const endX = -((contactsBackupTickerTextWidth || 300) + TICKER_END_BUFFER);
+    const duration = ((contactsBackupTickerStartX - endX) / TICKER_SPEED_PX_PER_SEC) * 1000;
+
+    const backupAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(contactsBackupTickerX, {
+          toValue: endX,
+          duration,
+          useNativeDriver: true,
+        }),
+        Animated.delay(50),
+        Animated.timing(contactsBackupTickerX, {
+          toValue: contactsBackupTickerStartX,
+          duration: 0,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    backupAnimation.start();
+
+    return () => {
+      backupAnimation.stop();
+    };
+  }, [showContactsModal, contactsBackupTickerVersion, contactsBackupTickerX, contactsBackupTickerTextWidth, contactsBackupTickerStartX]);
 
   return (
     <ScrollView style={styles.accountScreen} contentContainerStyle={styles.accountScreenContent} keyboardShouldPersistTaps="handled">
@@ -4280,8 +4389,7 @@ function AccountScreen({
             <View style={styles.accountHeaderLeft}>
               <Image source={require('./assets/icon.png')} style={styles.accountHeaderLogo} resizeMode="cover" />
               <View style={styles.accountHeaderTextWrap}>
-                <Text style={styles.accountTitle}>Contacts</Text>
-                <Text style={styles.accountSubtitle}>{contactsLastSyncedLabel}</Text>
+                <Text style={styles.accountTitle}>{CONTACTS_PANEL_TITLES[activeContactsView]}</Text>
               </View>
             </View>
             <TouchableOpacity
@@ -4290,6 +4398,20 @@ function AccountScreen({
             >
               <Text style={styles.secondaryButtonText}>Back</Text>
             </TouchableOpacity>
+          </View>
+
+          <View style={styles.contactsBackupTickerWrap}>
+            <Animated.View
+              key={`contacts-backup-ticker-${contactsBackupTickerVersion}`}
+              style={[styles.contactsBackupTickerRow, { transform: [{ translateX: contactsBackupTickerX }] }]}
+            >
+              <Text
+                style={styles.contactsBackupTickerText}
+                onLayout={(event) => setContactsBackupTickerTextWidth(event.nativeEvent.layout.width)}
+              >
+                {contactsLastSyncedLabel}
+              </Text>
+            </Animated.View>
           </View>
 
           {activeContactsView !== 'none' && contactsMessage ? <Text style={styles.message}>{contactsMessage}</Text> : null}
@@ -4409,7 +4531,7 @@ function AccountScreen({
                       value={contactAddressLine2}
                       onChangeText={setContactAddressLine2}
                       placeholder="Address line 2"
-                      placeholderTextColor="#94a3b8"
+                      placeholderTextColor={colors.textPlaceholder}
                     />
 
                     <TextInput
@@ -4662,7 +4784,7 @@ function AccountScreen({
                               value={groupMembersSearch}
                               onChangeText={setGroupMembersSearch}
                               placeholder="Search members"
-                              placeholderTextColor="#94a3b8"
+                              placeholderTextColor={colors.textPlaceholder}
                               autoCapitalize="none"
                               autoCorrect={false}
                             />
@@ -4713,7 +4835,7 @@ function AccountScreen({
                               value={groupAddContactsSearch}
                               onChangeText={setGroupAddContactsSearch}
                               placeholder="Search contacts"
-                              placeholderTextColor="#94a3b8"
+                              placeholderTextColor={colors.textPlaceholder}
                               autoCapitalize="none"
                               autoCorrect={false}
                             />
@@ -5139,6 +5261,20 @@ function AccountScreen({
             </View>
 
             <View style={styles.settingsLinkItem}>
+              <TouchableOpacity style={styles.settingsLinkButton} onPress={() => void handleOpenContacts()}>
+                <Text style={styles.settingsLinkText}>Contact Management</Text>
+              </TouchableOpacity>
+              <Text style={styles.settingsLinkDescription}>Manage contacts, favorites, and groups.</Text>
+            </View>
+
+            <View style={styles.settingsLinkItem}>
+              <TouchableOpacity style={styles.settingsLinkButton} onPress={() => setActiveAccountAction('calendar-sync')}>
+                <Text style={styles.settingsLinkText}>Calendar Sync</Text>
+              </TouchableOpacity>
+              <Text style={styles.settingsLinkDescription}>Connect and manage Google, Apple, and Outlook calendar syncing.</Text>
+            </View>
+
+            <View style={styles.settingsLinkItem}>
               <TouchableOpacity
                 style={styles.settingsLinkButton}
                 onPress={() => {
@@ -5354,6 +5490,86 @@ function AccountScreen({
                       ))}
                     </View>
                   </View>
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.sectionTitle}>Calendar defaults</Text>
+
+                  <TouchableOpacity style={styles.preferenceToggleRow} onPress={handleToggleUsPublicHolidays} activeOpacity={0.8}>
+                    <View style={styles.passwordCheckbox}>
+                      {calendarDefaults.usPublicEnabled ? <View style={styles.passwordCheckboxChecked} /> : null}
+                    </View>
+                    <Text style={styles.preferenceToggleText}>US Public Holidays</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity style={styles.preferenceToggleRow} onPress={handleToggleObservances} activeOpacity={0.8}>
+                    <View style={styles.passwordCheckbox}>
+                      {calendarDefaults.observancesEnabled ? <View style={styles.passwordCheckboxChecked} /> : null}
+                    </View>
+                    <Text style={styles.preferenceToggleText}>Observances</Text>
+                  </TouchableOpacity>
+
+                  <Text style={[styles.preferenceSubheading, { marginTop: 10 }]}>Religious Holidays</Text>
+                  <View style={styles.calendarReligionOptionsWrap}>
+                    <View style={styles.calendarReligionGridRow}>
+                      {(['christian', 'jewish'] as HolidayReligion[]).map((religion) => (
+                        <TouchableOpacity
+                          key={religion}
+                          style={[styles.preferenceToggleRow, styles.calendarReligionGridCell]}
+                          onPress={() => handleToggleHolidayReligion(religion)}
+                          activeOpacity={0.8}
+                        >
+                          <View style={styles.passwordCheckbox}>
+                            {calendarDefaults.religions.includes(religion) ? <View style={styles.passwordCheckboxChecked} /> : null}
+                          </View>
+                          <Text style={styles.preferenceToggleText}>{HOLIDAY_RELIGION_LABELS[religion]}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                    <View style={styles.calendarReligionGridRow}>
+                      {(['muslim', 'hindu'] as HolidayReligion[]).map((religion) => (
+                        <TouchableOpacity
+                          key={religion}
+                          style={[styles.preferenceToggleRow, styles.calendarReligionGridCell]}
+                          onPress={() => handleToggleHolidayReligion(religion)}
+                          activeOpacity={0.8}
+                        >
+                          <View style={styles.passwordCheckbox}>
+                            {calendarDefaults.religions.includes(religion) ? <View style={styles.passwordCheckboxChecked} /> : null}
+                          </View>
+                          <Text style={styles.preferenceToggleText}>{HOLIDAY_RELIGION_LABELS[religion]}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.sectionTitle}>Appearance</Text>
+                  <View style={styles.calendarReligionGridRow}>
+                    {([
+                      { value: 'light' as const, label: 'Light Mode' },
+                      { value: 'dark' as const, label: 'Dark Mode' },
+                    ]).map((option) => (
+                      <TouchableOpacity
+                        key={option.value}
+                        style={[styles.preferenceToggleRow, styles.calendarReligionGridCell]}
+                        onPress={() => setThemeMode(option.value)}
+                        activeOpacity={0.8}
+                      >
+                        <View style={styles.passwordCheckbox}>
+                          {themeMode === option.value ? <View style={styles.passwordCheckboxChecked} /> : null}
+                        </View>
+                        <Text style={styles.preferenceToggleText}>{option.label}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <TouchableOpacity style={styles.preferenceToggleRow} onPress={() => setThemeMode('system')} activeOpacity={0.8}>
+                    <View style={styles.passwordCheckbox}>
+                      {themeMode === 'system' ? <View style={styles.passwordCheckboxChecked} /> : null}
+                    </View>
+                    <Text style={styles.preferenceToggleText}>Use iPhone system setting</Text>
+                  </TouchableOpacity>
                 </View>
               </View>
             ) : null}
@@ -5639,7 +5855,9 @@ interface AppSessionState {
   showAccount: boolean;
 }
 
-export default function App() {
+function App() {
+  const { colors, resolvedTheme } = useTheme();
+  const styles = useMemo(() => createAppStyles(colors), [colors]);
   const [authMode, setAuthMode] = useState<AuthMode>('signin');
   const [currentUser, setCurrentUser] = useState<StoredUser | null>(null);
   const [showAccount, setShowAccount] = useState(false);
@@ -5970,7 +6188,7 @@ export default function App() {
           />
         </Animated.View>
         <Text style={styles.titleSplashBrand}>Remind Me This</Text>
-        <StatusBar style="auto" />
+        <StatusBar style={resolvedTheme === 'dark' ? 'light' : 'dark'} />
       </SafeAreaView>
     );
   }
@@ -5982,7 +6200,7 @@ export default function App() {
           <Text style={styles.migrationSplashTitle}>{isRestoringSession ? 'Restoring your session...' : 'Preparing your account data...'}</Text>
           <Text style={styles.migrationSplashText}>{isRestoringSession ? 'Reopening your app where you left off.' : 'Running one-time migration to persistent database storage.'}</Text>
         </View>
-        <StatusBar style="auto" />
+        <StatusBar style={resolvedTheme === 'dark' ? 'light' : 'dark'} />
       </SafeAreaView>
     );
   }
@@ -6048,7 +6266,7 @@ export default function App() {
             ) : null}
           </View>
         </View>
-        <StatusBar style="auto" />
+        <StatusBar style={resolvedTheme === 'dark' ? 'light' : 'dark'} />
       </SafeAreaView>
     );
   }
@@ -6117,9 +6335,9 @@ export default function App() {
             <Text style={styles.headerBrandTitle}>Remind Me This</Text>
           </View>
           <View style={styles.headerActions}>
-            <TouchableOpacity style={styles.secondaryButton} onPress={() => setShowAccount(true)}>
-              <Text style={styles.secondaryButtonText}>Settings</Text>
-            </TouchableOpacity>
+            <TooltipButton label="Settings" style={styles.secondaryButton} onPress={() => setShowAccount(true)}>
+              <Text style={styles.secondaryButtonIcon}>⚙️</Text>
+            </TooltipButton>
             <TouchableOpacity
               style={styles.signOutButton}
               onPress={() => {
@@ -6132,22 +6350,13 @@ export default function App() {
             </TouchableOpacity>
           </View>
         </View>
+        <Text style={styles.headerBrandSubtitle} numberOfLines={1} adjustsFontSizeToFit>Create Birthday, Anniversary and other Event Reminders</Text>
         <AppContent
           userId={currentUser.id}
           userEmail={currentUser.email}
           defaultReminderTimeZone={accountReminderTimeZone}
           pendingBirthdayImports={pendingBirthdayImports}
           onBirthdayImportsProcessed={() => setPendingBirthdayImports([])}
-          onOpenContacts={() => {
-            setRequestedAccountAction('contacts');
-            setShouldReturnToLandingFromAccount(true);
-            setShowAccount(true);
-          }}
-          onOpenCalendarSync={() => {
-            setRequestedAccountAction('calendar-sync');
-            setShouldReturnToLandingFromAccount(true);
-            setShowAccount(true);
-          }}
         />
       </View>
     );
@@ -6157,25 +6366,25 @@ export default function App() {
     <AppErrorBoundary>
       <SafeAreaView style={styles.container}>
         {content}
-        <StatusBar style="auto" />
+        <StatusBar style={resolvedTheme === 'dark' ? 'light' : 'dark'} />
       </SafeAreaView>
     </AppErrorBoundary>
   );
 }
 
-const styles = StyleSheet.create({
+const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f7ff',
+    backgroundColor: colors.surfaceTint,
   },
   authBackground: {
     flex: 1,
     width: '100%',
-    backgroundColor: '#f5f7ff',
+    backgroundColor: colors.surfaceTint,
   },
   authContainer: {
     flex: 1,
-    backgroundColor: '#f5f7ff',
+    backgroundColor: colors.surfaceTint,
     position: 'relative',
   },
   authScroll: {
@@ -6194,7 +6403,7 @@ const styles = StyleSheet.create({
     width: 260,
     height: 260,
     borderRadius: 130,
-    backgroundColor: '#93c5fd',
+    backgroundColor: colors.primarySoft,
     top: '10%',
   },
   authCard: {
@@ -6203,7 +6412,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.78)',
     borderRadius: 20,
     padding: 24,
-    shadowColor: '#0f172a',
+    shadowColor: colors.shadow,
     shadowOpacity: 0.12,
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 10 },
@@ -6220,13 +6429,13 @@ const styles = StyleSheet.create({
     width: 48,
     height: 48,
     borderRadius: 16,
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
   },
   brandBadgeText: {
-    color: '#fff',
+    color: colors.surface,
     fontSize: 22,
   },
   brandBadgeImage: {
@@ -6241,10 +6450,10 @@ const styles = StyleSheet.create({
   appName: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
   },
   appTagline: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontSize: 12,
     marginTop: 2,
   },
@@ -6256,37 +6465,37 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   modePillDefault: {
-    backgroundColor: '#f1f5f9',
+    backgroundColor: colors.surfaceSubtle,
   },
   modePillActive: {
-    backgroundColor: '#dbeafe',
+    backgroundColor: colors.borderTint,
   },
   modePillText: {
-    color: '#475569',
+    color: colors.textSecondary,
     fontWeight: '600',
     fontSize: 12,
   },
   modePillTextActive: {
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
   },
   title: {
     fontSize: 24,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
     marginBottom: 6,
   },
   subtitle: {
-    color: '#64748b',
+    color: colors.textTertiary,
     marginBottom: 10,
   },
   userAgreementCaption: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontSize: 12,
     marginBottom: 8,
   },
   bootstrapNote: {
-    backgroundColor: '#ecfeff',
-    color: '#0f766e',
+    backgroundColor: colors.surfaceTint,
+    color: colors.accentTeal,
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 8,
@@ -6294,8 +6503,8 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   message: {
-    backgroundColor: '#eff6ff',
-    color: '#1d4ed8',
+    backgroundColor: colors.surfaceTint,
+    color: colors.primaryPressed,
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 8,
@@ -6307,17 +6516,17 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   resendVerificationLinkText: {
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
     fontSize: 13,
     fontWeight: '700',
     textDecorationLine: 'underline',
   },
   resendVerificationLinkTextDisabled: {
-    color: '#93c5fd',
+    color: colors.primarySoft,
   },
   successToast: {
-    backgroundColor: '#dcfce7',
-    borderColor: '#86efac',
+    backgroundColor: colors.successBg,
+    borderColor: colors.successBorder,
     borderWidth: 1,
     borderRadius: 10,
     paddingHorizontal: 10,
@@ -6325,44 +6534,44 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   successToastText: {
-    color: '#166534',
+    color: colors.successText,
     fontWeight: '700',
     fontSize: 13,
   },
   fieldLabel: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#334155',
+    color: colors.textSecondary,
     marginBottom: 6,
     marginTop: 2,
   },
   optionalAddressLine2Input: {
     fontStyle: 'italic',
-    color: '#94a3b8',
+    color: colors.textPlaceholder,
   },
   pickerWrap: {
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     marginBottom: 12,
-    backgroundColor: '#f8fafc',
-    shadowColor: '#94a3b8',
+    backgroundColor: colors.background,
+    shadowColor: colors.textPlaceholder,
     shadowOpacity: 0.08,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
   },
   picker: {
-    color: '#111827',
+    color: colors.textPrimary,
   },
   input: {
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
     marginBottom: 12,
-    backgroundColor: '#f8fafc',
-    shadowColor: '#94a3b8',
+    backgroundColor: colors.background,
+    shadowColor: colors.textPlaceholder,
     shadowOpacity: 0.08,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
@@ -6378,12 +6587,12 @@ const styles = StyleSheet.create({
   passwordInput: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    backgroundColor: '#f8fafc',
-    shadowColor: '#94a3b8',
+    backgroundColor: colors.background,
+    shadowColor: colors.textPlaceholder,
     shadowOpacity: 0.08,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
@@ -6393,45 +6602,45 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 10,
     borderRadius: 10,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
   },
   passwordToggleText: {
     fontSize: 16,
   },
   submitButton: {
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
     paddingVertical: 12,
     borderRadius: 10,
     alignItems: 'center',
     marginTop: 8,
   },
   submitButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontWeight: '700',
   },
   rulesBox: {
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
     padding: 10,
     borderRadius: 8,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: colors.border,
   },
   ruleText: {
     fontSize: 12,
     marginBottom: 2,
   },
   ruleTextUnmet: {
-    color: '#475569',
+    color: colors.textSecondary,
   },
   ruleTextMet: {
-    color: '#15803d',
+    color: colors.successText,
     fontWeight: '700',
   },
   signupPersonalDetailsTitle: {
     fontSize: 24,
     fontWeight: '700',
-    color: '#1e293b',
+    color: colors.textPrimary,
     marginBottom: 10,
   },
   linkRow: {
@@ -6439,12 +6648,12 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   switchText: {
-    color: '#2563eb',
+    color: colors.primary,
     textAlign: 'center',
     fontWeight: '600',
   },
   secondaryLink: {
-    color: '#0f766e',
+    color: colors.accentTeal,
     textAlign: 'center',
     fontWeight: '600',
   },
@@ -6470,10 +6679,17 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   headerBrandTitle: {
-    fontSize: 14,
+    fontSize: 18,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
     textAlign: 'center',
+  },
+  headerBrandSubtitle: {
+    fontSize: 12,
+    color: colors.textTertiary,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+    marginTop: 2,
   },
   headerActions: {
     flexDirection: 'row',
@@ -6483,35 +6699,39 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
   },
   secondaryButtonText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '600',
+    textAlign: 'center',
+  },
+  secondaryButtonIcon: {
+    fontSize: 18,
     textAlign: 'center',
   },
   signOutButton: {
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
   },
   signOutButtonText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '600',
   },
   titleSplashContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   titleSplashBackdrop: {
     position: 'absolute',
     inset: 0,
-    backgroundColor: '#edf6ff',
+    backgroundColor: colors.surfaceTint,
   },
   titleSplashLogoWrap: {
     width: 170,
@@ -6519,8 +6739,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 38,
-    backgroundColor: '#ffffff',
-    shadowColor: '#1d4ed8',
+    backgroundColor: colors.surface,
+    shadowColor: colors.primaryPressed,
     shadowOpacity: 0.22,
     shadowRadius: 28,
     shadowOffset: { width: 0, height: 16 },
@@ -6541,7 +6761,7 @@ const styles = StyleSheet.create({
     width: 64,
     height: 220,
     backgroundColor: 'rgba(255,255,255,0.82)',
-    shadowColor: '#ffffff',
+    shadowColor: colors.surface,
     shadowOpacity: 0.95,
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 0 },
@@ -6552,10 +6772,10 @@ const styles = StyleSheet.create({
     top: 18,
     width: 24,
     height: 24,
-    backgroundColor: '#dbeafe',
+    backgroundColor: colors.borderTint,
     borderRadius: 6,
     transform: [{ rotate: '45deg' }],
-    shadowColor: '#60a5fa',
+    shadowColor: colors.primarySoft,
     shadowOpacity: 0.9,
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 0 },
@@ -6564,7 +6784,7 @@ const styles = StyleSheet.create({
     marginTop: 18,
     fontSize: 24,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
     letterSpacing: 0.2,
   },
   migrationSplash: {
@@ -6576,28 +6796,28 @@ const styles = StyleSheet.create({
   migrationSplashTitle: {
     fontSize: 22,
     fontWeight: '700',
-    color: '#111827',
+    color: colors.textPrimary,
     textAlign: 'center',
     marginBottom: 8,
   },
   migrationSplashText: {
     fontSize: 14,
-    color: '#475569',
+    color: colors.textSecondary,
     textAlign: 'center',
   },
   accountScreen: {
     flex: 1,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   accountScreenContent: {
     padding: 16,
     paddingBottom: 32,
   },
   accountCard: {
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderRadius: 16,
     padding: 10,
-    shadowColor: '#0f172a',
+    shadowColor: colors.shadow,
     shadowOpacity: 0.08,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
@@ -6627,14 +6847,14 @@ const styles = StyleSheet.create({
   accountMainPane: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     padding: 12,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
   },
   settingsLinksWrap: {
     borderBottomWidth: 1,
-    borderBottomColor: '#e2e8f0',
+    borderBottomColor: colors.border,
     paddingBottom: 10,
     marginBottom: 10,
     gap: 10,
@@ -6646,17 +6866,17 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   settingsLinkText: {
-    color: '#2563eb',
+    color: colors.primary,
     fontSize: 14,
     fontWeight: '600',
     textDecorationLine: 'underline',
   },
   settingsLinkTextActive: {
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
     fontWeight: '700',
   },
   settingsLinkDescription: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontSize: 12,
   },
   accountDetailsColumns: {
@@ -6677,10 +6897,10 @@ const styles = StyleSheet.create({
   accountAddressBlock: {
     marginTop: 2,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     padding: 10,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   accountAddressCityStateZipRow: {
     flexDirection: 'row',
@@ -6729,9 +6949,9 @@ const styles = StyleSheet.create({
   },
   addressSuggestionsList: {
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
     marginTop: -2,
     marginBottom: 8,
     overflow: 'hidden',
@@ -6740,41 +6960,56 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#e2e8f0',
+    borderBottomColor: colors.border,
   },
   addressSuggestionMainText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontSize: 13,
     fontWeight: '600',
   },
   addressSuggestionSecondaryText: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontSize: 11,
     marginTop: 2,
   },
   accountTitle: {
     fontSize: 22,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
   },
   accountSubtitle: {
-    color: '#64748b',
+    color: colors.textTertiary,
     marginTop: 2,
   },
   contactsSyncMarker: {
-    color: '#94a3b8',
+    color: colors.textPlaceholder,
     marginTop: 2,
     fontSize: 11,
+  },
+  contactsBackupTickerWrap: {
+    overflow: 'hidden',
+    height: 20,
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  contactsBackupTickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: 2000,
+  },
+  contactsBackupTickerText: {
+    fontSize: 12,
+    color: colors.textTertiary,
   },
   sectionTitle: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
     marginTop: 10,
     marginBottom: 8,
   },
   primaryButton: {
-    backgroundColor: '#2563eb',
+    backgroundColor: colors.primary,
     paddingVertical: 12,
     borderRadius: 10,
     alignItems: 'center',
@@ -6790,7 +7025,7 @@ const styles = StyleSheet.create({
     marginTop: 16,
   },
   primaryButtonDisabled: {
-    backgroundColor: '#93c5fd',
+    backgroundColor: colors.primarySoft,
   },
   modalActionsRow: {
     flexDirection: 'row',
@@ -6802,7 +7037,7 @@ const styles = StyleSheet.create({
     marginBottom: 0,
   },
   primaryButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontWeight: '700',
   },
   passwordSection: {
@@ -6820,11 +7055,11 @@ const styles = StyleSheet.create({
     minWidth: 160,
   },
   accountChangePasswordButton: {
-    backgroundColor: '#f59e0b',
-    borderColor: '#d97706',
+    backgroundColor: colors.warning,
+    borderColor: colors.warningText,
   },
   accountChangePasswordButtonText: {
-    color: '#ffffff',
+    color: colors.surface,
     fontWeight: '700',
   },
   contactsModalCard: {
@@ -6838,10 +7073,10 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 860,
     alignSelf: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderRadius: 16,
     padding: 10,
-    shadowColor: '#0f172a',
+    shadowColor: colors.shadow,
     shadowOpacity: 0.08,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
@@ -6857,10 +7092,10 @@ const styles = StyleSheet.create({
     width: '100%',
     minHeight: 170,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     padding: 8,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
   },
   contactsBody: {
     flex: 1,
@@ -6871,7 +7106,7 @@ const styles = StyleSheet.create({
   },
   contactsLinksWrap: {
     borderBottomWidth: 1,
-    borderBottomColor: '#e2e8f0',
+    borderBottomColor: colors.border,
     paddingBottom: 10,
     marginBottom: 10,
     gap: 10,
@@ -6883,13 +7118,13 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   contactsLinkText: {
-    color: '#2563eb',
+    color: colors.primary,
     fontSize: 14,
     fontWeight: '600',
     textDecorationLine: 'underline',
   },
   contactsLinkDescription: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontSize: 12,
   },
   contactsTopActions: {
@@ -6904,7 +7139,7 @@ const styles = StyleSheet.create({
     minWidth: 64,
   },
   contactsTopActionButtonActive: {
-    backgroundColor: '#bfdbfe',
+    backgroundColor: colors.borderTint,
   },
   contactsList: {
     width: '100%',
@@ -6920,21 +7155,21 @@ const styles = StyleSheet.create({
   },
   contactRowCard: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
     marginBottom: 8,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   contactsSummaryRow: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
     marginBottom: 8,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   groupSummaryRow: {
     flexDirection: 'row',
@@ -6945,11 +7180,11 @@ const styles = StyleSheet.create({
   groupSummaryRowPressable: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   groupSummaryDeleteButton: {
     minWidth: 82,
@@ -6959,13 +7194,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   contactsSummaryRowText: {
-    color: '#2563eb',
+    color: colors.primary,
     fontWeight: '600',
     fontSize: 13,
     textDecorationLine: 'underline',
   },
   groupsSummaryRowText: {
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
   },
   contactsSummaryModalCard: {
     maxWidth: 560,
@@ -6989,7 +7224,7 @@ const styles = StyleSheet.create({
     marginBottom: 0,
   },
   contactsSummaryActionText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '600',
     textAlign: 'center',
     fontSize: 11,
@@ -6999,10 +7234,10 @@ const styles = StyleSheet.create({
   },
   contactSupportStandalonePanel: {
     width: '100%',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderRadius: 16,
     padding: 16,
-    shadowColor: '#0f172a',
+    shadowColor: colors.shadow,
     shadowOpacity: 0.08,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
@@ -7018,14 +7253,14 @@ const styles = StyleSheet.create({
     minHeight: 150,
   },
   contactSupportErrorText: {
-    color: '#b91c1c',
+    color: colors.dangerPressed,
     marginTop: 6,
   },
   contactsSummaryDetailsCard: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
     padding: 12,
     marginTop: 4,
   },
@@ -7071,7 +7306,7 @@ const styles = StyleSheet.create({
   groupSummaryMemberRow: {
     paddingVertical: 6,
     borderBottomWidth: 1,
-    borderBottomColor: '#e2e8f0',
+    borderBottomColor: colors.border,
   },
   contactsCardActionsRow: {
     marginTop: 10,
@@ -7091,12 +7326,12 @@ const styles = StyleSheet.create({
     marginBottom: 0,
   },
   contactRowName: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '700',
     fontSize: 14,
   },
   contactRowMeta: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontSize: 12,
     marginTop: 2,
   },
@@ -7112,13 +7347,13 @@ const styles = StyleSheet.create({
     fontSize: 52,
   },
   contactsEmptyTitle: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontSize: 22,
     fontWeight: '700',
     textAlign: 'center',
   },
   contactsEmptySubtext: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontSize: 14,
     textAlign: 'center',
   },
@@ -7132,13 +7367,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderRadius: 999,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
   },
   contactsGroupChipActive: {
-    backgroundColor: '#bfdbfe',
+    backgroundColor: colors.borderTint,
   },
   contactsGroupChipText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '700',
     fontSize: 12,
   },
@@ -7149,9 +7384,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 10,
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   preferenceToggleRow: {
     flexDirection: 'row',
@@ -7160,12 +7395,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
   },
   preferenceSubheading: {
-    color: '#334155',
+    color: colors.textSecondary,
     fontWeight: '600',
     marginBottom: 2,
   },
   preferenceHelperText: {
-    color: '#475569',
+    color: colors.textSecondary,
     marginBottom: 0,
     marginLeft: 8,
   },
@@ -7184,10 +7419,19 @@ const styles = StyleSheet.create({
   clockIntervalOption: {
     marginBottom: 0,
   },
+  calendarReligionOptionsWrap: {
+    marginTop: 4,
+  },
+  calendarReligionGridRow: {
+    flexDirection: 'row',
+  },
+  calendarReligionGridCell: {
+    flex: 1,
+  },
   pickerWrapper: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
     marginBottom: 8,
     overflow: 'hidden',
@@ -7202,7 +7446,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 8,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
   },
   deliveryPrimaryRow: {
     flexDirection: 'row',
@@ -7219,7 +7463,7 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   deliveryVerificationHint: {
-    color: '#475569',
+    color: colors.textSecondary,
     fontSize: 12,
     marginBottom: 8,
   },
@@ -7228,39 +7472,39 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   deviceInstructionLinkText: {
-    color: '#2563eb',
+    color: colors.primary,
     fontWeight: '600',
     textDecorationLine: 'underline',
   },
   preferenceToggleText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '600',
   },
   preferenceToggleDisabled: {
     opacity: 0.45,
   },
   preferenceToggleDisabledText: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontWeight: '600',
   },
   passwordCheckbox: {
     width: 16,
     height: 16,
     borderWidth: 1,
-    borderColor: '#64748b',
+    borderColor: colors.textTertiary,
     borderRadius: 4,
     marginRight: 8,
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
   },
   passwordCheckboxDisabled: {
-    backgroundColor: '#f1f5f9',
+    backgroundColor: colors.surfaceSubtle,
   },
   passwordCheckboxChecked: {
     width: 10,
     height: 10,
     margin: 2,
     borderRadius: 2,
-    backgroundColor: '#0f172a',
+    backgroundColor: colors.textPrimary,
   },
   authAgreementBlock: {
     marginBottom: 14,
@@ -7269,13 +7513,13 @@ const styles = StyleSheet.create({
     marginTop: 4,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     padding: 10,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   signupSmsConsentHint: {
-    color: '#475569',
+    color: colors.textSecondary,
     fontSize: 12,
     marginTop: 4,
   },
@@ -7290,20 +7534,20 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#94a3b8',
-    backgroundColor: '#e2e8f0',
+    borderColor: colors.textPlaceholder,
+    backgroundColor: colors.border,
     alignItems: 'center',
   },
   signupSmsConsentButtonSelected: {
-    backgroundColor: '#bfdbfe',
-    borderColor: '#3b82f6',
+    backgroundColor: colors.borderTint,
+    borderColor: colors.primarySoft,
   },
   signupSmsConsentButtonText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '700',
   },
   signupSmsConsentButtonTextSelected: {
-    color: '#1d4ed8',
+    color: colors.primaryPressed,
   },
   authAgreementRow: {
     flexDirection: 'row',
@@ -7312,29 +7556,29 @@ const styles = StyleSheet.create({
   },
   authAgreementText: {
     flex: 1,
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontSize: 13,
     lineHeight: 18,
   },
   authAgreementLink: {
-    color: '#2563eb',
+    color: colors.primary,
     fontSize: 13,
     fontWeight: '600',
     marginLeft: 24,
     textDecorationLine: 'underline',
   },
   authAgreementLinkDisabled: {
-    color: '#94a3b8',
+    color: colors.textPlaceholder,
     textDecorationLine: 'none',
   },
   radioOuter: {
     width: 16,
     height: 16,
     borderWidth: 1,
-    borderColor: '#64748b',
+    borderColor: colors.textTertiary,
     borderRadius: 8,
     marginRight: 8,
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -7342,15 +7586,15 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#0f172a',
+    backgroundColor: colors.textPrimary,
   },
   calendarSyncCard: {
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 12,
     padding: 10,
     marginTop: 6,
-    backgroundColor: '#f8fafc',
+    backgroundColor: colors.background,
   },
   calendarSyncHeaderRow: {
     flexDirection: 'row',
@@ -7364,25 +7608,25 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   calendarSyncStatusSynched: {
-    backgroundColor: '#dcfce7',
+    backgroundColor: colors.successBg,
   },
   calendarSyncStatusPaused: {
-    backgroundColor: '#fef3c7',
+    backgroundColor: colors.warningBg,
   },
   calendarSyncStatusNotSynched: {
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
   },
   calendarSyncStatusText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '700',
     fontSize: 12,
   },
   calendarSyncRowsWrap: {
     marginTop: 4,
     borderWidth: 1,
-    borderColor: '#d9e2f0',
+    borderColor: colors.borderStrong,
     borderRadius: 10,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
     overflow: 'hidden',
   },
   calendarSyncRow: {
@@ -7391,7 +7635,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#e2e8f0',
+    borderBottomColor: colors.border,
   },
   calendarSyncRowLast: {
     borderBottomWidth: 0,
@@ -7408,50 +7652,50 @@ const styles = StyleSheet.create({
     marginTop: 3,
   },
   calendarSyncAutoToggleEnabled: {
-    backgroundColor: '#dcfce7',
+    backgroundColor: colors.successBg,
   },
   calendarSyncAutoToggleDisabled: {
-    backgroundColor: '#fee2e2',
+    backgroundColor: colors.dangerBg,
   },
   calendarSyncAutoToggleText: {
     fontSize: 10,
     fontWeight: '600',
   },
   calendarSyncAutoToggleTextEnabled: {
-    color: '#15803d',
+    color: colors.successText,
   },
   calendarSyncAutoToggleTextDisabled: {
-    color: '#b91c1c',
+    color: colors.dangerPressed,
   },
   calendarSyncProviderColumn: {
     marginBottom: 6,
   },
   calendarSyncProviderLabel: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '600',
     fontSize: 13,
   },
   calendarSyncProviderSubtext: {
-    color: '#64748b',
+    color: colors.textTertiary,
     fontSize: 11,
     marginTop: 2,
   },
   calendarSyncDetailsColumn: {
   },
   calendarSyncStatusColumn: {
-    color: '#334155',
+    color: colors.textSecondary,
     fontWeight: '500',
     fontSize: 12,
     marginBottom: 4,
   },
   calendarSyncStatusConnectedText: {
-    color: '#15803d',
+    color: colors.successText,
   },
   calendarSyncStatusPausedText: {
-    color: '#2563eb',
+    color: colors.primary,
   },
   calendarSyncStatusNotConnectedText: {
-    color: '#dc2626',
+    color: colors.dangerText,
   },
   calendarSyncRowActions: {
     flexDirection: 'row',
@@ -7463,10 +7707,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 3,
     borderRadius: 7,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: colors.border,
   },
   calendarSyncActionText: {
-    color: '#0f172a',
+    color: colors.textPrimary,
     fontWeight: '600',
     fontSize: 12,
   },
@@ -7501,7 +7745,7 @@ const styles = StyleSheet.create({
   },
   modalOverlay: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(15, 23, 42, 0.35)',
+    backgroundColor: colors.overlay,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
@@ -7514,10 +7758,10 @@ const styles = StyleSheet.create({
   modalCard: {
     width: '100%',
     maxWidth: 420,
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderRadius: 16,
     padding: 20,
-    shadowColor: '#0f172a',
+    shadowColor: colors.shadow,
     shadowOpacity: 0.16,
     shadowRadius: 16,
     shadowOffset: { width: 0, height: 8 },
@@ -7551,7 +7795,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 32,
     borderBottomLeftRadius: 0,
     borderBottomRightRadius: 0,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
     overflow: 'hidden',
     paddingTop: 10,
     paddingBottom: 20,
@@ -7561,23 +7805,23 @@ const styles = StyleSheet.create({
     width: 78,
     height: 8,
     borderRadius: 999,
-    backgroundColor: '#94a3b8',
+    backgroundColor: colors.textPlaceholder,
     alignSelf: 'center',
     marginBottom: 12,
   },
   timeZonePickerWrapper: {
     flex: 1,
     marginBottom: 10,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
   },
   timeZonePicker: {
     flex: 1,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
   },
   timeZoneModalActionsRow: {
     marginTop: 0,
     marginBottom: 0,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.surface,
   },
   timeZoneModalActionText: {
     textAlign: 'center',
@@ -7585,22 +7829,32 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 18,
     fontWeight: '700',
-    color: '#0f172a',
+    color: colors.textPrimary,
     marginBottom: 12,
   },
   deleteHint: {
-    color: '#64748b',
+    color: colors.textTertiary,
     marginBottom: 10,
   },
   deleteButton: {
-    backgroundColor: '#dc2626',
+    backgroundColor: colors.dangerText,
     paddingVertical: 12,
     paddingHorizontal: 12,
     borderRadius: 10,
     alignItems: 'center',
   },
   deleteButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontWeight: '700',
   },
 });
+
+const fallbackErrorStyles = createAppStyles(lightColors);
+
+export default function Root() {
+  return (
+    <ThemeProvider>
+      <App />
+    </ThemeProvider>
+  );
+}

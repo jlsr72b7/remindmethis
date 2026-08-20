@@ -6,6 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "scheme": "remindmethis",
     "plugins": [
       [
         "expo-notifications",
@@ -27,11 +28,18 @@
         {
           "contactsPermission": "Allow Remind Me This to access your contacts so you can import them into your reminder contact list."
         }
-      ]
+      ],
+      "@bacons/apple-targets"
     ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.example.specialdatereminder",
+      "appleTeamId": "LBDTXHU8LP",
+      "entitlements": {
+        "com.apple.security.application-groups": [
+          "group.com.example.specialdatereminder"
+        ]
+      },
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
