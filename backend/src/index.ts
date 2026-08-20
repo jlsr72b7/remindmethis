@@ -236,6 +236,27 @@ class NoOpSmsProvider implements SmsProvider {
   }
 }
 
+// Twilio's API expects E.164 (e.g. "+17325474920"). Numbers in this app are
+// collected/stored as plain US-formatted strings like "(732) 547-4920", so
+// convert right before handing anything to Twilio rather than at every
+// call site.
+const toE164UsPhoneNumber = (value: string): string => {
+  const raw = String(value || '').trim();
+  if (raw.startsWith('+')) {
+    return raw;
+  }
+
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 10) {
+    return `+1${digits}`;
+  }
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return `+${digits}`;
+  }
+
+  return `+${digits}`;
+};
+
 class TwilioSmsProvider implements SmsProvider {
   private readonly client: ReturnType<typeof twilio>;
   private readonly fromNumber: string;
@@ -247,7 +268,7 @@ class TwilioSmsProvider implements SmsProvider {
 
   async sendText(to: string, body: string) {
     await this.client.messages.create({
-      to,
+      to: toE164UsPhoneNumber(to),
       from: this.fromNumber,
       body,
     });
