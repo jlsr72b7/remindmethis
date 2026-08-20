@@ -1533,6 +1533,12 @@ app.get('/admin/reminder-queue-jobs', async (req, res) => {
 
 app.post('/admin/test-reminder-sms', async (req, res) => {
   try {
+    if (!adminApiKey || !hasValidAdminKey(req)) {
+      return res.status(adminApiKey ? 401 : 503).json({
+        error: adminApiKey ? 'unauthorized' : 'admin API key is not configured',
+      });
+    }
+
     const {
       userId,
       phoneNumber,
@@ -1572,6 +1578,65 @@ app.post('/admin/test-reminder-sms', async (req, res) => {
   } catch (error) {
     console.error('admin test reminder sms failed', error);
     return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/admin/test-reminder-email', async (req, res) => {
+  try {
+    if (!adminApiKey || !hasValidAdminKey(req)) {
+      return res.status(adminApiKey ? 401 : 503).json({
+        error: adminApiKey ? 'unauthorized' : 'admin API key is not configured',
+      });
+    }
+
+    const {
+      userId,
+      email,
+      message,
+    } = req.body ?? {};
+
+    let destination = '';
+
+    if (email) {
+      destination = String(email).trim();
+    } else if (userId) {
+      const user = await prisma.user.findUnique({ where: { id: String(userId) } });
+      if (!user) {
+        return res.status(404).json({ error: 'user not found' });
+      }
+
+      if (!user.email) {
+        return res.status(400).json({ error: 'user email is not configured' });
+      }
+
+      destination = user.email;
+    } else {
+      return res.status(400).json({ error: 'Provide either email or userId' });
+    }
+
+    if (!smtpTransport) {
+      return res.status(503).json({ error: 'SMTP is not configured on the server' });
+    }
+
+    const testMessage = message
+      ? String(message)
+      : 'Remind Me This SMTP test successful. Automated message, please do not reply.';
+
+    await smtpTransport.sendMail({
+      from: emailFromAddress,
+      to: destination,
+      subject: 'Remind Me This - SMTP test',
+      text: testMessage,
+    });
+
+    return res.json({
+      success: true,
+      destination,
+      emailFromAddress,
+    });
+  } catch (error) {
+    console.error('admin test reminder email failed', error);
+    return res.status(500).json({ error: 'internal server error', detail: error instanceof Error ? error.message : String(error) });
   }
 });
 
