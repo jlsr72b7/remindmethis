@@ -4367,6 +4367,20 @@ const syncRsvpContactAndGroup = async (options: {
         deletedAt: null,
       };
       contacts.push(contact);
+    } else {
+      // The RSVP form is the person's own confirmed name/contact info — e.g. a "non-contact"
+      // recipient added manually at share time only has their email or phone on file with no
+      // real name, so this fills in (or corrects) firstName/lastName/email/phone once they
+      // actually respond, rather than leaving whatever placeholder existed.
+      contact.firstName = options.firstName || contact.firstName;
+      contact.lastName = options.lastName || contact.lastName;
+      if (options.email) {
+        contact.email = options.email;
+      }
+      if (options.phone) {
+        contact.mobileNumber = options.phone;
+      }
+      contact.updatedAt = nowIso;
     }
 
     const groupName = `${options.eventTitle} • ${options.eventPeople}`.trim().slice(0, 120);

@@ -2628,12 +2628,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         }
 
         if (!contactId) {
-          const nameParts = recipient.label.trim().split(/\s+/).filter(Boolean);
+          // recipient.label is just the raw email/phone for manual-email/manual-phone
+          // recipients (there's no real name to derive), so splitting it on whitespace would
+          // chop a phone number into garbage firstName/lastName fragments. Only use a real name
+          // when we actually have one (saved contact, group member, or a picked device contact).
           const newContact = {
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             email: normalizedEmail,
-            firstName: nameParts[0] || recipient.label.trim() || 'Guest',
-            lastName: nameParts.slice(1).join(' '),
+            firstName: recipient.firstName || 'Guest',
+            lastName: recipient.lastName || '',
             address: '',
             birthDate: '',
             mobileNumber: recipient.phone || undefined,
