@@ -104,7 +104,6 @@ interface EventFormState {
   dentalSubtype: DentalSubtypeValue;
   workSubtype: WorkSubtypeValue;
   schoolSubtype: SchoolSubtypeValue;
-  shareAfterSave: boolean;
   eventLocationEnabled: boolean;
   eventLocationPlaceId: string;
   eventLocationFormattedAddress: string;
@@ -434,7 +433,6 @@ const createDefaultForm = (reminderTimeZone: string): EventFormState => {
     dentalSubtype: 'cleaning' as DentalSubtypeValue,
     workSubtype: 'meeting' as WorkSubtypeValue,
     schoolSubtype: 'quiz' as SchoolSubtypeValue,
-    shareAfterSave: false,
     eventLocationEnabled: false,
     eventLocationPlaceId: '',
     eventLocationFormattedAddress: '',
@@ -969,7 +967,6 @@ const getEventFormState = (event: SpecialDateEvent): EventFormState => {
     medicalSubtype: 'appointment',
     dentalSubtype: 'cleaning',
     workSubtype: 'meeting',
-    shareAfterSave: false,
     eventLocationEnabled: hasEventLocation,
     eventLocationPlaceId: eventLocation?.placeId || '',
     eventLocationFormattedAddress: eventLocation?.formattedAddress || '',
@@ -2002,6 +1999,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [form, setForm] = useState(() => getResetFormState(effectiveReminderTimeZone));
   const [hasSelectedEventType, setHasSelectedEventType] = useState(false);
   const [isEventTypePickerVisible, setIsEventTypePickerVisible] = useState(false);
+  const [isAddRemindersPromptVisible, setIsAddRemindersPromptVisible] = useState(false);
+  const [pendingNoReminderSave, setPendingNoReminderSave] = useState(false);
   const [eventTypeDraft, setEventTypeDraft] = useState<EventTypeValue | ''>('');
   const [hasSelectedSubtype, setHasSelectedSubtype] = useState(false);
   const [isSubtypePickerVisible, setIsSubtypePickerVisible] = useState(false);
@@ -2022,7 +2021,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [isDeletingConfirmedItem, setIsDeletingConfirmedItem] = useState(false);
   const [isDeletingConfirmedEvent, setIsDeletingConfirmedEvent] = useState(false);
   const [remindersForEventId, setRemindersForEventId] = useState<string | null>(null);
-  const [currentView, setCurrentView] = useState<'create' | 'share' | 'manage-events' | 'manage-reminders'>('manage-events');
+  const [currentView, setCurrentView] = useState<'create' | 'create-reminders' | 'share' | 'manage-events' | 'manage-reminders'>('manage-events');
   const [calendarDefaults, setCalendarDefaults] = useState<CalendarDefaultsSettings>(DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
   const [landingTickerVersion, setLandingTickerVersion] = useState(0);
   const previousViewRef = useRef(currentView);
@@ -2746,7 +2745,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   }, [refreshPendingShareInvites]);
 
   useEffect(() => {
-    if (currentView !== 'create' || hasInitializedReminderScheduleView || !isReminderTimeZoneMode(form.reminderMode)) {
+    if (currentView !== 'create-reminders' || hasInitializedReminderScheduleView || !isReminderTimeZoneMode(form.reminderMode)) {
       return;
     }
 
@@ -2763,7 +2762,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   }, [currentView, hasInitializedReminderScheduleView, form.reminderMode]);
 
   useEffect(() => {
-    if (currentView !== 'create' || form.reminderMode !== 'default') {
+    if (currentView !== 'create-reminders' || form.reminderMode !== 'default') {
       return;
     }
 
@@ -2783,7 +2782,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   }, [currentView, form.reminderMode, form.eventDateTime, form.notes, form.people, form.eventType, form.partySubtype, form.customType, form.schoolSubtype, form.medicalSubtype, form.dentalSubtype, form.workSubtype, defaultReminderTime]);
 
   useEffect(() => {
-    if (currentView !== 'create' || form.reminderMode !== 'static' || hasTouchedStaticReminderSchedule) {
+    if (currentView !== 'create-reminders' || form.reminderMode !== 'static' || hasTouchedStaticReminderSchedule) {
       return;
     }
 
@@ -3243,7 +3242,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     };
   }, [events, hasLoadedInitialEvents, reminderDeliveryDeviceEnabled]);
 
-  const saveCurrentEvent = async (shareOverride?: boolean) => {
+  const saveCurrentEvent = async () => {
     if (isSavingEvent) {
       return;
     }
@@ -3300,7 +3299,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       const peopleLabel = form.people.trim();
       const notes = form.notes.trim();
       const eventLocation = buildEventLocationFromForm(form);
-      const shouldShareAfterSave = form.shareAfterSave;
       const resolvedEventType = getEventTitle(form.eventType, form.partySubtype, form.customType, form.schoolSubtype, form.medicalSubtype, form.dentalSubtype, form.workSubtype);
       const reminderFrequency = (form.reminderMode === 'variable' || form.reminderMode === 'default')
         ? 'once' as ReminderFrequency
@@ -3438,17 +3436,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         variableReminderEntries,
       );
 
-      if (shouldShareAfterSave) {
-        startShareForEvent(newEvent);
-        return;
-      }
-
-      setCurrentView('manage-events');
-
       const savedMessage = variableReminderEntries.length > 0
         ? 'Your event and reminder(s) have been saved.'
         : 'Your event has been saved.';
-      Alert.alert('Saved', savedMessage);
+      promptShareAfterSave(newEvent, 'Saved', savedMessage);
     } catch (error) {
       console.error('saveCurrentEvent failed', error);
       Alert.alert('Save failed', error instanceof Error ? error.message : 'Unknown error');
@@ -3903,7 +3894,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     });
   };
 
-  const saveEditedEvent = async (shareOverride?: boolean) => {
+  const saveEditedEvent = async () => {
     if (!editingEvent || isSavingEvent) return;
 
     setIsSavingEvent(true);
@@ -3956,7 +3947,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       const peopleLabel = form.people.trim();
       const notes = form.notes.trim();
       const eventLocation = buildEventLocationFromForm(form);
-      const shouldShareAfterSave = form.shareAfterSave;
       const resolvedEventType = getEventTitle(form.eventType, form.partySubtype, form.customType, form.schoolSubtype, form.medicalSubtype, form.dentalSubtype, form.workSubtype);
       const reminderFrequency = (form.reminderMode === 'variable' || form.reminderMode === 'default')
         ? 'once' as ReminderFrequency
@@ -4097,14 +4087,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         variableReminderEntries,
       );
 
-      if (shouldShareAfterSave && updatedEvent) {
-        startShareForEvent(updatedEvent);
-        return;
+      if (updatedEvent) {
+        promptShareAfterSave(updatedEvent, 'Updated', 'The event has been updated.');
+      } else {
+        setCurrentView('manage-events');
       }
-
-      setCurrentView('manage-events');
-
-      Alert.alert('Updated', 'The event has been updated.');
     } finally {
       setIsSavingEvent(false);
     }
@@ -4263,12 +4250,22 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setCurrentView('share');
   };
 
+  const promptShareAfterSave = (savedEvent: SpecialDateEvent, title: string, message: string) => {
+    Alert.alert(title, `${message} Would you like to share this event now?`, [
+      { text: 'No', style: 'cancel', onPress: () => setCurrentView('manage-events') },
+      { text: 'Yes', onPress: () => startShareForEvent(savedEvent) },
+    ]);
+  };
+
   const openReminderEditForEvent = (event: SpecialDateEvent) => {
     setSelectedSummaryEventId(null);
     setRemindersForEventId(null);
     setConfirmDeleteReminder(null);
-    setCurrentView('create');
     startEditingEvent(event);
+    if (isNoReminderMode(event.reminderMode ?? 'none')) {
+      setForm((current) => ({ ...current, reminderMode: 'default' }));
+    }
+    setCurrentView('create-reminders');
   };
 
   const cancelShareFlow = () => {
@@ -4623,6 +4620,65 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setValidationMessage(null);
     setCurrentView('manage-events');
   };
+
+  const proceedToReminders = () => {
+    if (!hasSelectedEventType) {
+      setValidationMessage('Please choose an event type.');
+      return;
+    }
+
+    if (eventTypeHasSubtype(form.eventType) && !hasSelectedSubtype) {
+      setValidationMessage(`Please choose a ${String(getSubtypeFieldLabel(form.eventType) || 'subtype').toLowerCase()}.`);
+      return;
+    }
+
+    if (form.eventType === 'other' && !form.customType.trim()) {
+      Alert.alert('Missing info', 'Please enter a custom event type.');
+      return;
+    }
+
+    if (!form.people.trim()) {
+      setValidationMessage('Please enter a person, people, group, place, or description.');
+      return;
+    }
+
+    const ageValue = form.ageAsOfToday.trim();
+    const parsedBirthdayAge = ageValue ? Number.parseInt(ageValue, 10) : getAgeAsOfToday(form.eventDateTime);
+    if (form.eventType === 'birthday' && parsedBirthdayAge !== null && (!Number.isFinite(parsedBirthdayAge) || parsedBirthdayAge < 0)) {
+      setValidationMessage('Please enter a valid age for birthday events.');
+      return;
+    }
+
+    setValidationMessage(null);
+    setIsAddRemindersPromptVisible(true);
+  };
+
+  const confirmAddModifyReminders = () => {
+    setIsAddRemindersPromptVisible(false);
+    if (isNoReminderMode(form.reminderMode)) {
+      setForm((current) => ({ ...current, reminderMode: 'default' }));
+    }
+    setCurrentView('create-reminders');
+  };
+
+  const confirmNoReminders = () => {
+    setIsAddRemindersPromptVisible(false);
+    setPendingNoReminderSave(true);
+    setForm((current) => ({ ...current, reminderMode: 'none' }));
+  };
+
+  useEffect(() => {
+    if (!pendingNoReminderSave || form.reminderMode !== 'none') {
+      return;
+    }
+
+    setPendingNoReminderSave(false);
+    if (editingEvent) {
+      void saveEditedEvent();
+    } else {
+      void saveCurrentEvent();
+    }
+  }, [pendingNoReminderSave, form.reminderMode, editingEvent]);
 
   const selectDate = (selectedDay: number) => {
     if (!pickerTarget) return;
@@ -5973,11 +6029,32 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             : form.eventType === 'dental' ? Object.entries(dentalSubtypeLabels)
               : form.eventType === 'work' ? Object.entries(workSubtypeLabels)
                 : [];
+    const resolvedEventTypeForPreview = getEventTitle(form.eventType, form.partySubtype, form.customType, form.schoolSubtype, form.medicalSubtype, form.dentalSubtype, form.workSubtype);
+    const isAllDayForPreview = isAllDayEvent(form.eventType, form.partySubtype, form.eventAllDay);
+    const previewEvent: SpecialDateEvent = {
+      id: editingEvent?.id || 'draft-preview',
+      title: resolvedEventTypeForPreview,
+      people: form.people.trim() || 'You',
+      eventDateTime: form.eventDateTime.toISOString(),
+      reminderDateTime: form.reminderDateTime.toISOString(),
+      eventAllDay: isAllDayForPreview,
+      reminderAllDay: form.reminderAllDay,
+      frequency: form.frequency,
+      reminderMode: form.reminderMode,
+      notes: form.notes.trim(),
+      notified: false,
+    };
 
     return (
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-      <Text style={styles.title}>{editingEvent ? 'Modify Event' : 'Create Event'}</Text>
-      <Text style={styles.subtitle}>{editingEvent ? 'Update the event details and reminder schedule.' : 'Set up a new event and reminder schedule.'}</Text>
+      <Text style={styles.title}>
+        {currentView === 'create-reminders' ? 'Reminders' : editingEvent ? 'Modify Event' : 'Create Event'}
+      </Text>
+      <Text style={styles.subtitle}>
+        {currentView === 'create-reminders'
+          ? 'Set up how and when you want to be reminded.'
+          : editingEvent ? 'Update the event details.' : 'Set up a new event.'}
+      </Text>
 
       {apiStorageStatusMessage ? (
         <View style={styles.apiStatusBanner}>
@@ -5985,14 +6062,29 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         </View>
       ) : null}
 
+      {currentView === 'create-reminders' ? (
+        <View style={styles.card}>
+          <Text style={styles.label}>Event</Text>
+          <TouchableOpacity
+            style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: getEventSummaryColor(previewEvent) }]}
+            onPress={() => setCurrentView('create')}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(previewEvent)}</Text>
+            <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
+              {formatEventDateOnly(previewEvent)} ({formatEventCountdownLabel(previewEvent)}) • {previewEvent.title} • {previewEvent.people}{formatEventSummaryRowTimeSuffix(previewEvent)}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {currentView === 'create' ? (
       <View style={styles.card}>
         {isAnyTypeDropdownVisible ? (
           <Pressable style={styles.dropdownDismissBackdrop} onPress={closeTypeSelectionDropdowns} />
         ) : null}
         <View style={styles.inlineSelectionRow}>
-          <Text style={styles.label}>Event type</Text>
           <TouchableOpacity
-            style={styles.inlineSelectionValueButton}
             onPress={() => {
               setEventTypeDraft(hasSelectedEventType ? form.eventType : eventTypeDraft);
               setIsSubtypePickerVisible(false);
@@ -6000,36 +6092,55 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             }}
             activeOpacity={0.8}
           >
-            <Text style={styles.inlineSelectionValueText}>{hasSelectedEventType ? eventTypeLabels[form.eventType] : 'Select event type'}</Text>
+            <Text style={styles.inlineSelectionValueText}>Event Type</Text>
           </TouchableOpacity>
         </View>
         {isEventTypePickerVisible ? (
-          <View style={styles.dropdownList}>
-            {eventTypeOptions.map((option) => (
-              <TouchableOpacity
-                key={option.value}
-                style={[
-                  styles.dropdownListItem,
-                  hasSelectedEventType && form.eventType === option.value && styles.dropdownListItemSelected,
-                ]}
-                onPress={() => handleSelectEventType(option.value)}
-                activeOpacity={0.8}
-              >
-                <Text style={[
-                  styles.dropdownListItemText,
-                  hasSelectedEventType && form.eventType === option.value && styles.dropdownListItemTextSelected,
-                ]}>{option.label}</Text>
-              </TouchableOpacity>
-            ))}
+          <View style={[styles.filterPillList, styles.filterPillListSpaced]}>
+            {eventTypeOptions.map((option) => {
+              const optionStyle = getSavedEventsFilterOptionStyle(option.value);
+              const isSelected = hasSelectedEventType && form.eventType === option.value;
+
+              return (
+                <TouchableOpacity
+                  key={option.value}
+                  style={[
+                    styles.filterPill,
+                    optionStyle.color ? { backgroundColor: optionStyle.color } : styles.filterPillNeutral,
+                    isSelected && styles.filterPillSelected,
+                  ]}
+                  onPress={() => handleSelectEventType(option.value)}
+                  activeOpacity={0.8}
+                >
+                  {optionStyle.icon ? <Text style={styles.filterPillIcon}>{optionStyle.icon}</Text> : null}
+                  <Text style={[styles.filterPillText, optionStyle.color ? styles.filterPillTextColored : styles.filterPillTextNeutral]}>
+                    {option.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        ) : hasSelectedEventType ? (
+          <View style={[styles.filterPillList, styles.filterPillListSpaced]}>
+            <TouchableOpacity
+              style={[styles.filterPill, { backgroundColor: EVENT_SUMMARY_COLORS[form.eventType] }]}
+              onPress={() => {
+                setEventTypeDraft(form.eventType);
+                setIsSubtypePickerVisible(false);
+                setIsEventTypePickerVisible(true);
+              }}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.filterPillIcon}>{EVENT_SUMMARY_ICONS[form.eventType]}</Text>
+              <Text style={[styles.filterPillText, styles.filterPillTextColored]}>{eventTypeLabels[form.eventType]}</Text>
+            </TouchableOpacity>
           </View>
         ) : null}
 
         {shouldShowSubtypeField && subtypeFieldLabel && hasSelectedEventType ? (
           <>
             <View style={styles.inlineSelectionRow}>
-              <Text style={styles.label}>{subtypeFieldLabel}</Text>
               <TouchableOpacity
-                style={styles.inlineSelectionValueButton}
                 onPress={() => {
                   setSubtypeDraft(getSubtypeValueForEventType(form, form.eventType));
                   setIsEventTypePickerVisible(false);
@@ -6037,27 +6148,43 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 }}
                 activeOpacity={0.8}
               >
-                <Text style={styles.inlineSelectionValueText}>{hasSelectedSubtype ? subtypeDisplayLabel : `Select ${subtypeFieldLabel.toLowerCase()}`}</Text>
+                <Text style={styles.inlineSelectionValueText}>{subtypeFieldLabel}</Text>
               </TouchableOpacity>
             </View>
             {isSubtypePickerVisible ? (
-              <View style={styles.dropdownList}>
-                {subtypeOptions.map(([value, label]) => (
-                  <TouchableOpacity
-                    key={value}
-                    style={[
-                      styles.dropdownListItem,
-                      hasSelectedSubtype && getSubtypeValueForEventType(form, form.eventType) === value && styles.dropdownListItemSelected,
-                    ]}
-                    onPress={() => handleSelectSubtype(value)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={[
-                      styles.dropdownListItemText,
-                      hasSelectedSubtype && getSubtypeValueForEventType(form, form.eventType) === value && styles.dropdownListItemTextSelected,
-                    ]}>{label}</Text>
-                  </TouchableOpacity>
-                ))}
+              <View style={[styles.filterPillList, styles.filterPillListSpaced]}>
+                {subtypeOptions.map(([value, label]) => {
+                  const isSelected = hasSelectedSubtype && getSubtypeValueForEventType(form, form.eventType) === value;
+
+                  return (
+                    <TouchableOpacity
+                      key={value}
+                      style={[
+                        styles.filterPill,
+                        { backgroundColor: EVENT_SUMMARY_COLORS[form.eventType] },
+                        isSelected && styles.filterPillSelected,
+                      ]}
+                      onPress={() => handleSelectSubtype(value)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={[styles.filterPillText, styles.filterPillTextColored]}>{label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            ) : hasSelectedSubtype ? (
+              <View style={[styles.filterPillList, styles.filterPillListSpaced]}>
+                <TouchableOpacity
+                  style={[styles.filterPill, { backgroundColor: EVENT_SUMMARY_COLORS[form.eventType] }]}
+                  onPress={() => {
+                    setSubtypeDraft(getSubtypeValueForEventType(form, form.eventType));
+                    setIsEventTypePickerVisible(false);
+                    setIsSubtypePickerVisible(true);
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.filterPillText, styles.filterPillTextColored]}>{subtypeDisplayLabel}</Text>
+                </TouchableOpacity>
               </View>
             ) : null}
           </>
@@ -6310,6 +6437,42 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           placeholder="Optional details"
         />
 
+        {validationMessage ? (
+          <View style={[styles.validationBanner, { marginTop: 8 }]}>
+            <Text style={styles.validationBannerText}>{validationMessage}</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.floatingActionStripWrap}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.floatingActionStripContent}
+            snapToInterval={170}
+            decelerationRate="fast"
+          >
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={[styles.floatingActionButton, styles.floatingActionSecondaryButton]}
+              onPress={cancelCreateFlow}
+            >
+              <Text style={styles.floatingActionSecondaryText}>Cancel</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={[styles.floatingActionButton, styles.floatingActionPrimaryButton]}
+              onPress={proceedToReminders}
+            >
+              <Text style={styles.floatingActionPrimaryText}>Save</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </View>
+      ) : null}
+
+      {currentView === 'create-reminders' ? (
+      <View style={styles.card}>
         <Text style={styles.label}>Reminder Creation Mode</Text>
         <View style={styles.reminderModeScrollContainer}>
           <ScrollView
@@ -6320,8 +6483,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             decelerationRate="fast"
           >
             {([
-              { value: 'none' as ReminderModeValue, label: 'None' },
-              { value: 'default' as ReminderModeValue, label: 'Default' },
+              { value: 'default' as ReminderModeValue, label: 'Auto' },
               { value: 'static' as ReminderModeValue, label: 'Recurring' },
               { value: 'variable' as ReminderModeValue, label: 'Custom' },
             ]).map((option) => {
@@ -6395,10 +6557,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         {hoveredReminderMode ? (
           <Text style={styles.helperText}>{getReminderModeHoverMessage(hoveredReminderMode)}</Text>
         ) : null}
-
-        {isNoReminderMode(form.reminderMode) && (
-          <Text style={styles.helperText}>You can add reminders later from the saved event details.</Text>
-        )}
 
         {form.reminderMode === 'static' && (
           <>
@@ -6732,32 +6890,18 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
               disabled={isSavingEvent}
               onPress={() => {
                 if (editingEvent) {
-                  void saveEditedEvent(false);
+                  void saveEditedEvent();
                 } else {
-                  void saveCurrentEvent(false);
+                  void saveCurrentEvent();
                 }
               }}
             >
               <Text style={styles.floatingActionPrimaryText}>{isSavingEvent ? 'Saving…' : 'Save'}</Text>
             </TouchableOpacity>
-
-            <TouchableOpacity
-              activeOpacity={0.8}
-              style={[styles.floatingActionButton, styles.floatingActionPrimaryButton, isSavingEvent && styles.actionButtonDisabled]}
-              disabled={isSavingEvent}
-              onPress={() => {
-                if (editingEvent) {
-                  void saveEditedEvent(true);
-                } else {
-                  void saveCurrentEvent(true);
-                }
-              }}
-            >
-              <Text style={styles.floatingActionPrimaryText}>Save and Share</Text>
-            </TouchableOpacity>
           </ScrollView>
         </View>
       </View>
+      ) : null}
 
       <Modal transparent visible={pickerTarget !== null} animationType="fade" onRequestClose={closeDatePicker}>
         <View style={styles.modalOverlay}>
@@ -6802,6 +6946,43 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             </View>
 
             <Button title="Cancel" onPress={closeDatePicker} />
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        transparent
+        visible={isAddRemindersPromptVisible}
+        animationType="fade"
+        onRequestClose={() => setIsAddRemindersPromptVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Add/Modify Reminders</Text>
+            <Text style={styles.helperText}>Next, set up reminders for this event.</Text>
+
+            <TouchableOpacity
+              style={[styles.floatingActionButton, styles.floatingActionPrimaryButton, { marginTop: 12, alignSelf: 'center' }]}
+              onPress={confirmAddModifyReminders}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.floatingActionPrimaryText}>OK</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={confirmNoReminders}
+              activeOpacity={0.8}
+              style={[styles.floatingActionButton, styles.noRemindersButton, { marginTop: 10, alignSelf: 'center' }]}
+            >
+              <View style={styles.noRemindersGradientBands} pointerEvents="none">
+                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#7b828c' }]} />
+                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#6b7280' }]} />
+                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#565e6b' }]} />
+                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#454c56' }]} />
+                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#374151' }]} />
+              </View>
+              <Text style={styles.floatingActionPrimaryText}>No Reminders</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -7430,6 +7611,9 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     zIndex: 20,
     elevation: 20,
   },
+  filterPillListSpaced: {
+    marginTop: 10,
+  },
   filterPill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -7921,6 +8105,21 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 6 },
     elevation: 4,
+  },
+  noRemindersButton: {
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  noRemindersGradientBands: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    flexDirection: 'row',
+  },
+  noRemindersGradientBand: {
+    flex: 1,
   },
   floatingActionPrimaryButton: {
     backgroundColor: colors.primary,

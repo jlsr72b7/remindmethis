@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Contacts from 'expo-contacts/legacy';
+import { Contact as ExpoContact, ContactField as ExpoContactField } from 'expo-contacts';
+import { File as ExpoFile } from 'expo-file-system';
 import {
   Alert,
   Animated,
@@ -240,6 +242,17 @@ const getContactDisplayName = (contact: { firstName?: string; lastName?: string;
   return String(contact.company || '').trim() || 'Unnamed contact';
 };
 
+const getContactAlphabeticalSortKey = (contact: { firstName?: string; lastName?: string; company?: string }) => {
+  const lastName = String(contact.lastName || '').trim();
+  const firstName = String(contact.firstName || '').trim();
+  return (lastName || firstName || String(contact.company || '').trim()).toLowerCase();
+};
+
+const compareContactsAlphabetically = (
+  left: { firstName?: string; lastName?: string; company?: string },
+  right: { firstName?: string; lastName?: string; company?: string },
+) => getContactAlphabeticalSortKey(left).localeCompare(getContactAlphabeticalSortKey(right));
+
 const getContactPrimaryChannelLabel = (contact: { email?: string; mobileNumber?: string }) => {
   const normalizedEmail = String(contact.email || '').trim();
   if (normalizedEmail) {
@@ -346,22 +359,60 @@ const composeAddressParts = (parts: { line1: string; line2: string; city: string
   const city = parts.city.trim();
   const state = parts.state.trim().toUpperCase();
   const zip = parts.zip.trim();
-  const line4 = [state, zip].filter(Boolean).join(' ').trim();
 
-  if (!line1 && !line2 && !city && !line4) {
-    return '';
+  // City, state, and zip render as a single "City, ST 12345" line, and any
+  // line with nothing in it (e.g. no apartment/suite line) is omitted rather
+  // than showing up as a blank line.
+  const cityState = [city, state].filter(Boolean).join(', ');
+  const cityStateZip = [cityState, zip].filter(Boolean).join(' ').trim();
+
+  return [line1, line2, cityStateZip].filter((line) => line.length > 0).join('\n');
+};
+
+// Contact photos come back from the Contacts app as a temporary file:// path that stops
+// resolving once the app restarts. Reading it into a base64 data URI here embeds the
+// actual image data in what we save, so it survives independent of that temp file.
+const resolvePersistablePhoto = async (uri?: string | null): Promise<string | undefined> => {
+  if (!uri) {
+    return undefined;
   }
 
-  if (!city && !line4) {
-    return [line1, line2].filter(Boolean).join('\n');
+  if (uri.startsWith('data:')) {
+    return uri;
   }
 
-  if (!line4) {
-    return `${line1}\n${line2}\n${city}`;
+  try {
+    const file = new ExpoFile(uri);
+    const base64 = await file.base64();
+    return `data:image/jpeg;base64,${base64}`;
+  } catch (error) {
+    console.warn('Unable to read contact photo file for permanent storage', error);
+    return undefined;
+  }
+};
+
+interface ContactDataSettings {
+  importPhotosEnabled: boolean;
+  importAddressesEnabled: boolean;
+}
+
+const DEFAULT_CONTACT_DATA_SETTINGS: ContactDataSettings = {
+  importPhotosEnabled: true,
+  importAddressesEnabled: true,
+};
+
+const getContactDataSettingsStorageKey = (userId: string) => `contact-data-settings:${userId}`;
+
+const normalizeContactDataSettings = (raw: unknown): ContactDataSettings => {
+  if (!raw || typeof raw !== 'object') {
+    return DEFAULT_CONTACT_DATA_SETTINGS;
   }
 
-  // Keep line2 and city positions even when blank so state/zip remains on line 4.
-  return `${line1}\n${line2}\n${city}\n${line4}`;
+  const candidate = raw as Partial<ContactDataSettings>;
+  return {
+    importPhotosEnabled: typeof candidate.importPhotosEnabled === 'boolean' ? candidate.importPhotosEnabled : true,
+    importAddressesEnabled: typeof candidate.importAddressesEnabled === 'boolean' ? candidate.importAddressesEnabled : true,
+  };
 };
 
 interface AuthScreenProps {
@@ -1117,6 +1168,7 @@ interface AccountContact {
   mobileNumber?: string;
   company: string;
   notes: string;
+  photo?: string;
   isFavorite: boolean;
   groupIds: string[];
   createdAt: string;
@@ -1149,6 +1201,8 @@ interface DeviceContactImportCandidate {
   mobileNumber: string;
   company: string;
   birthDate: string;
+  photo?: string;
+  address?: string;
 }
 
 type ContactsView = 'none' | 'contacts' | 'favorites' | 'groups';
@@ -1191,6 +1245,17 @@ function AccountScreen({
 }: AccountScreenProps) {
   const { colors, mode: themeMode, setMode: setThemeMode } = useTheme();
   const styles = useMemo(() => createAppStyles(colors), [colors]);
+
+  const renderContactAvatar = (photo: string | undefined, size = 44) => (
+    <View style={[styles.contactAvatar, { width: size, height: size, borderRadius: size / 2 }]}>
+      {photo ? (
+        <Image source={{ uri: photo }} style={{ width: size, height: size, borderRadius: size / 2 }} />
+      ) : (
+        <Text style={{ fontSize: size * 0.5 }}>👤</Text>
+      )}
+    </View>
+  );
+
   const initialNameParts = useMemo(() => splitNameParts(user.fullName || ''), [user.fullName]);
   const initialAddressParts = useMemo(() => parseAddressParts(user.address || ''), [user.address]);
   const [firstName, setFirstName] = useState(initialNameParts.firstName);
@@ -1231,6 +1296,7 @@ function AccountScreen({
   const [defaultReminderTimeZoneDraft, setDefaultReminderTimeZoneDraft] = useState(getDeviceTimeZone());
   const [isSavingReminderTimeZone, setIsSavingReminderTimeZone] = useState(false);
   const [calendarDefaults, setCalendarDefaults] = useState<CalendarDefaultsSettings>(DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
+  const [contactDataSettings, setContactDataSettings] = useState<ContactDataSettings>(DEFAULT_CONTACT_DATA_SETTINGS);
   const [calendarSyncProviderDraft, setCalendarSyncProviderDraft] = useState<CalendarSyncProvider>('none');
   const [googleCalendarPermission, setGoogleCalendarPermission] = useState<CalendarSyncPermission>('write');
   const [googleCalendarId, setGoogleCalendarId] = useState('');
@@ -1281,6 +1347,7 @@ function AccountScreen({
   const [contactsDisplayMode, setContactsDisplayMode] = useState<ContactsDisplayMode>('summary');
   const [activeSummaryContactId, setActiveSummaryContactId] = useState<string | null>(null);
   const [contactAddressPredictions, setContactAddressPredictions] = useState<GoogleAddressPrediction[]>([]);
+  const [isContactAddressLine1Focused, setIsContactAddressLine1Focused] = useState(false);
   const [contactAddressAutocompleteSessionToken] = useState(() => `addr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const ignoreContactsBackTapUntilRef = useRef(0);
   const skipNextContactAutocompleteFetchRef = useRef(0);
@@ -1311,6 +1378,7 @@ function AccountScreen({
   const [showDeviceContactsImportModal, setShowDeviceContactsImportModal] = useState(false);
   const [deviceContactsToImport, setDeviceContactsToImport] = useState<DeviceContactImportCandidate[]>([]);
   const [isLoadingDeviceContacts, setIsLoadingDeviceContacts] = useState(false);
+  const [isRefreshingContactPhotos, setIsRefreshingContactPhotos] = useState(false);
   const [deliveryDevice, setDeliveryDevice] = useState(true);
   const [deliveryEmail, setDeliveryEmail] = useState(false);
   const [deliveryText, setDeliveryText] = useState(false);
@@ -1319,7 +1387,9 @@ function AccountScreen({
   const [mobileVerificationCode, setMobileVerificationCode] = useState('');
   const [isMobileVerificationSubmitting, setIsMobileVerificationSubmitting] = useState(false);
   const [activeAccountAction, setActiveAccountAction] = useState<AccountAction>('none');
-  const activeContacts = useMemo(() => contacts, [contacts]);
+  const activeContacts = useMemo(() => (
+    [...contacts].sort(compareContactsAlphabetically)
+  ), [contacts]);
   const favoriteContacts = useMemo(() => activeContacts.filter((entry) => entry.isFavorite), [activeContacts]);
   const visibleContacts = useMemo(() => {
     if (activeContactsView === 'favorites') {
@@ -1342,7 +1412,8 @@ function AccountScreen({
 
     return selectedGroup.contactIds
       .map((contactId) => activeContacts.find((entry) => entry.id === contactId) || null)
-      .filter((entry): entry is AccountContact => entry !== null);
+      .filter((entry): entry is AccountContact => entry !== null)
+      .sort(compareContactsAlphabetically);
   }, [activeContacts, selectedGroup]);
   const filteredSelectedGroupMembers = useMemo(() => {
     const query = groupMembersSearch.trim().toLowerCase();
@@ -1554,6 +1625,13 @@ function AccountScreen({
     let isActive = true;
     const query = contactAddressLine1.trim();
 
+    if (!isContactAddressLine1Focused) {
+      setContactAddressPredictions([]);
+      return () => {
+        isActive = false;
+      };
+    }
+
     if (query.length < 4) {
       setContactAddressPredictions([]);
       return () => {
@@ -1581,7 +1659,7 @@ function AccountScreen({
       isActive = false;
       clearTimeout(timeoutId);
     };
-  }, [contactAddressAutocompleteSessionToken, contactAddressLine1]);
+  }, [contactAddressAutocompleteSessionToken, contactAddressLine1, isContactAddressLine1Focused]);
 
   const applyAccountAddressPrediction = useCallback(async (prediction: GoogleAddressPrediction) => {
     skipNextAccountAutocompleteFetchRef.current = 2;
@@ -1830,6 +1908,14 @@ function AccountScreen({
         setCalendarDefaults(DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
       }
 
+      try {
+        const rawContactDataSettings = await AsyncStorage.getItem(getContactDataSettingsStorageKey(user.id));
+        setContactDataSettings(rawContactDataSettings ? normalizeContactDataSettings(JSON.parse(rawContactDataSettings)) : DEFAULT_CONTACT_DATA_SETTINGS);
+      } catch (error) {
+        console.warn('Unable to load contact data settings', error);
+        setContactDataSettings(DEFAULT_CONTACT_DATA_SETTINGS);
+      }
+
       await Promise.all([
         refreshGoogleConnectionStatus(),
         refreshOutlookConnectionStatus(),
@@ -1846,6 +1932,23 @@ function AccountScreen({
       console.warn('Unable to save account calendar defaults settings', error);
     }
   }, [user.id]);
+
+  const persistContactDataSettings = useCallback(async (nextSettings: ContactDataSettings) => {
+    setContactDataSettings(nextSettings);
+    try {
+      await AsyncStorage.setItem(getContactDataSettingsStorageKey(user.id), JSON.stringify(nextSettings));
+    } catch (error) {
+      console.warn('Unable to save contact data settings', error);
+    }
+  }, [user.id]);
+
+  const handleToggleImportPhotos = () => {
+    void persistContactDataSettings({ ...contactDataSettings, importPhotosEnabled: !contactDataSettings.importPhotosEnabled });
+  };
+
+  const handleToggleImportAddresses = () => {
+    void persistContactDataSettings({ ...contactDataSettings, importAddressesEnabled: !contactDataSettings.importAddressesEnabled });
+  };
 
   const handleToggleUsPublicHolidays = () => {
     void persistCalendarDefaults({ ...calendarDefaults, usPublicEnabled: !calendarDefaults.usPublicEnabled });
@@ -3278,6 +3381,7 @@ function AccountScreen({
     setContactAddressState('');
     setContactAddressZip('');
     setContactAddressPredictions([]);
+    setIsContactAddressLine1Focused(false);
     setEditingContactId(null);
     setIsEditingContact(false);
   };
@@ -3291,6 +3395,7 @@ function AccountScreen({
     setContactAddressState('');
     setContactAddressZip('');
     setContactAddressPredictions([]);
+    setIsContactAddressLine1Focused(false);
     setEditingContactId(null);
     setActiveSummaryContactId(null);
     setIsEditingContact(true);
@@ -3305,6 +3410,9 @@ function AccountScreen({
     phoneNumbers?: Array<{ number?: string }>;
     company?: string;
     birthday?: { month?: number | null; day?: number | null; year?: number | null } | null;
+    image?: { uri?: string; base64?: string } | null;
+    rawImage?: { uri?: string; base64?: string } | null;
+    addresses?: Array<{ street?: string; city?: string; state?: string; region?: string; postcode?: string }>;
   }): DeviceContactImportCandidate | null => {
     const rawName = String(entry.name || '').trim();
     const derivedNameParts = splitNameParts(rawName);
@@ -3314,6 +3422,25 @@ function AccountScreen({
     const email = String(entry.emails?.[0]?.email || '').trim().toLowerCase();
     const mobileNumber = formatPhoneNumberInput(String(entry.phoneNumbers?.[0]?.number || '').trim());
     const birthDate = formatImportedBirthDate(entry.birthday);
+    const primaryAddress = entry.addresses?.[0];
+    const address = primaryAddress
+      ? composeAddressParts({
+          line1: String(primaryAddress.street || '').trim(),
+          line2: '',
+          city: String(primaryAddress.city || '').trim(),
+          state: String(primaryAddress.state || primaryAddress.region || '').trim(),
+          zip: String(primaryAddress.postcode || '').trim(),
+        })
+      : '';
+    // expo-contacts doesn't reliably populate image.base64 on every device/OS version;
+    // fall back to the local file URI directly (React Native's Image can load file:// URIs),
+    // and to rawImage if the cropped thumbnail wasn't provided.
+    const photo = entry.image?.base64
+      ? `data:image/jpeg;base64,${entry.image.base64}`
+      : entry.image?.uri
+        || (entry.rawImage?.base64 ? `data:image/jpeg;base64,${entry.rawImage.base64}` : undefined)
+        || entry.rawImage?.uri
+        || undefined;
 
     if (!Boolean(firstName || lastName || company) || !Boolean(email || mobileNumber)) {
       return null;
@@ -3327,6 +3454,8 @@ function AccountScreen({
       mobileNumber,
       company,
       birthDate,
+      photo,
+      address,
     };
   }, []);
 
@@ -3372,11 +3501,12 @@ function AccountScreen({
         email: entry.email,
         firstName: entry.firstName,
         lastName: entry.lastName,
-        address: '',
+        address: entry.address || '',
         birthDate: entry.birthDate,
         mobileNumber: entry.mobileNumber,
         company: entry.company,
         notes: 'Imported from iPhone contacts.',
+        photo: entry.photo,
         isFavorite: false,
         groupIds: [],
         createdAt: timestamp,
@@ -3423,27 +3553,57 @@ function AccountScreen({
         return;
       }
 
-      const selectedContact = await Contacts.presentContactPickerAsync();
+      // The legacy presentContactPickerAsync/getContactByIdAsync APIs reliably report
+      // imageAvailable but never actually deliver the image bytes (confirmed via testing),
+      // and mixing legacy contact IDs into the newer Contact class fails with
+      // ContactNotFoundException. So this whole flow uses the newer Contact API
+      // (same already-linked native module, no rebuild required) end-to-end instead.
+      const selectedContact = await ExpoContact.presentPicker();
       if (!selectedContact) {
         return;
       }
 
-      const fullContact = selectedContact.id
-        ? await Contacts.getContactByIdAsync(String(selectedContact.id), [
-            Contacts.Fields.Name,
-            Contacts.Fields.FirstName,
-            Contacts.Fields.LastName,
-            Contacts.Fields.Emails,
-            Contacts.Fields.PhoneNumbers,
-            Contacts.Fields.Company,
-            Contacts.Fields.Birthday,
-          ])
-        : selectedContact;
+      const details = await selectedContact.getDetails([
+        ExpoContactField.GIVEN_NAME,
+        ExpoContactField.FAMILY_NAME,
+        ExpoContactField.FULL_NAME,
+        ExpoContactField.EMAILS,
+        ExpoContactField.PHONES,
+        ExpoContactField.COMPANY,
+        ExpoContactField.BIRTHDAY,
+        ExpoContactField.IMAGE,
+        ExpoContactField.ADDRESSES,
+      ]);
 
-      const candidate = mapDeviceContactToImportCandidate(fullContact || selectedContact);
+      const candidate = mapDeviceContactToImportCandidate({
+        id: details.id,
+        name: details.fullName || undefined,
+        firstName: details.givenName || undefined,
+        lastName: details.familyName || undefined,
+        emails: details.emails?.map((entry) => ({ email: entry.address })),
+        phoneNumbers: details.phones?.map((entry) => ({ number: entry.number })),
+        company: details.company || undefined,
+        birthday: details.birthday
+          ? { month: details.birthday.month - 1, day: details.birthday.day, year: details.birthday.year ?? null }
+          : null,
+        image: contactDataSettings.importPhotosEnabled && details.image ? { uri: details.image } : null,
+        addresses: contactDataSettings.importAddressesEnabled
+          ? details.addresses?.map((entry) => ({
+              street: entry.street,
+              city: entry.city,
+              state: entry.state,
+              region: entry.region,
+              postcode: entry.postcode,
+            }))
+          : undefined,
+      });
       if (!candidate) {
         setContactsMessage('That iPhone contact does not have an importable email or mobile phone number.');
         return;
+      }
+
+      if (candidate.photo) {
+        candidate.photo = await resolvePersistablePhoto(candidate.photo);
       }
 
       await importDeviceContacts([candidate]);
@@ -3458,7 +3618,92 @@ function AccountScreen({
       // Favorites/Groups menu right after re-asserting the contacts list above.
       ignoreContactsBackTapUntilRef.current = Date.now() + 800;
     }
-  }, [importDeviceContacts, mapDeviceContactToImportCandidate]);
+  }, [importDeviceContacts, mapDeviceContactToImportCandidate, contactDataSettings]);
+
+  const refreshContactPhotosFromDevice = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      setContactsMessage('Device contacts are not available in the web build.');
+      return;
+    }
+
+    if (!contactDataSettings.importPhotosEnabled) {
+      setContactsMessage('Turn on "Add photos to contacts" under Preferences → Contact Data to refresh photos.');
+      return;
+    }
+
+    setContactsMessage(null);
+    setIsRefreshingContactPhotos(true);
+    try {
+      const permission = await Contacts.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        setContactsMessage('Allow Contacts access on your iPhone to refresh photos.');
+        return;
+      }
+
+      const deviceContacts = await ExpoContact.getAllDetails([
+        ExpoContactField.EMAILS,
+        ExpoContactField.PHONES,
+        ExpoContactField.IMAGE,
+      ]);
+
+      const photoByEmail = new Map<string, string>();
+      const photoByPhone = new Map<string, string>();
+      deviceContacts.forEach((entry) => {
+        if (!entry.image) {
+          return;
+        }
+        entry.emails?.forEach((email) => {
+          const key = String(email.address || '').trim().toLowerCase();
+          if (key) {
+            photoByEmail.set(key, entry.image as string);
+          }
+        });
+        entry.phones?.forEach((phone) => {
+          const key = normalizePhoneDigits(String(phone.number || ''));
+          if (key) {
+            photoByPhone.set(key, entry.image as string);
+          }
+        });
+      });
+
+      // Resolve each distinct matched photo to a permanent base64 data URI once,
+      // rather than storing the temporary file:// path the OS handed back.
+      const distinctUris = new Set<string>([...photoByEmail.values(), ...photoByPhone.values()]);
+      const resolvedByUri = new Map<string, string>();
+      await Promise.all([...distinctUris].map(async (uri) => {
+        const resolved = await resolvePersistablePhoto(uri);
+        if (resolved) {
+          resolvedByUri.set(uri, resolved);
+        }
+      }));
+
+      let updatedCount = 0;
+      const nextContacts = contacts.map((entry) => {
+        const emailKey = entry.email.trim().toLowerCase();
+        const phoneKey = normalizePhoneDigits(entry.mobileNumber || '');
+        const matchedUri = (emailKey && photoByEmail.get(emailKey)) || (phoneKey && photoByPhone.get(phoneKey)) || undefined;
+        const matchedPhoto = matchedUri ? resolvedByUri.get(matchedUri) : undefined;
+        if (matchedPhoto && matchedPhoto !== entry.photo) {
+          updatedCount += 1;
+          return { ...entry, photo: matchedPhoto, updatedAt: new Date().toISOString() };
+        }
+        return entry;
+      });
+
+      if (updatedCount > 0) {
+        await persistContactsSnapshot(nextContacts, contactGroups);
+      }
+
+      setContactsMessage(updatedCount > 0
+        ? `Refreshed photos for ${updatedCount} contact${updatedCount === 1 ? '' : 's'}.`
+        : 'No new photos found on your iPhone contacts.');
+    } catch (error) {
+      console.warn('Unable to refresh contact photos', error);
+      setContactsMessage('Unable to refresh contact photos right now.');
+    } finally {
+      setIsRefreshingContactPhotos(false);
+    }
+  }, [contacts, contactGroups, persistContactsSnapshot, contactDataSettings]);
 
   const openEditContactEditor = (contact: AccountContact) => {
     const addressParts = parseAddressParts(contact.address || '');
@@ -3479,6 +3724,7 @@ function AccountScreen({
     setContactAddressState(addressParts.state);
     setContactAddressZip(addressParts.zip);
     setContactAddressPredictions([]);
+    setIsContactAddressLine1Focused(false);
     setActiveSummaryContactId(null);
     setEditingContactId(contact.id);
     setIsEditingContact(true);
@@ -4469,7 +4715,7 @@ function AccountScreen({
                 <Text style={styles.contactsEmptySubtext}>Loading contacts...</Text>
               ) : null}
 
-              {!isLoadingContacts && isEditingContact && activeContactsView === 'contacts' ? (
+              {!isLoadingContacts && isEditingContact && (activeContactsView === 'contacts' || activeContactsView === 'favorites') ? (
                 <ScrollView style={styles.contactsList} contentContainerStyle={styles.contactsListContent} keyboardShouldPersistTaps="handled">
                   <Text style={styles.sectionTitle}>{editingContactId ? 'Edit contact' : 'New contact'}</Text>
 
@@ -4508,6 +4754,8 @@ function AccountScreen({
                       style={[styles.input, styles.accountCompactInput]}
                       value={contactAddressLine1}
                       onChangeText={setContactAddressLine1}
+                      onFocus={() => setIsContactAddressLine1Focused(true)}
+                      onBlur={() => setIsContactAddressLine1Focused(false)}
                       placeholder="Address line 1"
                     />
 
@@ -4631,6 +4879,15 @@ function AccountScreen({
                         >
                           <Text style={styles.secondaryButtonText}>{isLoadingDeviceContacts ? 'Loading…' : 'Import iPhone'}</Text>
                         </TouchableOpacity>
+                        {activeContacts.length && contactDataSettings.importPhotosEnabled ? (
+                          <TouchableOpacity
+                            style={[styles.secondaryButton, styles.contactsTopActionButton]}
+                            onPress={() => void refreshContactPhotosFromDevice()}
+                            disabled={isRefreshingContactPhotos}
+                          >
+                            <Text style={styles.secondaryButtonText}>{isRefreshingContactPhotos ? 'Refreshing…' : 'Refresh Photos'}</Text>
+                          </TouchableOpacity>
+                        ) : null}
                       </>
                     ) : null}
                   </View>
@@ -4650,7 +4907,8 @@ function AccountScreen({
                           onPress={() => setActiveSummaryContactId(contact.id)}
                           activeOpacity={0.8}
                         >
-                          <Text style={styles.contactsSummaryRowText} numberOfLines={1}>{`${getContactDisplayName(contact)} - ${getContactPrimaryChannelLabel(contact)}`}</Text>
+                          {renderContactAvatar(contact.photo, 32)}
+                          <Text style={[styles.contactsSummaryRowText, { flex: 1 }]} numberOfLines={1}>{`${getContactDisplayName(contact)} - ${getContactPrimaryChannelLabel(contact)}`}</Text>
                         </TouchableOpacity>
                       ))}
 
@@ -5038,6 +5296,9 @@ function AccountScreen({
                   <Text style={styles.modalTitle}>Contact Summary</Text>
 
                   <View style={styles.contactsSummaryDetailsCard}>
+                    <View style={{ alignItems: 'center', marginBottom: 14 }}>
+                      {renderContactAvatar(activeSummaryContact.photo, 128)}
+                    </View>
                     <Text style={styles.contactRowName}>{getContactDisplayName(activeSummaryContact)}</Text>
                     {activeSummaryContact.email ? <Text style={styles.contactRowMeta}>{activeSummaryContact.email}</Text> : null}
                     {activeSummaryContact.mobileNumber ? <Text style={styles.contactRowMeta}>{activeSummaryContact.mobileNumber}</Text> : null}
@@ -5569,6 +5830,30 @@ function AccountScreen({
                       {themeMode === 'system' ? <View style={styles.passwordCheckboxChecked} /> : null}
                     </View>
                     <Text style={styles.preferenceToggleText}>Use iPhone system setting</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.sectionTitle}>Contact Data</Text>
+                  <Text style={styles.contactDataStorageNote}>
+                    A face and a place make every contact feel a little more complete. Turn these
+                    on to bring in photos and addresses when you import or refresh from your
+                    iPhone — just keep in mind that saved photos use a bit more storage on your
+                    device.
+                  </Text>
+
+                  <TouchableOpacity style={styles.preferenceToggleRow} onPress={handleToggleImportPhotos} activeOpacity={0.8}>
+                    <View style={styles.passwordCheckbox}>
+                      {contactDataSettings.importPhotosEnabled ? <View style={styles.passwordCheckboxChecked} /> : null}
+                    </View>
+                    <Text style={styles.preferenceToggleText}>Add photos to contacts</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity style={styles.preferenceToggleRow} onPress={handleToggleImportAddresses} activeOpacity={0.8}>
+                    <View style={styles.passwordCheckbox}>
+                      {contactDataSettings.importAddressesEnabled ? <View style={styles.passwordCheckboxChecked} /> : null}
+                    </View>
+                    <Text style={styles.preferenceToggleText}>Add addresses to contacts</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -7162,7 +7447,18 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     marginBottom: 8,
     backgroundColor: colors.background,
   },
+  contactAvatar: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    backgroundColor: colors.surfaceSubtle,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+  },
   contactsSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
     borderWidth: 1,
     borderColor: colors.borderStrong,
     borderRadius: 10,
@@ -7203,7 +7499,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     color: colors.primaryPressed,
   },
   contactsSummaryModalCard: {
-    maxWidth: 560,
+    maxWidth: 620,
   },
   cloneGroupModalList: {
     maxHeight: 280,
@@ -7261,7 +7557,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     borderColor: colors.borderStrong,
     borderRadius: 10,
     backgroundColor: colors.background,
-    padding: 12,
+    padding: 16,
     marginTop: 4,
   },
   groupsManageScreen: {
@@ -7403,6 +7699,13 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     color: colors.textSecondary,
     marginBottom: 0,
     marginLeft: 8,
+  },
+  contactDataStorageNote: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontStyle: 'italic',
+    lineHeight: 18,
+    marginBottom: 10,
   },
   defaultReminderTimeRow: {
     flexDirection: 'row',
