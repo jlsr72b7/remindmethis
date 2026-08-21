@@ -1386,17 +1386,29 @@ const isExpiredNonYearlyEvent = (title: string, eventDateTime: Date, frequency: 
 // (see pruneExpiredRsvpEvents below for the proactive background sweep). This check makes the
 // public RSVP page itself stop accepting responses immediately once the event has happened or
 // its RSVP-by date has passed, regardless of whether the row has been deleted yet.
-const isRsvpAcceptingResponses = (event: { rsvpEnabled: boolean; rsvpByDate: Date | null; eventDateTime: Date }) => {
+const isRsvpAcceptingResponses = (event: { rsvpEnabled: boolean; rsvpByDate: Date | null; eventDateTime: Date; eventAllDay: boolean }) => {
   if (!event.rsvpEnabled) {
     return false;
   }
 
   const now = Date.now();
-  if (event.rsvpByDate && new Date(event.rsvpByDate).getTime() < now) {
+
+  // rsvpByDate/eventDateTime (for all-day events) are calendar days, stored at that day's UTC
+  // midnight — comparing timestamps directly would treat the deadline as expiring the instant
+  // that day begins, closing RSVP for the entire day it was meant to stay open (including the
+  // day it was first set). Compare through the end of the day instead.
+  const endOfUtcDay = (date: Date) => Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1);
+
+  if (event.rsvpByDate && endOfUtcDay(new Date(event.rsvpByDate)) <= now) {
     return false;
   }
 
-  return new Date(event.eventDateTime).getTime() >= now;
+  const eventDate = new Date(event.eventDateTime);
+  if (event.eventAllDay) {
+    return endOfUtcDay(eventDate) > now;
+  }
+
+  return eventDate.getTime() >= now;
 };
 
 const rsvpCleanupPollIntervalMs = Math.max(60_000, Number(process.env.RSVP_CLEANUP_POLL_INTERVAL_MS || 15 * 60 * 1000));
