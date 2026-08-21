@@ -1133,7 +1133,15 @@ const renderRsvpPage = (options: {
   const icon = RSVP_EVENT_ICONS[category];
   const escapedEventTitle = escapeHtml(options.eventTitle);
 
-  const closeButtonHtml = '<button type="button" class="secondaryButton" onclick="window.close()">Close</button>';
+  // Browsers only allow window.close() on a tab/window that was opened via script (e.g.
+  // window.open()) — a tab opened by tapping a link from Messages/Mail/etc. can't be closed by
+  // page JS at all, so window.close() here is a silent no-op in that (very common) case. Attempt
+  // it anyway for the contexts where it does work, and fall back to telling the user to close
+  // the tab themselves rather than leaving a button that appears to do nothing.
+  const closeButtonHtml = `
+    <button type="button" class="secondaryButton" onclick="handleRsvpClose()">Close</button>
+    <p id="rsvpCloseNotice" class="small" style="display:none;text-align:center;margin-top:10px;">You can close this tab now.</p>
+  `;
 
   // Mirrors the compact, color-coded summary pill from the app's List view (not the full
   // detail card) — same icon + color + "date (countdown) • title • people • time" line.
@@ -1241,6 +1249,15 @@ const renderRsvpPage = (options: {
           return '(' + digits.slice(0, 3) + ') ' + digits.slice(3);
         }
         return '(' + digits.slice(0, 3) + ') ' + digits.slice(3, 6) + '-' + digits.slice(6, 10);
+      }
+      function handleRsvpClose() {
+        window.close();
+        setTimeout(function () {
+          var notice = document.getElementById('rsvpCloseNotice');
+          if (notice) {
+            notice.style.display = 'block';
+          }
+        }, 200);
       }
     </script>
   </body>
