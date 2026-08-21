@@ -7,6 +7,7 @@ export interface VariableReminderEntry {
 }
 
 export interface EventLocationAddress {
+  name?: string;
   placeId?: string;
   formattedAddress?: string;
   line1: string;
@@ -35,4 +36,6 @@ export interface SpecialDateEvent {
   notified?: boolean;
   lastReminderTriggeredAt?: string;
   variableReminders?: VariableReminderEntry[];
+  rsvpEnabled?: boolean;
+  rsvpByDate?: string;
 }

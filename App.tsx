@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Contacts from 'expo-contacts/legacy';
 import { Contact as ExpoContact, ContactField as ExpoContactField } from 'expo-contacts';
 import { File as ExpoFile } from 'expo-file-system';
+import * as ImagePicker from 'expo-image-picker';
 import {
   Alert,
   Animated,
@@ -1169,6 +1170,7 @@ interface AccountContact {
   company: string;
   notes: string;
   photo?: string;
+  photoSource?: 'manual' | 'device';
   isFavorite: boolean;
   groupIds: string[];
   createdAt: string;
@@ -1378,7 +1380,9 @@ function AccountScreen({
   const [showDeviceContactsImportModal, setShowDeviceContactsImportModal] = useState(false);
   const [deviceContactsToImport, setDeviceContactsToImport] = useState<DeviceContactImportCandidate[]>([]);
   const [isLoadingDeviceContacts, setIsLoadingDeviceContacts] = useState(false);
-  const [isRefreshingContactPhotos, setIsRefreshingContactPhotos] = useState(false);
+  const [isRefreshingContacts, setIsRefreshingContacts] = useState(false);
+  const [isUploadingContactPhoto, setIsUploadingContactPhoto] = useState(false);
+  const [refreshingDotsCount, setRefreshingDotsCount] = useState(1);
   const [deliveryDevice, setDeliveryDevice] = useState(true);
   const [deliveryEmail, setDeliveryEmail] = useState(false);
   const [deliveryText, setDeliveryText] = useState(false);
@@ -1949,6 +1953,19 @@ function AccountScreen({
   const handleToggleImportAddresses = () => {
     void persistContactDataSettings({ ...contactDataSettings, importAddressesEnabled: !contactDataSettings.importAddressesEnabled });
   };
+
+  useEffect(() => {
+    if (!isRefreshingContacts) {
+      setRefreshingDotsCount(1);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setRefreshingDotsCount((count) => (count % 3) + 1);
+    }, 400);
+
+    return () => clearInterval(interval);
+  }, [isRefreshingContacts]);
 
   const handleToggleUsPublicHolidays = () => {
     void persistCalendarDefaults({ ...calendarDefaults, usPublicEnabled: !calendarDefaults.usPublicEnabled });
@@ -3209,6 +3226,8 @@ function AccountScreen({
             mobileNumber,
             company,
             notes: candidate.notes ? String(candidate.notes).trim() : '',
+            photo: candidate.photo ? String(candidate.photo) : undefined,
+            photoSource: candidate.photoSource === 'manual' ? 'manual' : candidate.photoSource === 'device' ? 'device' : undefined,
             isFavorite: candidate.isFavorite === true,
             groupIds: Array.isArray(candidate.groupIds) ? candidate.groupIds.map((groupId) => String(groupId || '').trim()).filter(Boolean) : [],
             createdAt: candidate.createdAt ? String(candidate.createdAt) : new Date().toISOString(),
@@ -3507,6 +3526,7 @@ function AccountScreen({
         company: entry.company,
         notes: 'Imported from iPhone contacts.',
         photo: entry.photo,
+        photoSource: entry.photo ? 'device' : undefined,
         isFavorite: false,
         groupIds: [],
         createdAt: timestamp,
@@ -3571,7 +3591,7 @@ function AccountScreen({
         ExpoContactField.PHONES,
         ExpoContactField.COMPANY,
         ExpoContactField.BIRTHDAY,
-        ExpoContactField.IMAGE,
+        ExpoContactField.THUMBNAIL,
         ExpoContactField.ADDRESSES,
       ]);
 
@@ -3586,7 +3606,10 @@ function AccountScreen({
         birthday: details.birthday
           ? { month: details.birthday.month - 1, day: details.birthday.day, year: details.birthday.year ?? null }
           : null,
-        image: contactDataSettings.importPhotosEnabled && details.image ? { uri: details.image } : null,
+        // Use the small, pre-cropped thumbnail rather than the full-resolution image —
+        // the original photo can be several MB, which is far too large to store
+        // for every contact (backend payload size and on-device storage both suffer).
+        image: contactDataSettings.importPhotosEnabled && details.thumbnail ? { uri: details.thumbnail } : null,
         addresses: contactDataSettings.importAddressesEnabled
           ? details.addresses?.map((entry) => ({
               street: entry.street,
@@ -3620,60 +3643,87 @@ function AccountScreen({
     }
   }, [importDeviceContacts, mapDeviceContactToImportCandidate, contactDataSettings]);
 
-  const refreshContactPhotosFromDevice = useCallback(async () => {
+  const refreshContactsFromDevice = useCallback(async () => {
     if (Platform.OS === 'web') {
       setContactsMessage('Device contacts are not available in the web build.');
       return;
     }
 
-    if (!contactDataSettings.importPhotosEnabled) {
-      setContactsMessage('Turn on "Add photos to contacts" under Preferences → Contact Data to refresh photos.');
-      return;
-    }
-
     setContactsMessage(null);
-    setIsRefreshingContactPhotos(true);
+    setIsRefreshingContacts(true);
     try {
       const permission = await Contacts.requestPermissionsAsync();
       if (permission.status !== 'granted') {
-        setContactsMessage('Allow Contacts access on your iPhone to refresh photos.');
+        setContactsMessage('Allow Contacts access on your iPhone to refresh contacts.');
         return;
       }
 
       const deviceContacts = await ExpoContact.getAllDetails([
+        ExpoContactField.GIVEN_NAME,
+        ExpoContactField.FAMILY_NAME,
+        ExpoContactField.FULL_NAME,
         ExpoContactField.EMAILS,
         ExpoContactField.PHONES,
-        ExpoContactField.IMAGE,
+        ExpoContactField.COMPANY,
+        ExpoContactField.BIRTHDAY,
+        ExpoContactField.THUMBNAIL,
+        ExpoContactField.ADDRESSES,
       ]);
 
-      const photoByEmail = new Map<string, string>();
-      const photoByPhone = new Map<string, string>();
+      const candidateByEmail = new Map<string, DeviceContactImportCandidate>();
+      const candidateByPhone = new Map<string, DeviceContactImportCandidate>();
+
       deviceContacts.forEach((entry) => {
-        if (!entry.image) {
+        const candidate = mapDeviceContactToImportCandidate({
+          id: entry.id,
+          name: entry.fullName || undefined,
+          firstName: entry.givenName || undefined,
+          lastName: entry.familyName || undefined,
+          emails: entry.emails?.map((email) => ({ email: email.address })),
+          phoneNumbers: entry.phones?.map((phone) => ({ number: phone.number })),
+          company: entry.company || undefined,
+          birthday: entry.birthday
+            ? { month: entry.birthday.month - 1, day: entry.birthday.day, year: entry.birthday.year ?? null }
+            : null,
+          image: contactDataSettings.importPhotosEnabled && entry.thumbnail ? { uri: entry.thumbnail } : null,
+          addresses: contactDataSettings.importAddressesEnabled
+            ? entry.addresses?.map((address) => ({
+                street: address.street,
+                city: address.city,
+                state: address.state,
+                region: address.region,
+                postcode: address.postcode,
+              }))
+            : undefined,
+        });
+
+        if (!candidate) {
           return;
         }
-        entry.emails?.forEach((email) => {
-          const key = String(email.address || '').trim().toLowerCase();
-          if (key) {
-            photoByEmail.set(key, entry.image as string);
-          }
-        });
-        entry.phones?.forEach((phone) => {
-          const key = normalizePhoneDigits(String(phone.number || ''));
-          if (key) {
-            photoByPhone.set(key, entry.image as string);
-          }
-        });
+
+        const emailKey = candidate.email.trim().toLowerCase();
+        const phoneKey = normalizePhoneDigits(candidate.mobileNumber || '');
+        if (emailKey) {
+          candidateByEmail.set(emailKey, candidate);
+        }
+        if (phoneKey) {
+          candidateByPhone.set(phoneKey, candidate);
+        }
       });
 
       // Resolve each distinct matched photo to a permanent base64 data URI once,
       // rather than storing the temporary file:// path the OS handed back.
-      const distinctUris = new Set<string>([...photoByEmail.values(), ...photoByPhone.values()]);
-      const resolvedByUri = new Map<string, string>();
-      await Promise.all([...distinctUris].map(async (uri) => {
+      const distinctPhotoUris = new Set<string>();
+      [...candidateByEmail.values(), ...candidateByPhone.values()].forEach((candidate) => {
+        if (candidate.photo) {
+          distinctPhotoUris.add(candidate.photo);
+        }
+      });
+      const resolvedPhotoByUri = new Map<string, string>();
+      await Promise.all([...distinctPhotoUris].map(async (uri) => {
         const resolved = await resolvePersistablePhoto(uri);
         if (resolved) {
-          resolvedByUri.set(uri, resolved);
+          resolvedPhotoByUri.set(uri, resolved);
         }
       }));
 
@@ -3681,13 +3731,49 @@ function AccountScreen({
       const nextContacts = contacts.map((entry) => {
         const emailKey = entry.email.trim().toLowerCase();
         const phoneKey = normalizePhoneDigits(entry.mobileNumber || '');
-        const matchedUri = (emailKey && photoByEmail.get(emailKey)) || (phoneKey && photoByPhone.get(phoneKey)) || undefined;
-        const matchedPhoto = matchedUri ? resolvedByUri.get(matchedUri) : undefined;
-        if (matchedPhoto && matchedPhoto !== entry.photo) {
-          updatedCount += 1;
-          return { ...entry, photo: matchedPhoto, updatedAt: new Date().toISOString() };
+        const matched = (emailKey && candidateByEmail.get(emailKey)) || (phoneKey && candidateByPhone.get(phoneKey));
+        if (!matched) {
+          return entry;
         }
-        return entry;
+
+        const resolvedPhoto = matched.photo ? resolvedPhotoByUri.get(matched.photo) : undefined;
+        const updates: Partial<AccountContact> = {};
+
+        if (matched.firstName && matched.firstName !== entry.firstName) {
+          updates.firstName = matched.firstName;
+        }
+        if (matched.lastName && matched.lastName !== entry.lastName) {
+          updates.lastName = matched.lastName;
+        }
+        if (matched.company && matched.company !== entry.company) {
+          updates.company = matched.company;
+        }
+        if (matched.mobileNumber && matched.mobileNumber !== entry.mobileNumber) {
+          updates.mobileNumber = matched.mobileNumber;
+        }
+        if (matched.birthDate && matched.birthDate !== entry.birthDate) {
+          updates.birthDate = matched.birthDate;
+        }
+        if (contactDataSettings.importAddressesEnabled && matched.address && matched.address !== entry.address) {
+          updates.address = matched.address;
+        }
+        // A manually uploaded photo always wins over anything synced from iPhone Contacts.
+        if (
+          contactDataSettings.importPhotosEnabled
+          && entry.photoSource !== 'manual'
+          && resolvedPhoto
+          && resolvedPhoto !== entry.photo
+        ) {
+          updates.photo = resolvedPhoto;
+          updates.photoSource = 'device';
+        }
+
+        if (!Object.keys(updates).length) {
+          return entry;
+        }
+
+        updatedCount += 1;
+        return { ...entry, ...updates, updatedAt: new Date().toISOString() };
       });
 
       if (updatedCount > 0) {
@@ -3695,15 +3781,68 @@ function AccountScreen({
       }
 
       setContactsMessage(updatedCount > 0
-        ? `Refreshed photos for ${updatedCount} contact${updatedCount === 1 ? '' : 's'}.`
-        : 'No new photos found on your iPhone contacts.');
+        ? `Updated ${updatedCount} contact${updatedCount === 1 ? '' : 's'} from your iPhone contacts.`
+        : 'No changes found on your iPhone contacts.');
     } catch (error) {
-      console.warn('Unable to refresh contact photos', error);
-      setContactsMessage('Unable to refresh contact photos right now.');
+      console.warn('Unable to refresh contacts', error);
+      setContactsMessage('Unable to refresh contacts right now.');
     } finally {
-      setIsRefreshingContactPhotos(false);
+      setIsRefreshingContacts(false);
     }
-  }, [contacts, contactGroups, persistContactsSnapshot, contactDataSettings]);
+  }, [contacts, contactGroups, persistContactsSnapshot, contactDataSettings, mapDeviceContactToImportCandidate]);
+
+  const pickAndUploadContactPhoto = useCallback(async (contact: AccountContact) => {
+    if (Platform.OS === 'web') {
+      setContactsMessage('Uploading a photo is not supported in the web build.');
+      return;
+    }
+
+    setIsUploadingContactPhoto(true);
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        setContactsMessage('Allow Photos access on your iPhone to upload a contact photo.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: 'images',
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.7,
+        base64: true,
+      });
+
+      if (result.canceled || !result.assets?.length) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      if (!asset.base64) {
+        setContactsMessage('Unable to read that photo. Please try a different one.');
+        return;
+      }
+
+      const mimeType = asset.mimeType || 'image/jpeg';
+      const photo = `data:${mimeType};base64,${asset.base64}`;
+
+      // A manually uploaded photo always takes precedence over anything synced
+      // from iPhone Contacts from this point forward.
+      const nextContacts = contacts.map((entry) => (
+        entry.id === contact.id
+          ? { ...entry, photo, photoSource: 'manual' as const, updatedAt: new Date().toISOString() }
+          : entry
+      ));
+
+      await persistContactsSnapshot(nextContacts, contactGroups);
+      setContactsMessage('Contact photo updated.');
+    } catch (error) {
+      console.warn('Unable to upload contact photo', error);
+      setContactsMessage('Unable to upload that photo right now.');
+    } finally {
+      setIsUploadingContactPhoto(false);
+    }
+  }, [contacts, contactGroups, persistContactsSnapshot]);
 
   const openEditContactEditor = (contact: AccountContact) => {
     const addressParts = parseAddressParts(contact.address || '');
@@ -4719,6 +4858,28 @@ function AccountScreen({
                 <ScrollView style={styles.contactsList} contentContainerStyle={styles.contactsListContent} keyboardShouldPersistTaps="handled">
                   <Text style={styles.sectionTitle}>{editingContactId ? 'Edit contact' : 'New contact'}</Text>
 
+                  {editingContactId ? (() => {
+                    const editingContactRecord = contacts.find((entry) => entry.id === editingContactId);
+                    if (!editingContactRecord) {
+                      return null;
+                    }
+                    return (
+                      <View style={{ alignItems: 'center', marginBottom: 12 }}>
+                        {renderContactAvatar(editingContactRecord.photo, 100)}
+                        <TouchableOpacity
+                          onPress={() => void pickAndUploadContactPhoto(editingContactRecord)}
+                          disabled={isUploadingContactPhoto}
+                          style={{ marginTop: 8 }}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={styles.contactPhotoUploadLink}>
+                            {isUploadingContactPhoto ? 'Uploading…' : editingContactRecord.photo ? 'Replace Photo' : 'Add Photo'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })() : null}
+
                   <Text style={styles.fieldLabel}>Email address</Text>
                   <TextInput
                     style={styles.input}
@@ -4879,13 +5040,13 @@ function AccountScreen({
                         >
                           <Text style={styles.secondaryButtonText}>{isLoadingDeviceContacts ? 'Loading…' : 'Import iPhone'}</Text>
                         </TouchableOpacity>
-                        {activeContacts.length && contactDataSettings.importPhotosEnabled ? (
+                        {activeContacts.length ? (
                           <TouchableOpacity
                             style={[styles.secondaryButton, styles.contactsTopActionButton]}
-                            onPress={() => void refreshContactPhotosFromDevice()}
-                            disabled={isRefreshingContactPhotos}
+                            onPress={() => void refreshContactsFromDevice()}
+                            disabled={isRefreshingContacts}
                           >
-                            <Text style={styles.secondaryButtonText}>{isRefreshingContactPhotos ? 'Refreshing…' : 'Refresh Photos'}</Text>
+                            <Text style={styles.secondaryButtonText}>Refresh</Text>
                           </TouchableOpacity>
                         ) : null}
                       </>
@@ -5296,8 +5457,18 @@ function AccountScreen({
                   <Text style={styles.modalTitle}>Contact Summary</Text>
 
                   <View style={styles.contactsSummaryDetailsCard}>
-                    <View style={{ alignItems: 'center', marginBottom: 14 }}>
+                    <View style={{ alignItems: 'center', marginBottom: 8 }}>
                       {renderContactAvatar(activeSummaryContact.photo, 128)}
+                      <TouchableOpacity
+                        onPress={() => void pickAndUploadContactPhoto(activeSummaryContact)}
+                        disabled={isUploadingContactPhoto}
+                        style={{ marginTop: 8 }}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={styles.contactPhotoUploadLink}>
+                          {isUploadingContactPhoto ? 'Uploading…' : activeSummaryContact.photo ? 'Replace Photo' : 'Add Photo'}
+                        </Text>
+                      </TouchableOpacity>
                     </View>
                     <Text style={styles.contactRowName}>{getContactDisplayName(activeSummaryContact)}</Text>
                     {activeSummaryContact.email ? <Text style={styles.contactRowMeta}>{activeSummaryContact.email}</Text> : null}
@@ -5342,6 +5513,17 @@ function AccountScreen({
                   </View>
                 </View>
               ) : null}
+            </View>
+          </Modal>
+
+          <Modal transparent visible={isRefreshingContacts} animationType="fade" onRequestClose={() => {}}>
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, styles.contactsRefreshModalCard]}>
+                <Text style={styles.modalTitle}>{`Updating Contacts${'.'.repeat(refreshingDotsCount)}`}</Text>
+                <Text style={[styles.contactDataStorageNote, { textAlign: 'center' }]}>
+                  Checking your iPhone contacts for changes — this can take a moment for a lot of contacts.
+                </Text>
+              </View>
             </View>
           </Modal>
 
@@ -7501,6 +7683,11 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
   contactsSummaryModalCard: {
     maxWidth: 620,
   },
+  contactsRefreshModalCard: {
+    maxWidth: 360,
+    alignItems: 'center',
+    paddingVertical: 28,
+  },
   cloneGroupModalList: {
     maxHeight: 280,
     width: '100%',
@@ -7630,6 +7817,12 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     color: colors.textTertiary,
     fontSize: 12,
     marginTop: 2,
+  },
+  contactPhotoUploadLink: {
+    color: colors.primary,
+    fontSize: 13,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
   },
   contactsEmptyState: {
     flex: 1,

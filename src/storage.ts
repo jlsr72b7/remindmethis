@@ -530,6 +530,7 @@ function mapApiEventToLocal(event: any): SpecialDateEvent {
 
     try {
       const parsed = JSON.parse(metadataLine) as Partial<{
+        name: string;
         placeId: string;
         formattedAddress: string;
         line1: string;
@@ -540,6 +541,7 @@ function mapApiEventToLocal(event: any): SpecialDateEvent {
         phone: string;
       }>;
       eventLocation = {
+        name: parsed.name ? String(parsed.name) : undefined,
         placeId: parsed.placeId ? String(parsed.placeId) : undefined,
         formattedAddress: parsed.formattedAddress ? String(parsed.formattedAddress) : undefined,
         line1: parsed.line1 ? String(parsed.line1) : '',
@@ -565,6 +567,7 @@ function mapApiEventToLocal(event: any): SpecialDateEvent {
   const parsedNotesMetadata = parseEventLocationNotesMetadata(notesFromApi);
   const eventLocation = event?.eventLocation && typeof event.eventLocation === 'object'
     ? {
+        name: event.eventLocation.name ? String(event.eventLocation.name) : undefined,
         placeId: event.eventLocation.placeId ? String(event.eventLocation.placeId) : undefined,
         formattedAddress: event.eventLocation.formattedAddress ? String(event.eventLocation.formattedAddress) : undefined,
         line1: event.eventLocation.line1 ? String(event.eventLocation.line1) : '',
@@ -595,6 +598,8 @@ function mapApiEventToLocal(event: any): SpecialDateEvent {
     eventLocation: eventLocation || parsedNotesMetadata.eventLocation,
     notified: event.notified ?? undefined,
     lastReminderTriggeredAt: event.lastReminderTriggeredAt ? new Date(event.lastReminderTriggeredAt).toISOString() : undefined,
+    rsvpEnabled: Boolean(event.rsvpEnabled),
+    rsvpByDate: event.rsvpByDate ? new Date(event.rsvpByDate).toISOString() : undefined,
     variableReminders: Array.isArray(event.reminders)
       ? event.reminders.map((entry: any) => ({
           id: String(entry.id),
@@ -1159,6 +1164,69 @@ export async function sendShareSmsNotification(payload: {
   } catch (error) {
     console.warn('Share SMS notification failed', error);
     return false;
+  }
+}
+
+export async function sendRsvpInvites(
+  eventId: string,
+  userId: string,
+  invites: Array<{ label: string; email?: string; phone?: string }>,
+) {
+  try {
+    await apiRequest<{ success: boolean }>(`/events/${encodeURIComponent(eventId)}/rsvp-invites`, {
+      method: 'POST',
+      body: JSON.stringify({ userId, invites }),
+    });
+    return true;
+  } catch (error) {
+    console.warn('Recording RSVP invites failed', error);
+    return false;
+  }
+}
+
+export interface RsvpSummaryEntry {
+  id: string;
+  firstName?: string;
+  lastName?: string;
+  label?: string;
+  email?: string | null;
+  phone?: string | null;
+  message?: string | null;
+  respondedAt?: string;
+}
+
+export interface RsvpSummaryResult {
+  counts: { yes: number; no: number; noReply: number };
+  yes: RsvpSummaryEntry[];
+  no: RsvpSummaryEntry[];
+  noReply: RsvpSummaryEntry[];
+}
+
+export async function fetchRsvpSummary(eventId: string, userId: string): Promise<RsvpSummaryResult | null> {
+  try {
+    return await apiRequest<RsvpSummaryResult>(
+      `/events/${encodeURIComponent(eventId)}/rsvp-summary?userId=${encodeURIComponent(userId)}`,
+    );
+  } catch (error) {
+    console.warn('Loading RSVP summary failed', error);
+    return null;
+  }
+}
+
+export async function sendRsvpReminder(eventId: string, userId: string, inviteId: string): Promise<{
+  success: boolean;
+  requiresNativeText?: boolean;
+  phone?: string;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    return await apiRequest(`/events/${encodeURIComponent(eventId)}/rsvp-remind`, {
+      method: 'POST',
+      body: JSON.stringify({ userId, inviteId }),
+    });
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : 'Unable to send RSVP reminder right now.' };
   }
 }
 

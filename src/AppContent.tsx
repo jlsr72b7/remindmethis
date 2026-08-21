@@ -5,6 +5,7 @@ import {
   Animated,
   Button,
   Dimensions,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -20,6 +21,7 @@ import {
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import * as Contacts from 'expo-contacts/legacy';
+import * as SMS from 'expo-sms';
 import {
   createShareInvite,
   findUserByEmail,
@@ -43,6 +45,10 @@ import {
   sendShareSmsNotification,
   sendReminderEmailNotification,
   sendReminderSmsNotification,
+  sendRsvpInvites,
+  fetchRsvpSummary,
+  sendRsvpReminder,
+  type RsvpSummaryResult,
   subscribeApiStorageStatus,
   isApiStorageEnabled,
   validateEmail,
@@ -105,6 +111,8 @@ interface EventFormState {
   workSubtype: WorkSubtypeValue;
   schoolSubtype: SchoolSubtypeValue;
   eventLocationEnabled: boolean;
+  eventLocationName: string;
+  eventLocationSaveEnabled: boolean;
   eventLocationPlaceId: string;
   eventLocationFormattedAddress: string;
   eventLocationLine1: string;
@@ -434,6 +442,8 @@ const createDefaultForm = (reminderTimeZone: string): EventFormState => {
     workSubtype: 'meeting' as WorkSubtypeValue,
     schoolSubtype: 'quiz' as SchoolSubtypeValue,
     eventLocationEnabled: false,
+    eventLocationName: '',
+    eventLocationSaveEnabled: false,
     eventLocationPlaceId: '',
     eventLocationFormattedAddress: '',
     eventLocationLine1: '',
@@ -658,6 +668,11 @@ const getEventSummaryColor = (event: SpecialDateEvent): string => EVENT_SUMMARY_
 
 const getEventSummaryIcon = (event: SpecialDateEvent): string => EVENT_SUMMARY_ICONS[getEventSummaryCategory(event)];
 
+const isPartyOrWeddingEvent = (event: SpecialDateEvent): boolean => {
+  const normalizedTitle = event.title.toLowerCase().trim();
+  return normalizedTitle === 'wedding' || normalizedTitle.endsWith(' party') || normalizedTitle === 'party';
+};
+
 const getSavedEventsFilterOptionStyle = (value: SavedEventsFilterType): { color: string | null; icon: string | null } => {
   if (value === 'all') {
     return { color: null, icon: null };
@@ -733,6 +748,7 @@ const getDuplicateEventValidationMessage = () => (
 
 const buildEventLocationFromForm = (form: {
   eventLocationEnabled: boolean;
+  eventLocationName: string;
   eventLocationPlaceId: string;
   eventLocationFormattedAddress: string;
   eventLocationLine1: string;
@@ -746,6 +762,7 @@ const buildEventLocationFromForm = (form: {
     return undefined;
   }
 
+  const name = form.eventLocationName.trim();
   const line1 = form.eventLocationLine1.trim();
   const line2 = form.eventLocationLine2.trim();
   const city = form.eventLocationCity.trim();
@@ -755,11 +772,12 @@ const buildEventLocationFromForm = (form: {
   const placeId = form.eventLocationPlaceId.trim();
   const formattedAddress = form.eventLocationFormattedAddress.trim();
 
-  if (!line1 && !line2 && !city && !state && !zip && !formattedAddress && !phone) {
+  if (!name && !line1 && !line2 && !city && !state && !zip && !formattedAddress && !phone) {
     return undefined;
   }
 
   return {
+    ...(name ? { name } : {}),
     ...(placeId ? { placeId } : {}),
     ...(formattedAddress ? { formattedAddress } : {}),
     ...(phone ? { phone } : {}),
@@ -950,7 +968,8 @@ const getEventFormState = (event: SpecialDateEvent): EventFormState => {
   const hasEventLocation = Boolean(
     eventLocation
     && (
-      eventLocation.line1
+      eventLocation.name
+      || eventLocation.line1
       || eventLocation.line2
       || eventLocation.city
       || eventLocation.state
@@ -968,6 +987,8 @@ const getEventFormState = (event: SpecialDateEvent): EventFormState => {
     dentalSubtype: 'cleaning',
     workSubtype: 'meeting',
     eventLocationEnabled: hasEventLocation,
+    eventLocationName: eventLocation?.name || '',
+    eventLocationSaveEnabled: false,
     eventLocationPlaceId: eventLocation?.placeId || '',
     eventLocationFormattedAddress: eventLocation?.formattedAddress || '',
     eventLocationLine1: eventLocation?.line1 || '',
@@ -1254,6 +1275,7 @@ const getEventLocationDisplayLines = (eventLocation?: EventLocationAddress) => {
     return [] as string[];
   }
 
+  const name = eventLocation.name ? eventLocation.name.trim() : '';
   const line1 = eventLocation.line1.trim();
   const line2 = eventLocation.line2 ? eventLocation.line2.trim() : '';
   const city = eventLocation.city.trim();
@@ -1262,7 +1284,7 @@ const getEventLocationDisplayLines = (eventLocation?: EventLocationAddress) => {
   const phone = eventLocation.phone ? formatPhoneNumberInput(eventLocation.phone.trim()) : '';
   const cityStateZip = [city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ').trim();
   const fallback = eventLocation.formattedAddress ? eventLocation.formattedAddress.trim() : '';
-  const lines = [line1, line2, cityStateZip, phone ? `Phone: ${phone}` : ''].filter(Boolean);
+  const lines = [name, line1, line2, cityStateZip, phone ? `Phone: ${phone}` : ''].filter(Boolean);
 
   if (lines.length) {
     return lines;
@@ -1895,6 +1917,7 @@ interface ShareContact {
   firstName: string;
   lastName: string;
   mobileNumber?: string;
+  photo?: string;
   deletedAt: string | null;
 }
 
@@ -1954,6 +1977,7 @@ const normalizeShareContactsSnapshot = (raw: string | null): { contacts: ShareCo
           firstName,
           lastName,
           mobileNumber: candidate.mobileNumber ? String(candidate.mobileNumber).trim() : '',
+          photo: candidate.photo ? String(candidate.photo) : undefined,
           deletedAt: candidate.deletedAt ? String(candidate.deletedAt) : null,
         } as ShareContact;
       })
@@ -1984,6 +2008,67 @@ const normalizeShareContactsSnapshot = (raw: string | null): { contacts: ShareCo
   } catch (error) {
     console.warn('Unable to parse share contacts snapshot', error);
     return { contacts: [], groups: [] };
+  }
+};
+
+interface SavedEventLocation {
+  id: string;
+  name: string;
+  placeId?: string;
+  formattedAddress?: string;
+  line1?: string;
+  line2?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  phone?: string;
+  updatedAt: string;
+}
+
+const getEventLocationsStorageKey = (userId: string) => `special-date-locations:${userId}`;
+
+const normalizeSavedEventLocationsSnapshot = (raw: string | null): SavedEventLocation[] => {
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return null;
+        }
+
+        const candidate = entry as Partial<SavedEventLocation>;
+        const id = String(candidate.id || '').trim();
+        const name = String(candidate.name || '').trim();
+        if (!id || !name) {
+          return null;
+        }
+
+        return {
+          id,
+          name,
+          placeId: candidate.placeId ? String(candidate.placeId) : undefined,
+          formattedAddress: candidate.formattedAddress ? String(candidate.formattedAddress) : undefined,
+          line1: candidate.line1 ? String(candidate.line1) : undefined,
+          line2: candidate.line2 ? String(candidate.line2) : undefined,
+          city: candidate.city ? String(candidate.city) : undefined,
+          state: candidate.state ? String(candidate.state) : undefined,
+          zip: candidate.zip ? String(candidate.zip) : undefined,
+          phone: candidate.phone ? String(candidate.phone) : undefined,
+          updatedAt: candidate.updatedAt ? String(candidate.updatedAt) : new Date().toISOString(),
+        } as SavedEventLocation;
+      })
+      .filter((entry): entry is SavedEventLocation => entry !== null);
+  } catch (error) {
+    console.warn('Unable to parse saved event locations', error);
+    return [];
   }
 };
 
@@ -2076,11 +2161,20 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [shareContacts, setShareContacts] = useState<ShareContact[]>([]);
   const [shareGroups, setShareGroups] = useState<ShareGroup[]>([]);
   const [shareQuickAddPanel, setShareQuickAddPanel] = useState<'contact' | 'group' | null>(null);
+  const [shareContactSearch, setShareContactSearch] = useState('');
   const [shareManualEmail, setShareManualEmail] = useState('');
   const [shareManualPhone, setShareManualPhone] = useState('');
   const [shareRecipients, setShareRecipients] = useState<ShareRecipient[]>([]);
   const [shareMessage, setShareMessage] = useState('');
   const [isSendingShare, setIsSendingShare] = useState(false);
+  const [isSendingShareText, setIsSendingShareText] = useState(false);
+  const [isShareTextAvailable, setIsShareTextAvailable] = useState(false);
+  const [isRsvpDatePickerVisible, setIsRsvpDatePickerVisible] = useState(false);
+  const [rsvpByDateDraft, setRsvpByDateDraft] = useState<Date>(new Date());
+  const [rsvpPickerMonth, setRsvpPickerMonth] = useState<Date>(new Date());
+  const [rsvpSummaries, setRsvpSummaries] = useState<Record<string, RsvpSummaryResult>>({});
+  const [rsvpManagerEventId, setRsvpManagerEventId] = useState<string | null>(null);
+  const [sendingRsvpReminderId, setSendingRsvpReminderId] = useState<string | null>(null);
   const [hasInitializedReminderScheduleView, setHasInitializedReminderScheduleView] = useState(false);
   const [pendingShareInvites, setPendingShareInvites] = useState<PendingShareInvite[]>([]);
   const [activeShareInvite, setActiveShareInvite] = useState<PendingShareInvite | null>(null);
@@ -2114,9 +2208,58 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   }, [events]);
 
   const shareSelectableContacts = useMemo(
-    () => shareContacts.filter((contact) => !contact.deletedAt),
+    () => shareContacts
+      .filter((contact) => !contact.deletedAt)
+      .slice()
+      .sort((a, b) => {
+        const aKey = (a.lastName || a.firstName || '').trim().toLowerCase();
+        const bKey = (b.lastName || b.firstName || '').trim().toLowerCase();
+        return aKey.localeCompare(bKey);
+      }),
     [shareContacts],
   );
+  const filteredShareSelectableContacts = useMemo(() => {
+    const query = shareContactSearch.trim().toLowerCase();
+    if (!query) {
+      return shareSelectableContacts;
+    }
+
+    return shareSelectableContacts.filter((contact) => {
+      const fullName = `${contact.firstName} ${contact.lastName}`.trim().toLowerCase();
+      const email = (contact.email || '').toLowerCase();
+      const phone = (contact.mobileNumber || '').toLowerCase();
+      return fullName.includes(query) || email.includes(query) || phone.includes(query);
+    });
+  }, [shareSelectableContacts, shareContactSearch]);
+  const contactPhotoByNameKey = useMemo(() => {
+    const map = new Map<string, string>();
+    shareContacts.forEach((contact) => {
+      if (contact.deletedAt || !contact.photo) {
+        return;
+      }
+      const fullName = `${contact.firstName} ${contact.lastName}`.trim().toLowerCase();
+      if (fullName && !map.has(fullName)) {
+        map.set(fullName, contact.photo);
+      }
+      const firstOnly = contact.firstName.trim().toLowerCase();
+      if (!contact.lastName.trim() && firstOnly && !map.has(firstOnly)) {
+        map.set(firstOnly, contact.photo);
+      }
+    });
+    return map;
+  }, [shareContacts]);
+
+  const getEventContactPhoto = (event: SpecialDateEvent): string | undefined => (
+    contactPhotoByNameKey.get(event.people.trim().toLowerCase())
+  );
+
+  const renderEventSummaryIcon = (event: SpecialDateEvent) => {
+    const contactPhoto = getEventContactPhoto(event);
+    if (contactPhoto) {
+      return <Image source={{ uri: contactPhoto }} style={styles.summaryLinkPhoto} />;
+    }
+    return <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(event)}</Text>;
+  };
   const activeClockIntervalMinutes = useMemo(
     () => normalizeClockIntervalMinutes(defaultReminderTime.clockIntervalMinutes),
     [defaultReminderTime.clockIntervalMinutes],
@@ -2126,6 +2269,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [eventLocationAutocompleteSessionToken] = useState(() => `event-addr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const skipNextEventLocationAutocompleteFetchRef = useRef(0);
   const eventLocationBlurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [savedEventLocations, setSavedEventLocations] = useState<SavedEventLocation[]>([]);
+  const [isEventLocationNameFocused, setIsEventLocationNameFocused] = useState(false);
+  const eventLocationNameBlurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const resetTypeSelectionUi = useCallback(() => {
     setHasSelectedEventType(false);
@@ -2139,6 +2285,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   useEffect(() => () => {
     if (eventLocationBlurTimeoutRef.current) {
       clearTimeout(eventLocationBlurTimeoutRef.current);
+    }
+    if (eventLocationNameBlurTimeoutRef.current) {
+      clearTimeout(eventLocationNameBlurTimeoutRef.current);
     }
   }, []);
 
@@ -2268,7 +2417,31 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   }, [userId]);
 
   useEffect(() => {
-    if (currentView !== 'share' || !userId) {
+    if (currentView !== 'share') {
+      setIsShareTextAvailable(false);
+      return;
+    }
+
+    let isActive = true;
+    SMS.isAvailableAsync()
+      .then((available) => {
+        if (isActive) {
+          setIsShareTextAvailable(available);
+        }
+      })
+      .catch(() => {
+        if (isActive) {
+          setIsShareTextAvailable(false);
+        }
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [currentView]);
+
+  useEffect(() => {
+    if (!userId) {
       return;
     }
 
@@ -2287,6 +2460,31 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       if (isActive) {
         setShareContacts([]);
         setShareGroups([]);
+      }
+    });
+
+    return () => {
+      isActive = false;
+    };
+  }, [currentView, userId]);
+
+  useEffect(() => {
+    if (currentView !== 'create' || !userId) {
+      return;
+    }
+
+    let isActive = true;
+
+    void AsyncStorage.getItem(getEventLocationsStorageKey(userId)).then((raw) => {
+      if (!isActive) {
+        return;
+      }
+
+      setSavedEventLocations(normalizeSavedEventLocationsSnapshot(raw));
+    }).catch((error) => {
+      console.warn('Unable to load saved event locations', error);
+      if (isActive) {
+        setSavedEventLocations([]);
       }
     });
 
@@ -2484,6 +2682,69 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       eventLocationZip: normalizeZipCode(resolved?.zip || ''),
     }));
   }, [eventLocationAutocompleteSessionToken]);
+
+  const eventLocationNameSuggestions = (() => {
+    const query = form.eventLocationName.trim().toLowerCase();
+    if (!query || !isEventLocationNameFocused) {
+      return [] as SavedEventLocation[];
+    }
+
+    return savedEventLocations
+      .filter((entry) => entry.name.toLowerCase().includes(query))
+      .slice(0, 6);
+  })();
+
+  const applySavedEventLocation = (location: SavedEventLocation) => {
+    skipNextEventLocationAutocompleteFetchRef.current = 2;
+    setIsEventLocationNameFocused(false);
+    setIsEventLocationLine1Focused(false);
+    setEventLocationPredictions([]);
+
+    setForm((current) => ({
+      ...current,
+      eventLocationName: location.name,
+      eventLocationPlaceId: location.placeId || '',
+      eventLocationFormattedAddress: location.formattedAddress || '',
+      eventLocationLine1: location.line1 || '',
+      eventLocationLine2: location.line2 || '',
+      eventLocationCity: location.city || '',
+      eventLocationState: normalizeStateCode(location.state || ''),
+      eventLocationZip: normalizeZipCode(location.zip || ''),
+      eventLocationPhone: formatPhoneNumberInput(location.phone || ''),
+    }));
+  };
+
+  const persistSavedEventLocation = async (location: EventLocationAddress) => {
+    const normalizedName = (location.name || '').trim();
+    if (!userId || !normalizedName) {
+      return;
+    }
+
+    const withoutMatch = savedEventLocations.filter(
+      (entry) => entry.name.trim().toLowerCase() !== normalizedName.toLowerCase(),
+    );
+    const nextEntry: SavedEventLocation = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: normalizedName,
+      placeId: location.placeId,
+      formattedAddress: location.formattedAddress,
+      line1: location.line1 || undefined,
+      line2: location.line2,
+      city: location.city || undefined,
+      state: location.state || undefined,
+      zip: location.zip || undefined,
+      phone: location.phone,
+      updatedAt: new Date().toISOString(),
+    };
+    const next = [nextEntry, ...withoutMatch];
+    setSavedEventLocations(next);
+
+    try {
+      await AsyncStorage.setItem(getEventLocationsStorageKey(userId), JSON.stringify(next));
+    } catch (error) {
+      console.warn('Unable to save event location', error);
+    }
+  };
 
   const restoreInterruptedModalContext = () => {
     if (!interruptedModalContext) {
@@ -3299,6 +3560,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       const peopleLabel = form.people.trim();
       const notes = form.notes.trim();
       const eventLocation = buildEventLocationFromForm(form);
+      if (form.eventLocationSaveEnabled && eventLocation?.name) {
+        void persistSavedEventLocation(eventLocation);
+      }
       const resolvedEventType = getEventTitle(form.eventType, form.partySubtype, form.customType, form.schoolSubtype, form.medicalSubtype, form.dentalSubtype, form.workSubtype);
       const reminderFrequency = (form.reminderMode === 'variable' || form.reminderMode === 'default')
         ? 'once' as ReminderFrequency
@@ -3947,6 +4211,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       const peopleLabel = form.people.trim();
       const notes = form.notes.trim();
       const eventLocation = buildEventLocationFromForm(form);
+      if (form.eventLocationSaveEnabled && eventLocation?.name) {
+        void persistSavedEventLocation(eventLocation);
+      }
       const resolvedEventType = getEventTitle(form.eventType, form.partySubtype, form.customType, form.schoolSubtype, form.medicalSubtype, form.dentalSubtype, form.workSubtype);
       const reminderFrequency = (form.reminderMode === 'variable' || form.reminderMode === 'default')
         ? 'once' as ReminderFrequency
@@ -4237,7 +4504,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setRemindersForEventId(event.id);
   };
 
-  const startShareForEvent = (event: SpecialDateEvent) => {
+  const beginShareFlowForEvent = (event: SpecialDateEvent) => {
     setSelectedSummaryEventId(null);
     setRemindersForEventId(null);
     setSharingEvent(event);
@@ -4246,8 +4513,115 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setShareRecipients([]);
     setShareMessage('');
     setShareQuickAddPanel(null);
+    setShareContactSearch('');
     setValidationMessage(null);
     setCurrentView('share');
+  };
+
+  const openRsvpByDatePicker = (event: SpecialDateEvent) => {
+    setSharingEvent(event);
+    const defaultDraft = new Date();
+    defaultDraft.setHours(0, 0, 0, 0);
+    setRsvpByDateDraft(defaultDraft);
+    setRsvpPickerMonth(defaultDraft);
+    setIsRsvpDatePickerVisible(true);
+  };
+
+  const startShareForEvent = (event: SpecialDateEvent) => {
+    if (isPartyOrWeddingEvent(event) && !event.rsvpEnabled) {
+      Alert.alert(
+        'Collect RSVPs?',
+        'Would you like to collect RSVPs for this event? Recipients will get a link to accept or decline.',
+        [
+          { text: 'No', style: 'cancel', onPress: () => beginShareFlowForEvent(event) },
+          { text: 'Yes', onPress: () => openRsvpByDatePicker(event) },
+        ],
+      );
+      return;
+    }
+
+    beginShareFlowForEvent(event);
+  };
+
+  const setEventRsvpSettings = async (eventId: string, rsvpEnabled: boolean, rsvpByDate?: string) => {
+    const updated = events.map((event) => (
+      event.id === eventId ? { ...event, rsvpEnabled, rsvpByDate } : event
+    ));
+    setEvents(updated);
+    await saveEvents(updated, userId);
+    const reloaded = await loadEvents(userId);
+    setEvents(reloaded);
+    return reloaded.find((event) => event.id === eventId) || updated.find((event) => event.id === eventId) || null;
+  };
+
+  const closeRsvpDatePicker = () => {
+    setIsRsvpDatePickerVisible(false);
+  };
+
+  const selectRsvpByDate = (selectedDay: number) => {
+    const nextDate = new Date(rsvpPickerMonth);
+    nextDate.setDate(selectedDay);
+    nextDate.setHours(0, 0, 0, 0);
+    setRsvpByDateDraft(nextDate);
+  };
+
+  const confirmRsvpByDate = async () => {
+    if (!sharingEvent) {
+      return;
+    }
+
+    const savedEvent = await setEventRsvpSettings(sharingEvent.id, true, rsvpByDateDraft.toISOString());
+    setIsRsvpDatePickerVisible(false);
+    beginShareFlowForEvent(savedEvent || { ...sharingEvent, rsvpEnabled: true, rsvpByDate: rsvpByDateDraft.toISOString() });
+  };
+
+  const loadRsvpSummaryForEvent = async (eventId: string) => {
+    if (!userId) {
+      return;
+    }
+
+    const summary = await fetchRsvpSummary(eventId, userId);
+    if (summary) {
+      setRsvpSummaries((current) => ({ ...current, [eventId]: summary }));
+    }
+  };
+
+  const getRsvpSummaryLabel = (event: SpecialDateEvent) => {
+    const summary = rsvpSummaries[event.id];
+    if (!summary) {
+      return 'RSVP: —';
+    }
+    return `RSVP: ${summary.counts.yes} Yes, ${summary.counts.no} No, ${summary.counts.noReply} No Reply`;
+  };
+
+  const remindRsvpInvite = async (eventId: string, inviteId: string) => {
+    if (!userId || sendingRsvpReminderId) {
+      return;
+    }
+
+    setSendingRsvpReminderId(inviteId);
+    try {
+      const result = await sendRsvpReminder(eventId, userId, inviteId);
+      if (!result.success) {
+        Alert.alert('Unable to send reminder', result.error || 'Please try again later.');
+        return;
+      }
+
+      if (result.requiresNativeText && result.phone) {
+        const isAvailable = await SMS.isAvailableAsync();
+        if (!isAvailable) {
+          Alert.alert('Text messaging is not available on this device.');
+          return;
+        }
+        await SMS.sendSMSAsync([result.phone], result.message || 'Please RSVP.');
+      } else {
+        Alert.alert('Reminder sent', 'An RSVP reminder email was sent.');
+      }
+
+      await loadRsvpSummaryForEvent(eventId);
+    } finally {
+      setSendingRsvpReminderId(null);
+    }
   };
 
   const promptShareAfterSave = (savedEvent: SpecialDateEvent, title: string, message: string) => {
@@ -4275,6 +4649,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setShareRecipients([]);
     setShareMessage('');
     setShareQuickAddPanel(null);
+    setShareContactSearch('');
     setValidationMessage(null);
     setCurrentView('manage-events');
   };
@@ -4292,8 +4667,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       : new Date(event.eventDateTime);
     const eventDateLabel = eventDate.toLocaleDateString();
     const eventTimeLabel = formatEventTimeOnlyLabel(event);
+    const eventColor = getEventSummaryColor(event);
+    const eventIcon = getEventSummaryIcon(event);
+    const eventLocationLines = getEventLocationDisplayLines(event.eventLocation);
+    const rsvpLink = event.rsvpEnabled ? `${SHARE_ACCEPT_BASE_URL}/rsvp/${event.id}` : undefined;
+    const rsvpByLabel = event.rsvpByDate ? new Date(event.rsvpByDate).toLocaleDateString() : undefined;
+
+    // Plain-text channels (SMS/iMessage) can't carry background colors, so the event's
+    // icon emoji — which renders in color on its own — is the closest equivalent available.
     const textLines = [
-      `An event has been shared with you by ${senderName}.`,
+      `${eventIcon} ${event.title} — shared with you by ${senderName}.`,
     ];
 
     if (normalizedCustomMessage) {
@@ -4301,11 +4684,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     }
 
     textLines.push(
-      `Event Type: ${event.title}`,
       `${event.people}`,
       `Event Date: ${eventDateLabel}`,
       `Event Time: ${eventTimeLabel}`,
     );
+
+    if (eventLocationLines.length) {
+      textLines.push('Location:', ...eventLocationLines);
+    }
 
     if (acceptLink) {
       textLines.push('');
@@ -4314,9 +4700,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       textLines.push(acceptLink);
     }
 
+    if (rsvpLink) {
+      textLines.push('');
+      textLines.push(rsvpByLabel ? `Please RSVP by ${rsvpByLabel}:` : 'Please RSVP:');
+      textLines.push(rsvpLink);
+    }
+
     const htmlSections = [
       '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:#111827;">',
-      `<div>${escapeHtml(`An event has been shared with you by ${senderName}.`)}</div>`,
+      `<div style="background-color:${eventColor};color:#ffffff;padding:14px 18px;border-radius:12px;font-size:18px;font-weight:700;margin-bottom:14px;">${escapeHtml(`${eventIcon} ${event.title}`)}</div>`,
+      `<div>${escapeHtml(`Shared with you by ${senderName}.`)}</div>`,
     ];
 
     if (normalizedCustomMessage) {
@@ -4324,17 +4717,29 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     }
 
     htmlSections.push(
-      `<div style="margin-top:8px;">${escapeHtml(`Event Type: ${event.title}`)}</div>`,
-      `<div>${escapeHtml(event.people)}</div>`,
+      `<div style="margin-top:8px;">${escapeHtml(event.people)}</div>`,
       `<div>${escapeHtml(`Event Date: ${eventDateLabel}`)}</div>`,
       `<div>${escapeHtml(`Event Time: ${eventTimeLabel}`)}</div>`,
     );
+
+    if (eventLocationLines.length) {
+      htmlSections.push(`<div style="margin-top:8px;">${escapeHtml('Location:')}</div>`);
+      eventLocationLines.forEach((line) => {
+        htmlSections.push(`<div>${escapeHtml(line)}</div>`);
+      });
+    }
 
     if (acceptLink) {
       htmlSections.push('<div style="height:12px;"></div>');
       htmlSections.push(`<div>${escapeHtml(acceptExplanation)}</div>`);
       htmlSections.push('<div style="height:8px;"></div>');
       htmlSections.push(`<div><a href="${escapeHtml(acceptLink)}">${escapeHtml(acceptLink)}</a></div>`);
+    }
+
+    if (rsvpLink) {
+      htmlSections.push('<div style="height:12px;"></div>');
+      htmlSections.push(`<div style="font-weight:700;">${escapeHtml(rsvpByLabel ? `Please RSVP by ${rsvpByLabel}:` : 'Please RSVP:')}</div>`);
+      htmlSections.push(`<div><a href="${escapeHtml(rsvpLink)}" style="color:${eventColor};font-weight:700;">${escapeHtml(rsvpLink)}</a></div>`);
     }
 
     htmlSections.push('</div>');
@@ -4494,6 +4899,18 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       }
     }
 
+    if (sharingEvent.rsvpEnabled && userId) {
+      await sendRsvpInvites(
+        sharingEvent.id,
+        userId,
+        shareRecipients.map((recipient) => ({
+          label: recipient.label,
+          email: recipient.email || undefined,
+          phone: recipient.phone || undefined,
+        })),
+      );
+    }
+
     if (!launchedAnyChannel && deliveryErrors.length) {
       const copied = await copyTextToClipboard(shareDraftParts.join('\n\n--------------------\n\n'));
       setValidationMessage(`${deliveryErrors.join(' ')} ${copied ? 'Share draft copied to clipboard.' : 'Copy the share details manually from your message and try again.'}`.trim());
@@ -4504,6 +4921,86 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setIsSendingShare(false);
     Alert.alert('Share sent', 'Your event has been shared');
     cancelShareFlow();
+  };
+
+  const MAX_SHARE_TEXT_RECIPIENTS = 10;
+
+  const handleShareViaText = async () => {
+    if (isSendingShareText) {
+      return;
+    }
+    if (!sharingEvent) {
+      setValidationMessage('Please select an event to share.');
+      setCurrentView('manage-events');
+      return;
+    }
+
+    const phoneNumbers = Array.from(new Set(
+      shareRecipients
+        .map((recipient) => recipient.phone?.trim())
+        .filter((phone): phone is string => !!phone && !validatePhoneNumber(phone)),
+    ));
+
+    if (!phoneNumbers.length) {
+      setValidationMessage('Add at least one recipient with a valid phone number to share via text.');
+      return;
+    }
+
+    if (phoneNumbers.length > MAX_SHARE_TEXT_RECIPIENTS) {
+      setValidationMessage(`Text sharing supports up to ${MAX_SHARE_TEXT_RECIPIENTS} recipients at a time. Remove some phone recipients and try again.`);
+      return;
+    }
+
+    if (shareMessage.trim().length > 255) {
+      setValidationMessage('Message must be 255 characters or fewer.');
+      return;
+    }
+
+    setValidationMessage(null);
+    setIsSendingShareText(true);
+    try {
+      const isAvailable = await SMS.isAvailableAsync();
+      if (!isAvailable) {
+        setIsShareTextAvailable(false);
+        setValidationMessage('Text messaging is not available on this device.');
+        return;
+      }
+
+      // This composes and hands off to the device's own native SMS/iMessage sheet, sent from
+      // the user's own phone number — it never touches our backend or Twilio, so it stays
+      // outside our A2P-registered messaging flow and its compliance requirements entirely.
+      const currentUser = userId ? await loadUser(userId) : null;
+      const senderName = currentUser?.fullName?.trim() || 'A Remind Me This user';
+      const sharePayload = buildShareDetailsMessage(sharingEvent, senderName, shareMessage);
+
+      const { result } = await SMS.sendSMSAsync(phoneNumbers, sharePayload.text);
+
+      if (result === 'sent') {
+        if (sharingEvent.rsvpEnabled && userId) {
+          await sendRsvpInvites(
+            sharingEvent.id,
+            userId,
+            shareRecipients
+              .filter((recipient) => recipient.phone && phoneNumbers.includes(recipient.phone.trim()))
+              .map((recipient) => ({ label: recipient.label, email: recipient.email || undefined, phone: recipient.phone || undefined })),
+          );
+        }
+        Alert.alert(
+          'Message composer closed',
+          'The text was handed off to Messages after you tapped send — we can\'t confirm delivery to each recipient from here.',
+        );
+        cancelShareFlow();
+      } else if (result === 'cancelled') {
+        setValidationMessage('Text sharing was cancelled.');
+      } else {
+        setValidationMessage('Unable to confirm whether the text composer was sent.');
+      }
+    } catch (error) {
+      console.error('handleShareViaText failed', error);
+      setValidationMessage('Unable to open the text composer right now.');
+    } finally {
+      setIsSendingShareText(false);
+    }
   };
 
   const respondToActiveShareInvite = async (action: 'accept' | 'dismiss') => {
@@ -4964,6 +5461,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const selectedSummaryEvent = selectedSummaryEventId
     ? events.find((event) => event.id === selectedSummaryEventId) ?? null
     : null;
+
+  useEffect(() => {
+    if (selectedSummaryEvent?.rsvpEnabled && !rsvpSummaries[selectedSummaryEvent.id]) {
+      void loadRsvpSummaryForEvent(selectedSummaryEvent.id);
+    }
+  }, [selectedSummaryEvent?.id, selectedSummaryEvent?.rsvpEnabled]);
 
   const openSummaryEventDetails = (eventId: string) => {
     // Summary taps should always open the action-style event modal, not date/reminder popups.
@@ -5742,7 +6245,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                     onPress={() => setSelectedSummaryEventId(isSelected ? null : event.id)}
                     activeOpacity={0.8}
                   >
-                    <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(event)}</Text>
+                    {renderEventSummaryIcon(event)}
                     <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, summaryColor ? styles.summaryLinkTextColored : null]}>
                       {formatEventDateOnly(event)} ({formatEventCountdownLabel(event)}) • {event.title} • {event.people}{formatEventSummaryRowTimeSuffix(event)}
                     </Text>
@@ -5905,10 +6408,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                       <TouchableOpacity
                         key={event.id}
                         style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: getEventSummaryColor(event) }]}
-                        onPress={() => setExpandedCalendarEventId(event.id)}
+                        onPress={() => {
+                          setExpandedCalendarEventId(event.id);
+                          if (event.rsvpEnabled) {
+                            void loadRsvpSummaryForEvent(event.id);
+                          }
+                        }}
                         activeOpacity={0.8}
                       >
-                        <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(event)}</Text>
+                        {renderEventSummaryIcon(event)}
                         <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
                           {formatEventDateOnly(event)} ({formatEventCountdownLabel(event)}) • {event.title} • {event.people}{formatEventSummaryRowTimeSuffix(event)}
                         </Text>
@@ -5919,7 +6427,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                   return (
                     <View key={event.id} style={[styles.calendarDateDetailCard, index > 0 && styles.calendarDateDetailCardSpaced]}>
                       <View style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: getEventSummaryColor(event) }]}>
-                        <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(event)}</Text>
+                        {renderEventSummaryIcon(event)}
                         <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
                           {formatEventDateOnly(event)} ({formatEventCountdownLabel(event)}) • {event.title} • {event.people}{formatEventSummaryRowTimeSuffix(event)}
                         </Text>
@@ -5929,6 +6437,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                           {getReminderSummaryState(event).isActive ? `Reminders: ${getReminderSummaryState(event).count}` : 'Reminders: 0'}
                         </Text>
                       </TouchableOpacity>
+                      {event.rsvpEnabled ? (
+                        <TouchableOpacity onPress={() => {
+                          setRsvpManagerEventId(event.id);
+                          void loadRsvpSummaryForEvent(event.id);
+                        }}>
+                          <Text style={styles.savedEventDetailsReminderCounter}>{getRsvpSummaryLabel(event)}</Text>
+                        </TouchableOpacity>
+                      ) : null}
 
                       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.savedEventDetailsActionRow}>
                         <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => {
@@ -6070,7 +6586,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             onPress={() => setCurrentView('create')}
             activeOpacity={0.8}
           >
-            <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(previewEvent)}</Text>
+            {renderEventSummaryIcon(previewEvent)}
             <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
               {formatEventDateOnly(previewEvent)} ({formatEventCountdownLabel(previewEvent)}) • {previewEvent.title} • {previewEvent.people}{formatEventSummaryRowTimeSuffix(previewEvent)}
             </Text>
@@ -6247,9 +6763,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
                   setIsEventLocationLine1Focused(false);
                   setEventLocationPredictions([]);
+                  setIsEventLocationNameFocused(false);
                   return {
                     ...current,
                     eventLocationEnabled: false,
+                    eventLocationName: '',
+                    eventLocationSaveEnabled: false,
                     eventLocationPlaceId: '',
                     eventLocationFormattedAddress: '',
                     eventLocationLine1: '',
@@ -6270,6 +6789,52 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
             {form.eventLocationEnabled ? (
               <>
+                <TextInput
+                  style={styles.input}
+                  value={form.eventLocationName}
+                  onFocus={() => {
+                    if (eventLocationNameBlurTimeoutRef.current) {
+                      clearTimeout(eventLocationNameBlurTimeoutRef.current);
+                    }
+                    setIsEventLocationNameFocused(true);
+                  }}
+                  onBlur={() => {
+                    eventLocationNameBlurTimeoutRef.current = setTimeout(() => {
+                      setIsEventLocationNameFocused(false);
+                    }, 150);
+                  }}
+                  onChangeText={(value) => setForm({ ...form, eventLocationName: value })}
+                  placeholder="Event Location (e.g. restaurant name)"
+                />
+                {eventLocationNameSuggestions.length ? (
+                  <View style={styles.eventLocationSuggestionsList}>
+                    {eventLocationNameSuggestions.map((location) => (
+                      <TouchableOpacity
+                        key={location.id}
+                        style={styles.eventLocationSuggestionItem}
+                        onPress={() => applySavedEventLocation(location)}
+                      >
+                        <Text style={styles.eventLocationSuggestionMainText} numberOfLines={1}>{location.name}</Text>
+                        {location.city || location.state ? (
+                          <Text style={styles.eventLocationSuggestionSecondaryText} numberOfLines={1}>
+                            {[location.city, location.state].filter(Boolean).join(', ')}
+                          </Text>
+                        ) : null}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                ) : null}
+
+                <TouchableOpacity
+                  style={styles.eventLocationToggleRow}
+                  onPress={() => setForm({ ...form, eventLocationSaveEnabled: !form.eventLocationSaveEnabled })}
+                >
+                  <View style={styles.eventLocationRadioOuter}>
+                    {form.eventLocationSaveEnabled ? <View style={styles.eventLocationRadioInner} /> : null}
+                  </View>
+                  <Text style={styles.eventLocationToggleText}>Save Location</Text>
+                </TouchableOpacity>
+
                 <TextInput
                   style={styles.input}
                   value={form.eventLocationLine1}
@@ -6992,6 +7557,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   };
 
   const renderShareView = () => (
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+    >
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <Text style={styles.title}>Share Event</Text>
       <Text style={styles.subtitle}>{sharingEvent ? `Share “${sharingEvent.title}” with others.` : 'Choose an event to share.'}</Text>
@@ -7006,7 +7576,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         <View style={styles.card}>
           <Text style={styles.label}>Event</Text>
           <View style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: getEventSummaryColor(sharingEvent) }]}>
-            <Text style={styles.summaryLinkIcon}>{getEventSummaryIcon(sharingEvent)}</Text>
+            {renderEventSummaryIcon(sharingEvent)}
             <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
               {formatEventDateOnly(sharingEvent)} ({formatEventCountdownLabel(sharingEvent)}) • {sharingEvent.title} • {sharingEvent.people}{formatEventSummaryRowTimeSuffix(sharingEvent)}
             </Text>
@@ -7057,20 +7627,34 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
               <Text style={styles.dropdownListItemText}>📱 Pick from iPhone Contacts</Text>
             </TouchableOpacity>
             {shareSelectableContacts.length ? (
-              shareSelectableContacts.map((contact) => (
-                <TouchableOpacity
-                  key={contact.id}
-                  style={styles.dropdownListItem}
-                  onPress={() => {
-                    addContactRecipient(contact);
-                    setShareQuickAddPanel(null);
-                  }}
-                >
-                  <Text style={styles.dropdownListItemText}>
-                    {contact.firstName}{contact.lastName ? ` ${contact.lastName}` : ''}
-                  </Text>
-                </TouchableOpacity>
-              ))
+              <TextInput
+                style={[styles.input, styles.shareContactSearchInput]}
+                value={shareContactSearch}
+                onChangeText={setShareContactSearch}
+                placeholder="Search contacts"
+                autoCapitalize="none"
+              />
+            ) : null}
+            {shareSelectableContacts.length ? (
+              filteredShareSelectableContacts.length ? (
+                filteredShareSelectableContacts.map((contact) => (
+                  <TouchableOpacity
+                    key={contact.id}
+                    style={styles.dropdownListItem}
+                    onPress={() => {
+                      addContactRecipient(contact);
+                      setShareQuickAddPanel(null);
+                      setShareContactSearch('');
+                    }}
+                  >
+                    <Text style={styles.dropdownListItemText}>
+                      {contact.firstName}{contact.lastName ? ` ${contact.lastName}` : ''}
+                    </Text>
+                  </TouchableOpacity>
+                ))
+              ) : (
+                <Text style={[styles.helperText, styles.dropdownListItem]}>No contacts match your search.</Text>
+              )
             ) : (
               <Text style={[styles.helperText, styles.dropdownListItem]}>No saved contacts yet.</Text>
             )}
@@ -7158,9 +7742,21 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           >
             <Text style={styles.floatingActionPrimaryText}>{isSendingShare ? 'Sending…' : 'Send'}</Text>
           </TouchableOpacity>
+
+          {isShareTextAvailable ? (
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={[styles.floatingActionButton, styles.floatingActionSecondaryButton, isSendingShareText && styles.actionButtonDisabled]}
+              onPress={() => void handleShareViaText()}
+              disabled={isSendingShareText}
+            >
+              <Text style={styles.floatingActionSecondaryText}>{isSendingShareText ? 'Opening…' : 'Share via Text'}</Text>
+            </TouchableOpacity>
+          ) : null}
         </ScrollView>
       </View>
     </ScrollView>
+    </KeyboardAvoidingView>
   );
 
   const activeEventSummaryModal = selectedSummaryEvent ? (
@@ -7180,6 +7776,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             ) : (
               <Text style={styles.savedEventDetailsReminderCounter}>Reminders: 0</Text>
             )}
+            {selectedSummaryEvent.rsvpEnabled ? (
+              <TouchableOpacity onPress={() => {
+                setRsvpManagerEventId(selectedSummaryEvent.id);
+                void loadRsvpSummaryForEvent(selectedSummaryEvent.id);
+              }}>
+                <Text style={styles.savedEventDetailsReminderCounter}>{getRsvpSummaryLabel(selectedSummaryEvent)}</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
           <Text style={styles.savedEventDetailsPeople}>{selectedSummaryEvent.people}</Text>
           <Text style={styles.savedEventDetailsMeta}>Event Date: {formatEventDateOnly(selectedSummaryEvent)}</Text>
@@ -7315,12 +7919,138 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     </Modal>
   ) : null;
 
+  const rsvpDatePickerModal = (
+    <Modal transparent visible={isRsvpDatePickerVisible} animationType="fade" onRequestClose={closeRsvpDatePicker}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <Text style={styles.savedEventDetailsTitle}>RSVP by date</Text>
+          <Text style={styles.helperText}>Choose the date by which guests should respond.</Text>
+
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={() => setRsvpPickerMonth(new Date(rsvpPickerMonth.getFullYear(), rsvpPickerMonth.getMonth() - 1, 1))}>
+              <Text style={styles.modalNav}>◀</Text>
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>{rsvpPickerMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</Text>
+            <TouchableOpacity onPress={() => setRsvpPickerMonth(new Date(rsvpPickerMonth.getFullYear(), rsvpPickerMonth.getMonth() + 1, 1))}>
+              <Text style={styles.modalNav}>▶</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.weekRow}>
+            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => (
+              <Text key={day} style={styles.weekDay}>{day}</Text>
+            ))}
+          </View>
+
+          <View style={styles.calendarGrid}>
+            {getCalendarDays(rsvpPickerMonth).map((day, index) => {
+              if (!day) {
+                return <View key={`empty-${index}`} style={styles.dayCell} />;
+              }
+
+              const isSelected = day.toDateString() === rsvpByDateDraft.toDateString();
+              const isToday = day.toDateString() === new Date().toDateString();
+
+              return (
+                <TouchableOpacity
+                  key={day.toISOString()}
+                  style={[styles.dayCell, isSelected && styles.selectedDayCell]}
+                  onPress={() => selectRsvpByDate(day.getDate())}
+                >
+                  <Text style={[styles.dayText, isToday && styles.todayText, isSelected && styles.selectedDayText]}>
+                    {day.getDate()}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <View style={styles.savedEventDetailsActionRow}>
+            <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={closeRsvpDatePicker}>
+              <Text style={styles.savedEventDetailActionText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => void confirmRsvpByDate()}>
+              <Text style={styles.savedEventDetailActionText}>Confirm</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  const rsvpManagerEvent = rsvpManagerEventId ? events.find((event) => event.id === rsvpManagerEventId) : null;
+  const rsvpManagerSummary = rsvpManagerEventId ? rsvpSummaries[rsvpManagerEventId] : null;
+
+  const renderRsvpGuestRow = (
+    entry: { id: string; firstName?: string; lastName?: string; label?: string; email?: string | null; phone?: string | null; message?: string | null },
+    showRemind: boolean,
+  ) => {
+    const name = entry.label || [entry.firstName, entry.lastName].filter(Boolean).join(' ') || 'Guest';
+    return (
+      <View key={entry.id} style={styles.reminderListItem}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.reminderListDate}>{name}</Text>
+          {entry.email ? <Text style={styles.reminderListNotes}>{entry.email}</Text> : null}
+          {entry.phone ? <Text style={styles.reminderListNotes}>{entry.phone}</Text> : null}
+          {entry.message ? <Text style={styles.reminderListNotes}>“{entry.message}”</Text> : null}
+        </View>
+        {showRemind && rsvpManagerEventId ? (
+          <TouchableOpacity
+            onPress={() => void remindRsvpInvite(rsvpManagerEventId, entry.id)}
+            disabled={sendingRsvpReminderId === entry.id}
+          >
+            <Text style={styles.pendingReminderRemove}>{sendingRsvpReminderId === entry.id ? 'Sending…' : 'Remind'}</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+    );
+  };
+
+  const rsvpManagerModal = rsvpManagerEvent ? (
+    <Modal transparent visible={Boolean(rsvpManagerEventId)} animationType="fade" onRequestClose={() => setRsvpManagerEventId(null)}>
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalCard, styles.savedEventDetailsCard]}>
+          <Text style={styles.savedEventDetailsTitle}>RSVPs • {rsvpManagerEvent.title}</Text>
+
+          <ScrollView style={{ maxHeight: 380 }}>
+            <Text style={styles.label}>Yes ({rsvpManagerSummary?.yes.length ?? 0})</Text>
+            {rsvpManagerSummary?.yes.length ? (
+              rsvpManagerSummary.yes.map((entry) => renderRsvpGuestRow(entry, false))
+            ) : (
+              <Text style={styles.helperText}>No Yes responses yet.</Text>
+            )}
+
+            <Text style={[styles.label, { marginTop: 12 }]}>No ({rsvpManagerSummary?.no.length ?? 0})</Text>
+            {rsvpManagerSummary?.no.length ? (
+              rsvpManagerSummary.no.map((entry) => renderRsvpGuestRow(entry, false))
+            ) : (
+              <Text style={styles.helperText}>No decline responses yet.</Text>
+            )}
+
+            <Text style={[styles.label, { marginTop: 12 }]}>No Reply ({rsvpManagerSummary?.noReply.length ?? 0})</Text>
+            {rsvpManagerSummary?.noReply.length ? (
+              rsvpManagerSummary.noReply.map((entry) => renderRsvpGuestRow(entry, true))
+            ) : (
+              <Text style={styles.helperText}>Everyone invited has responded.</Text>
+            )}
+          </ScrollView>
+
+          <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => setRsvpManagerEventId(null)}>
+            <Text style={styles.savedEventDetailActionText}>Close</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  ) : null;
+
   return (
     <>
       {currentView === 'share' ? renderShareView() : currentView === 'manage-events' ? renderManageEventsView() : currentView === 'manage-reminders' ? renderManageRemindersView() : renderCreateView()}
       {activeEventSummaryModal}
       {reminderEventModal}
       {confirmDeleteModal}
+      {rsvpDatePickerModal}
+      {rsvpManagerModal}
       <TimePickerModal
         visible={activeTimePicker !== null}
         title={activeTimePicker?.title || 'Pick time'}
@@ -7773,6 +8503,10 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     borderRadius: 10,
     padding: 10,
     marginBottom: 8,
+  },
+  shareContactSearchInput: {
+    margin: 10,
+    marginBottom: 6,
   },
   validationBanner: {
     backgroundColor: colors.dangerBg,
@@ -8719,6 +9453,12 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   summaryLinkIcon: {
     fontSize: 24,
+    marginRight: 8,
+  },
+  summaryLinkPhoto: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     marginRight: 8,
   },
   reminderCountLink: {

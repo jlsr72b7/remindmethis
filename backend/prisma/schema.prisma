@@ -75,6 +75,8 @@ model Event {
   notes                 String?
   notified              Boolean?  @default(false)
   lastReminderTriggeredAt DateTime?
+  rsvpEnabled           Boolean   @default(false)
+  rsvpByDate            DateTime?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
@@ -82,8 +84,40 @@ model Event {
   reminders EventReminder[]
   reminderQueueJobs ReminderQueueJob[]
   shareInvites ShareInvite[]
+  rsvpInvites   RsvpInvite[]
+  rsvpResponses RsvpResponse[]
 
   @@index([userId])
+}
+
+model RsvpInvite {
+  id        String   @id @default(cuid())
+  eventId   String
+  label     String
+  email     String?
+  phone     String?
+  createdAt DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+}
+
+model RsvpResponse {
+  id          String   @id @default(cuid())
+  eventId     String
+  firstName   String
+  lastName    String
+  email       String?
+  phone       String?
+  response    String
+  message     String?
+  respondedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
 }
 
 model EventReminder {

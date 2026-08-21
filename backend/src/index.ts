@@ -19,6 +19,8 @@ app.use(cors());
 // Contacts snapshots can include base64-encoded photos for many contacts at once,
 // which comfortably exceeds Express's default 100kb body limit.
 app.use(express.json({ limit: '25mb' }));
+// RSVP form submissions post as standard HTML forms (application/x-www-form-urlencoded).
+app.use(express.urlencoded({ extended: true }));
 app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
   const parseError = error as { type?: string; status?: number; message?: string };
   if (parseError?.type === 'entity.parse.failed' || parseError?.status === 400) {
@@ -465,6 +467,39 @@ const sendReminderEmail = async (email: string, payload: {
       subject,
       eventDateTime: payload.eventDateTime,
     });
+    return;
+  }
+
+  await smtpTransport.sendMail({
+    from: emailFromAddress,
+    to: email,
+    subject,
+    text: textBody,
+    html: htmlBody,
+  });
+};
+
+const sendRsvpReminderEmail = async (email: string, payload: {
+  eventTitle: string;
+  rsvpLink: string;
+}) => {
+  const subject = `Please RSVP: ${payload.eventTitle}`;
+  const textBody = [
+    `You haven't responded yet to the RSVP request for ${payload.eventTitle}.`,
+    '',
+    `Please respond here: ${payload.rsvpLink}`,
+    '',
+    'Automated message, please do not reply.',
+  ].join('\n');
+
+  const htmlBody = `
+    <p>You haven't responded yet to the RSVP request for <strong>${escapeHtml(payload.eventTitle)}</strong>.</p>
+    <p><a href="${escapeHtml(payload.rsvpLink)}">Please respond here</a>.</p>
+    <p>Automated message, please do not reply.</p>
+  `;
+
+  if (!smtpTransport) {
+    console.warn('SMTP is not configured. RSVP reminder email (dev only):', { to: email, subject });
     return;
   }
 
@@ -930,6 +965,199 @@ const escapeHtml = (value: string) => String(value)
   .replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;')
   .replace(/'/g, '&#39;');
+
+const normalizeEmailForComparison = (value: string) => String(value || '').trim().toLowerCase();
+
+type RsvpEventSummaryCategory =
+  | 'birthday'
+  | 'anniversary'
+  | 'wedding'
+  | 'medical'
+  | 'dental'
+  | 'work'
+  | 'school'
+  | 'travel'
+  | 'sports'
+  | 'retirement'
+  | 'engagement'
+  | 'holiday'
+  | 'party'
+  | 'other';
+
+// Kept in sync with EVENT_SUMMARY_COLORS/EVENT_SUMMARY_ICONS/getEventSummaryCategory in src/AppContent.tsx,
+// since the RSVP page is rendered here on the server and has no access to client code.
+const RSVP_EVENT_COLORS: Record<RsvpEventSummaryCategory, string> = {
+  birthday: '#4169E1',
+  anniversary: '#5B2C87',
+  medical: '#DC2626',
+  school: '#16A34A',
+  work: '#EA580C',
+  dental: '#8B4513',
+  wedding: '#B8860B',
+  party: '#5DADE2',
+  engagement: '#EC4899',
+  retirement: '#8E8E93',
+  holiday: '#A68A64',
+  travel: '#0D9488',
+  sports: '#9F1239',
+  other: '#C2410C',
+};
+
+const RSVP_EVENT_ICONS: Record<RsvpEventSummaryCategory, string> = {
+  birthday: '🎂',
+  anniversary: '💑',
+  wedding: '💒',
+  medical: '🩺',
+  dental: '🦷',
+  work: '💼',
+  school: '🎓',
+  retirement: '🏖️',
+  engagement: '💍',
+  holiday: '🎊',
+  party: '🎉',
+  travel: '✈️',
+  sports: '⚽',
+  other: '📌',
+};
+
+const getRsvpEventSummaryCategory = (title: string): RsvpEventSummaryCategory => {
+  const normalizedTitle = String(title || '').toLowerCase().trim();
+
+  if (normalizedTitle === 'birthday' || normalizedTitle === 'birthday party' || normalizedTitle.endsWith('birthday party')) {
+    return 'birthday';
+  }
+  if (normalizedTitle === 'anniversary' || normalizedTitle === 'anniversary party' || normalizedTitle.endsWith('anniversary party')) {
+    return 'anniversary';
+  }
+  if (normalizedTitle === 'wedding') {
+    return 'wedding';
+  }
+  if (normalizedTitle === 'medical' || normalizedTitle.startsWith('medical ')) {
+    return 'medical';
+  }
+  if (normalizedTitle === 'dental' || normalizedTitle.startsWith('dental ')) {
+    return 'dental';
+  }
+  if (normalizedTitle === 'work' || normalizedTitle.startsWith('work ')) {
+    return 'work';
+  }
+  if (normalizedTitle === 'school' || normalizedTitle.startsWith('school ')) {
+    return 'school';
+  }
+  if (normalizedTitle === 'travel' || normalizedTitle.startsWith('travel ')) {
+    return 'travel';
+  }
+  if (normalizedTitle === 'sports' || normalizedTitle.startsWith('sports ')) {
+    return 'sports';
+  }
+  if (normalizedTitle === 'retirement party') {
+    return 'retirement';
+  }
+  if (normalizedTitle === 'engagement party') {
+    return 'engagement';
+  }
+  if (normalizedTitle === 'holiday party') {
+    return 'holiday';
+  }
+  if (normalizedTitle === 'party' || normalizedTitle.endsWith(' party')) {
+    return 'party';
+  }
+
+  return 'other';
+};
+
+const renderRsvpPage = (options: {
+  eventTitle: string;
+  eventDateLabel: string;
+  eventTimeLabel?: string | null;
+  rsvpByLabel?: string | null;
+  mode: 'form' | 'confirmation' | 'closed' | 'not-found';
+  errorMessage?: string;
+  formValues?: { firstName?: string; lastName?: string; response?: string; message?: string; email?: string; phone?: string };
+  formAction?: string;
+}) => {
+  const category = getRsvpEventSummaryCategory(options.eventTitle);
+  const color = RSVP_EVENT_COLORS[category];
+  const icon = RSVP_EVENT_ICONS[category];
+  const escapedEventTitle = escapeHtml(options.eventTitle);
+
+  const bodyHtml = (() => {
+    if (options.mode === 'not-found') {
+      return '<p class="text">This RSVP link is not valid.</p>';
+    }
+    if (options.mode === 'closed') {
+      return '<p class="text">RSVP is not open for this event.</p>';
+    }
+    if (options.mode === 'confirmation') {
+      return '<p class="text">Thanks for responding! Your RSVP has been recorded.</p>';
+    }
+
+    const values = options.formValues || {};
+    const errorHtml = options.errorMessage
+      ? `<div class="errorBox">${escapeHtml(options.errorMessage)}</div>`
+      : '';
+
+    return `
+      ${errorHtml}
+      <form method="POST" action="${escapeHtml(options.formAction || '')}">
+        <label class="label">First name</label>
+        <input class="input" type="text" name="firstName" required maxlength="80" value="${escapeHtml(values.firstName || '')}" />
+        <label class="label">Last name</label>
+        <input class="input" type="text" name="lastName" required maxlength="80" value="${escapeHtml(values.lastName || '')}" />
+        <label class="label">Will you attend?</label>
+        <div class="radioRow">
+          <label class="radioLabel"><input type="radio" name="response" value="yes" required ${values.response === 'yes' ? 'checked' : ''} /> Yes</label>
+          <label class="radioLabel"><input type="radio" name="response" value="no" ${values.response === 'no' ? 'checked' : ''} /> No</label>
+        </div>
+        <label class="label">Message (optional)</label>
+        <textarea class="input" name="message" maxlength="255" rows="3">${escapeHtml(values.message || '')}</textarea>
+        <label class="label">Email</label>
+        <input class="input" type="email" name="email" maxlength="255" value="${escapeHtml(values.email || '')}" />
+        <label class="label">Phone</label>
+        <input class="input" type="tel" name="phone" maxlength="30" value="${escapeHtml(values.phone || '')}" />
+        <p class="small">Please provide at least an email or a phone number.</p>
+        <button class="button" type="submit">Submit RSVP</button>
+      </form>
+    `;
+  })();
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RSVP: ${escapedEventTitle}</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 0; margin: 0; background: #f1f5f9; color: #0f172a; }
+      .banner { background: ${color}; color: #ffffff; padding: 28px 20px; text-align: center; }
+      .bannerIcon { font-size: 40px; display: block; margin-bottom: 8px; }
+      .bannerTitle { font-size: 22px; font-weight: 700; margin: 0; }
+      .bannerMeta { margin: 6px 0 0 0; font-size: 14px; opacity: 0.9; }
+      .card { max-width: 480px; margin: -20px auto 24px auto; background: #ffffff; border-radius: 14px; padding: 22px; box-shadow: 0 6px 20px rgba(15,23,42,0.08); }
+      .text { margin: 0 0 8px 0; color: #334155; line-height: 1.5; }
+      .label { display: block; font-size: 13px; font-weight: 700; color: #475569; margin: 14px 0 4px 0; }
+      .input { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 15px; }
+      textarea.input { resize: vertical; }
+      .radioRow { display: flex; gap: 20px; margin-top: 4px; }
+      .radioLabel { font-size: 15px; color: #0f172a; display: flex; align-items: center; gap: 6px; }
+      .small { font-size: 12px; color: #64748b; margin-top: 10px; }
+      .button { margin-top: 18px; width: 100%; background: ${color}; color: #ffffff; border: none; border-radius: 9px; padding: 13px 14px; font-size: 16px; font-weight: 700; cursor: pointer; }
+      .errorBox { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 8px; padding: 10px 12px; font-size: 14px; margin-bottom: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="banner">
+      <span class="bannerIcon">${icon}</span>
+      <p class="bannerTitle">${escapedEventTitle}</p>
+      <p class="bannerMeta">${escapeHtml(options.eventDateLabel)}${options.eventTimeLabel ? ` &middot; ${escapeHtml(options.eventTimeLabel)}` : ''}</p>
+      ${options.rsvpByLabel ? `<p class="bannerMeta">RSVP by ${escapeHtml(options.rsvpByLabel)}</p>` : ''}
+    </div>
+    <div class="card">
+      ${bodyHtml}
+    </div>
+  </body>
+</html>`;
+};
 
 const parseGoogleAddressComponents = (components: GooglePlacesAddressComponent[] = []) => {
   const findComponent = (...types: string[]) => components.find((entry) => types.some((type) => entry.types?.includes(type))) || null;
@@ -3171,7 +3399,9 @@ app.get('/google/places/autocomplete', async (req, res) => {
       },
       body: JSON.stringify({
         input,
-        includedPrimaryTypes: ['street_address'],
+        // No includedPrimaryTypes restriction: event/contact addresses are often venues or
+        // businesses (e.g. a restaurant or hall), not just street_address-typed places, and
+        // restricting to street_address alone was returning zero predictions for those queries.
         ...(regionCode ? { includedRegionCodes: [regionCode] } : {}),
         ...(sessionToken ? { sessionToken } : {}),
       }),
@@ -3684,6 +3914,341 @@ app.get('/shares/accept', async (req, res) => {
   }
 });
 
+app.post('/events/:eventId/rsvp-invites', async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { userId, invites } = req.body ?? {};
+
+    if (!userId || !Array.isArray(invites)) {
+      return res.status(400).json({ error: 'userId and invites array are required' });
+    }
+
+    const event = await prisma.event.findUnique({ where: { id: eventId }, select: { userId: true } });
+    if (!event || event.userId !== userId) {
+      return res.status(404).json({ error: 'event not found' });
+    }
+
+    const existingInvites = await prisma.rsvpInvite.findMany({ where: { eventId } });
+    const existingKeys = new Set(
+      existingInvites.map((invite) => `${normalizeEmailForComparison(invite.email || '')}|${normalizePhoneNumberForComparison(invite.phone || '')}`),
+    );
+
+    const rows: { label: string; email: string | null; phone: string | null }[] = [];
+    for (const rawInvite of invites) {
+      const label = String(rawInvite?.label || rawInvite?.name || '').trim();
+      const email = rawInvite?.email ? String(rawInvite.email).trim() : '';
+      const phone = rawInvite?.phone ? String(rawInvite.phone).trim() : '';
+
+      if (!label && !email && !phone) {
+        continue;
+      }
+
+      const normalizedEmail = normalizeEmailForComparison(email);
+      const normalizedPhone = normalizePhoneNumberForComparison(phone);
+      const key = `${normalizedEmail}|${normalizedPhone}`;
+
+      if (key !== '|' && existingKeys.has(key)) {
+        continue;
+      }
+      existingKeys.add(key);
+
+      rows.push({
+        label: label || email || phone || 'Guest',
+        email: email || null,
+        phone: phone || null,
+      });
+    }
+
+    if (rows.length) {
+      await prisma.rsvpInvite.createMany({
+        data: rows.map((row) => ({
+          id: crypto.randomUUID(),
+          eventId,
+          label: row.label,
+          email: row.email,
+          phone: row.phone,
+        })),
+      });
+    }
+
+    return res.json({ success: true, created: rows.length });
+  } catch (error) {
+    console.error('create rsvp invites failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.get('/events/:eventId/rsvp-summary', async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const userId = String(req.query.userId || '').trim();
+
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    const event = await prisma.event.findUnique({ where: { id: eventId }, select: { userId: true } });
+    if (!event || event.userId !== userId) {
+      return res.status(404).json({ error: 'event not found' });
+    }
+
+    const [invites, responses] = await Promise.all([
+      prisma.rsvpInvite.findMany({ where: { eventId }, orderBy: { createdAt: 'asc' } }),
+      prisma.rsvpResponse.findMany({ where: { eventId }, orderBy: { respondedAt: 'asc' } }),
+    ]);
+
+    const respondedKeys = new Set<string>();
+    for (const response of responses) {
+      if (response.email) {
+        respondedKeys.add(`email:${normalizeEmailForComparison(response.email)}`);
+      }
+      if (response.phone) {
+        respondedKeys.add(`phone:${normalizePhoneNumberForComparison(response.phone)}`);
+      }
+    }
+
+    const noReply = invites.filter((invite) => {
+      const emailKey = invite.email ? `email:${normalizeEmailForComparison(invite.email)}` : null;
+      const phoneKey = invite.phone ? `phone:${normalizePhoneNumberForComparison(invite.phone)}` : null;
+      if (emailKey && respondedKeys.has(emailKey)) return false;
+      if (phoneKey && respondedKeys.has(phoneKey)) return false;
+      return true;
+    });
+
+    const yes = responses.filter((response) => response.response === 'yes');
+    const no = responses.filter((response) => response.response === 'no');
+
+    return res.json({
+      counts: { yes: yes.length, no: no.length, noReply: noReply.length },
+      yes: yes.map((response) => ({
+        id: response.id,
+        firstName: response.firstName,
+        lastName: response.lastName,
+        email: response.email,
+        phone: response.phone,
+        message: response.message,
+        respondedAt: response.respondedAt,
+      })),
+      no: no.map((response) => ({
+        id: response.id,
+        firstName: response.firstName,
+        lastName: response.lastName,
+        email: response.email,
+        phone: response.phone,
+        message: response.message,
+        respondedAt: response.respondedAt,
+      })),
+      noReply: noReply.map((invite) => ({
+        id: invite.id,
+        label: invite.label,
+        email: invite.email,
+        phone: invite.phone,
+      })),
+    });
+  } catch (error) {
+    console.error('load rsvp summary failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/events/:eventId/rsvp-remind', async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { userId, inviteId } = req.body ?? {};
+
+    if (!userId || !inviteId) {
+      return res.status(400).json({ error: 'userId and inviteId are required' });
+    }
+
+    const event = await prisma.event.findUnique({ where: { id: eventId } });
+    if (!event || event.userId !== userId) {
+      return res.status(404).json({ error: 'event not found' });
+    }
+
+    const invite = await prisma.rsvpInvite.findUnique({ where: { id: String(inviteId) } });
+    if (!invite || invite.eventId !== eventId) {
+      return res.status(404).json({ error: 'invite not found' });
+    }
+
+    const rsvpLink = `${resolveVerificationBaseUrl(req)}/rsvp/${eventId}`;
+
+    if (invite.email) {
+      if (!smtpTransport) {
+        return res.status(503).json({ error: 'SMTP is not configured' });
+      }
+      await sendRsvpReminderEmail(invite.email, { eventTitle: event.title, rsvpLink });
+      return res.json({ success: true, method: 'email' });
+    }
+
+    if (invite.phone) {
+      return res.json({
+        success: true,
+        method: 'native-sms',
+        requiresNativeText: true,
+        phone: invite.phone,
+        message: `Just a reminder to RSVP for ${event.title}: ${rsvpLink}`,
+      });
+    }
+
+    return res.status(400).json({ error: 'This guest has no email or phone on file.' });
+  } catch (error) {
+    console.error('send rsvp reminder failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.get('/rsvp/:eventId', async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const event = await prisma.event.findUnique({ where: { id: eventId } });
+
+    if (!event) {
+      return res.status(404).send(renderRsvpPage({
+        eventTitle: 'Event',
+        eventDateLabel: '',
+        mode: 'not-found',
+      }));
+    }
+
+    if (!event.rsvpEnabled) {
+      return res.status(200).send(renderRsvpPage({
+        eventTitle: event.title,
+        eventDateLabel: '',
+        mode: 'closed',
+      }));
+    }
+
+    const { eventDateLabel, eventTimeLabel } = getEventDateTimeLabels(
+      event.eventDateTime.toISOString(),
+      event.eventAllDay,
+      event.reminderTimeZone || undefined,
+    );
+    const rsvpByLabel = event.rsvpByDate
+      ? new Date(event.rsvpByDate).toLocaleDateString()
+      : null;
+
+    return res.status(200).send(renderRsvpPage({
+      eventTitle: event.title,
+      eventDateLabel,
+      eventTimeLabel,
+      rsvpByLabel,
+      mode: 'form',
+      formAction: `/rsvp/${eventId}`,
+    }));
+  } catch (error) {
+    console.error('load rsvp page failed', error);
+    return res.status(500).send('<h3>Unable to load this RSVP page right now. Please try again later.</h3>');
+  }
+});
+
+app.post('/rsvp/:eventId', async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const event = await prisma.event.findUnique({ where: { id: eventId } });
+
+    if (!event) {
+      return res.status(404).send(renderRsvpPage({
+        eventTitle: 'Event',
+        eventDateLabel: '',
+        mode: 'not-found',
+      }));
+    }
+
+    if (!event.rsvpEnabled) {
+      return res.status(200).send(renderRsvpPage({
+        eventTitle: event.title,
+        eventDateLabel: '',
+        mode: 'closed',
+      }));
+    }
+
+    const { eventDateLabel, eventTimeLabel } = getEventDateTimeLabels(
+      event.eventDateTime.toISOString(),
+      event.eventAllDay,
+      event.reminderTimeZone || undefined,
+    );
+    const rsvpByLabel = event.rsvpByDate ? new Date(event.rsvpByDate).toLocaleDateString() : null;
+
+    const firstName = String(req.body?.firstName || '').trim();
+    const lastName = String(req.body?.lastName || '').trim();
+    const response = String(req.body?.response || '').trim().toLowerCase();
+    const message = String(req.body?.message || '').trim().slice(0, 255);
+    const email = String(req.body?.email || '').trim();
+    const phone = String(req.body?.phone || '').trim();
+
+    const formValues = { firstName, lastName, response, message, email, phone };
+
+    const renderError = (errorMessage: string) => res.status(400).send(renderRsvpPage({
+      eventTitle: event.title,
+      eventDateLabel,
+      eventTimeLabel,
+      rsvpByLabel,
+      mode: 'form',
+      formAction: `/rsvp/${eventId}`,
+      errorMessage,
+      formValues,
+    }));
+
+    if (!firstName || !lastName) {
+      return renderError('First name and last name are required.');
+    }
+    if (response !== 'yes' && response !== 'no') {
+      return renderError('Please select Yes or No.');
+    }
+    if (!email && !phone) {
+      return renderError('Please provide at least an email or a phone number.');
+    }
+
+    const normalizedEmail = normalizeEmailForComparison(email);
+    const normalizedPhone = normalizePhoneNumberForComparison(phone);
+
+    const existingResponses = await prisma.rsvpResponse.findMany({ where: { eventId } });
+    const existingResponse = existingResponses.find((candidate) => (
+      (normalizedEmail && normalizeEmailForComparison(candidate.email || '') === normalizedEmail)
+      || (normalizedPhone && normalizePhoneNumberForComparison(candidate.phone || '') === normalizedPhone)
+    ));
+
+    if (existingResponse) {
+      await prisma.rsvpResponse.update({
+        where: { id: existingResponse.id },
+        data: {
+          firstName,
+          lastName,
+          email: email || null,
+          phone: phone || null,
+          response,
+          message: message || null,
+          respondedAt: new Date(),
+        },
+      });
+    } else {
+      await prisma.rsvpResponse.create({
+        data: {
+          id: crypto.randomUUID(),
+          eventId,
+          firstName,
+          lastName,
+          email: email || null,
+          phone: phone || null,
+          response,
+          message: message || null,
+        },
+      });
+    }
+
+    return res.status(200).send(renderRsvpPage({
+      eventTitle: event.title,
+      eventDateLabel,
+      eventTimeLabel,
+      rsvpByLabel,
+      mode: 'confirmation',
+    }));
+  } catch (error) {
+    console.error('submit rsvp failed', error);
+    return res.status(500).send('<h3>Unable to submit this RSVP right now. Please try again later.</h3>');
+  }
+});
+
 app.get('/users/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -4018,6 +4583,8 @@ app.put('/users/:userId/events', async (req, res) => {
             notes: event.notes ? String(event.notes) : null,
             notified: event.notified === undefined ? false : Boolean(event.notified),
             lastReminderTriggeredAt: event.lastReminderTriggeredAt ? new Date(event.lastReminderTriggeredAt) : null,
+            rsvpEnabled: Boolean(event.rsvpEnabled),
+            rsvpByDate: event.rsvpByDate ? new Date(event.rsvpByDate) : null,
           },
           update: {
             title: normalizedTitle,
@@ -4036,6 +4603,8 @@ app.put('/users/:userId/events', async (req, res) => {
             notes: event.notes ? String(event.notes) : null,
             notified: event.notified === undefined ? false : Boolean(event.notified),
             lastReminderTriggeredAt: event.lastReminderTriggeredAt ? new Date(event.lastReminderTriggeredAt) : null,
+            rsvpEnabled: Boolean(event.rsvpEnabled),
+            rsvpByDate: event.rsvpByDate ? new Date(event.rsvpByDate) : null,
           },
         });
 
