@@ -337,6 +337,29 @@ const MOBILE_VERIFICATION_VERIFY_ATTEMPTS = { max: 5, windowMs: 10 * 60 * 1000 }
 
 const normalizePhoneNumberForComparison = (value: string) => String(value || '').replace(/\D/g, '').slice(0, 10);
 
+// Kept in sync with formatPhoneNumberInput in src/AppContent.tsx so phone numbers collected
+// from the public RSVP page match the "(XXX) XXX-XXXX" formatting used everywhere else in the app.
+const formatPhoneNumberForDisplay = (value: string) => {
+  const rawDigits = String(value || '').replace(/\D/g, '');
+  const digits = rawDigits.length === 11 && rawDigits.startsWith('1')
+    ? rawDigits.slice(1)
+    : rawDigits.slice(0, 10);
+
+  if (!digits) {
+    return '';
+  }
+
+  if (digits.length <= 3) {
+    return `(${digits}`;
+  }
+
+  if (digits.length <= 6) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+  }
+
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
+};
+
 const getSafeTimeZone = (value?: string) => {
   const candidate = String(value || '').trim();
   if (!candidate) {
@@ -377,6 +400,29 @@ const getEventDateTimeLabels = (eventDateTime: string, eventAllDay: boolean, eve
       eventTimeLabel: eventAllDay ? null : eventAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
     };
   }
+};
+
+// Kept in sync with formatCountdownLabelForDate in src/AppContent.tsx (the List view's "(2 days)"
+// style countdown), so the RSVP page's summary pill reads the same way the app's own list does.
+const formatRsvpCountdownLabel = (eventDateTime: Date) => {
+  const startOfEventDay = new Date(Date.UTC(eventDateTime.getUTCFullYear(), eventDateTime.getUTCMonth(), eventDateTime.getUTCDate()));
+  const now = new Date();
+  const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const diffDays = Math.round((startOfEventDay.getTime() - startOfToday.getTime()) / (24 * 60 * 60 * 1000));
+
+  if (diffDays === 0) {
+    return 'Today';
+  }
+  if (diffDays === 1) {
+    return '1 day';
+  }
+  if (diffDays > 1) {
+    return `${diffDays} days`;
+  }
+  if (diffDays === -1) {
+    return '1 day ago';
+  }
+  return `${Math.abs(diffDays)} days ago`;
 };
 
 const isMobileNumberVerified = (user: {
@@ -1023,10 +1069,14 @@ const RSVP_EVENT_ICONS: Record<RsvpEventSummaryCategory, string> = {
 const getRsvpEventSummaryCategory = (title: string): RsvpEventSummaryCategory => {
   const normalizedTitle = String(title || '').toLowerCase().trim();
 
-  if (normalizedTitle === 'birthday' || normalizedTitle === 'birthday party' || normalizedTitle.endsWith('birthday party')) {
+  // Kept in sync with getEventSummaryCategory in src/AppContent.tsx: a bare "Birthday"/
+  // "Anniversary" event is distinct from a "Birthday Party"/"Anniversary Party" event, so
+  // only the non-party title keeps this category — the party-titled version falls through
+  // to the generic party category below.
+  if (normalizedTitle === 'birthday') {
     return 'birthday';
   }
-  if (normalizedTitle === 'anniversary' || normalizedTitle === 'anniversary party' || normalizedTitle.endsWith('anniversary party')) {
+  if (normalizedTitle === 'anniversary') {
     return 'anniversary';
   }
   if (normalizedTitle === 'wedding') {
@@ -1068,6 +1118,8 @@ const getRsvpEventSummaryCategory = (title: string): RsvpEventSummaryCategory =>
 
 const renderRsvpPage = (options: {
   eventTitle: string;
+  eventPeople?: string;
+  eventCountdownLabel?: string;
   eventDateLabel: string;
   eventTimeLabel?: string | null;
   rsvpByLabel?: string | null;
@@ -1081,15 +1133,26 @@ const renderRsvpPage = (options: {
   const icon = RSVP_EVENT_ICONS[category];
   const escapedEventTitle = escapeHtml(options.eventTitle);
 
+  const closeButtonHtml = '<button type="button" class="secondaryButton" onclick="window.close()">Close</button>';
+
+  // Mirrors the compact, color-coded summary pill from the app's List view (not the full
+  // detail card) — same icon + color + "date (countdown) • title • people • time" line.
+  const summaryPillHtml = (options.eventPeople && options.eventDateLabel)
+    ? `<div class="summaryPill" style="background:${color};">
+        <span class="summaryPillIcon">${icon}</span>
+        <span class="summaryPillText">${escapeHtml(options.eventDateLabel)}${options.eventCountdownLabel ? ` (${escapeHtml(options.eventCountdownLabel)})` : ''} &bull; ${escapedEventTitle} &bull; ${escapeHtml(options.eventPeople)}${options.eventTimeLabel ? ` &bull; ${escapeHtml(options.eventTimeLabel)}` : ''}</span>
+      </div>`
+    : '';
+
   const bodyHtml = (() => {
     if (options.mode === 'not-found') {
-      return '<p class="text">This RSVP link is not valid.</p>';
+      return `<p class="text">This RSVP link is not valid.</p>${closeButtonHtml}`;
     }
     if (options.mode === 'closed') {
-      return '<p class="text">RSVP is not open for this event.</p>';
+      return `<p class="text">RSVP is not open for this event.</p>${closeButtonHtml}`;
     }
     if (options.mode === 'confirmation') {
-      return '<p class="text">Thanks for responding! Your RSVP has been recorded.</p>';
+      return `<p class="text">Thanks for responding! Your RSVP has been recorded.</p>${closeButtonHtml}`;
     }
 
     const values = options.formValues || {};
@@ -1114,10 +1177,11 @@ const renderRsvpPage = (options: {
         <label class="label">Email</label>
         <input class="input" type="email" name="email" maxlength="255" value="${escapeHtml(values.email || '')}" />
         <label class="label">Phone</label>
-        <input class="input" type="tel" name="phone" maxlength="30" value="${escapeHtml(values.phone || '')}" />
+        <input class="input" type="tel" name="phone" maxlength="14" placeholder="(555) 123-4567" oninput="this.value = formatRsvpPhone(this.value)" value="${escapeHtml(values.phone || '')}" />
         <p class="small">Please provide at least an email or a phone number.</p>
         <button class="button" type="submit">Submit RSVP</button>
       </form>
+      ${closeButtonHtml}
     `;
   })();
 
@@ -1142,7 +1206,11 @@ const renderRsvpPage = (options: {
       .radioLabel { font-size: 15px; color: #0f172a; display: flex; align-items: center; gap: 6px; }
       .small { font-size: 12px; color: #64748b; margin-top: 10px; }
       .button { margin-top: 18px; width: 100%; background: ${color}; color: #ffffff; border: none; border-radius: 9px; padding: 13px 14px; font-size: 16px; font-weight: 700; cursor: pointer; }
+      .secondaryButton { margin-top: 12px; width: 100%; background: #ffffff; color: #334155; border: 1px solid #cbd5e1; border-radius: 9px; padding: 13px 14px; font-size: 16px; font-weight: 700; cursor: pointer; }
       .errorBox { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 8px; padding: 10px 12px; font-size: 14px; margin-bottom: 12px; }
+      .summaryPill { display: flex; align-items: center; min-height: 56px; padding: 8px 10px; border-radius: 8px; margin-bottom: 16px; }
+      .summaryPillIcon { font-size: 24px; margin-right: 8px; }
+      .summaryPillText { color: #ffffff; font-weight: 600; line-height: 18px; }
     </style>
   </head>
   <body>
@@ -1153,8 +1221,28 @@ const renderRsvpPage = (options: {
       ${options.rsvpByLabel ? `<p class="bannerMeta">RSVP by ${escapeHtml(options.rsvpByLabel)}</p>` : ''}
     </div>
     <div class="card">
+      ${summaryPillHtml}
       ${bodyHtml}
     </div>
+    <script>
+      function formatRsvpPhone(value) {
+        var digits = String(value || '').replace(/\\D/g, '');
+        if (digits.length === 11 && digits.charAt(0) === '1') {
+          digits = digits.slice(1);
+        }
+        digits = digits.slice(0, 10);
+        if (!digits) {
+          return '';
+        }
+        if (digits.length <= 3) {
+          return '(' + digits;
+        }
+        if (digits.length <= 6) {
+          return '(' + digits.slice(0, 3) + ') ' + digits.slice(3);
+        }
+        return '(' + digits.slice(0, 3) + ') ' + digits.slice(3, 6) + '-' + digits.slice(6, 10);
+      }
+    </script>
   </body>
 </html>`;
 };
@@ -1291,6 +1379,50 @@ const isExpiredNonYearlyEvent = (title: string, eventDateTime: Date, frequency: 
   }
 
   return timestamp < Date.now();
+};
+
+// The event row (and its RsvpInvite/RsvpResponse data, via cascade) may not be pruned from the
+// database the instant an event expires — pruning normally only runs when the owner's app syncs
+// (see pruneExpiredRsvpEvents below for the proactive background sweep). This check makes the
+// public RSVP page itself stop accepting responses immediately once the event has happened or
+// its RSVP-by date has passed, regardless of whether the row has been deleted yet.
+const isRsvpAcceptingResponses = (event: { rsvpEnabled: boolean; rsvpByDate: Date | null; eventDateTime: Date }) => {
+  if (!event.rsvpEnabled) {
+    return false;
+  }
+
+  const now = Date.now();
+  if (event.rsvpByDate && new Date(event.rsvpByDate).getTime() < now) {
+    return false;
+  }
+
+  return new Date(event.eventDateTime).getTime() >= now;
+};
+
+const rsvpCleanupPollIntervalMs = Math.max(60_000, Number(process.env.RSVP_CLEANUP_POLL_INTERVAL_MS || 15 * 60 * 1000));
+
+// Proactively deletes expired RSVP-enabled events so their public RSVP page and RSVP data don't
+// linger indefinitely just because the owner hasn't reopened the app (which is the only other
+// time expired-event pruning normally runs). Deleting the Event row cascades to its
+// EventReminder/RsvpInvite/RsvpResponse rows at the database level.
+const pruneExpiredRsvpEvents = async () => {
+  try {
+    const rsvpEvents = await prisma.event.findMany({
+      where: { rsvpEnabled: true },
+      select: { id: true, title: true, eventDateTime: true, frequency: true },
+    });
+
+    const expiredEventIds = rsvpEvents
+      .filter((event) => isExpiredNonYearlyEvent(event.title, event.eventDateTime, event.frequency))
+      .map((event) => event.id);
+
+    if (expiredEventIds.length) {
+      await prisma.event.deleteMany({ where: { id: { in: expiredEventIds } } });
+      console.log(`Pruned ${expiredEventIds.length} expired RSVP event(s) and their RSVP data.`);
+    }
+  } catch (error) {
+    console.error('prune expired rsvp events failed', error);
+  }
 };
 
 const moveAnnualEventDateToNextOccurrence = (title: string, eventDateTime: Date, eventAllDay: boolean) => {
@@ -4110,7 +4242,7 @@ app.get('/rsvp/:eventId', async (req, res) => {
       }));
     }
 
-    if (!event.rsvpEnabled) {
+    if (!isRsvpAcceptingResponses(event)) {
       return res.status(200).send(renderRsvpPage({
         eventTitle: event.title,
         eventDateLabel: '',
@@ -4127,19 +4259,131 @@ app.get('/rsvp/:eventId', async (req, res) => {
       ? new Date(event.rsvpByDate).toLocaleDateString()
       : null;
 
+    // Personalized invite links (built per-recipient at share time) carry the recipient's
+    // known name/contact info as query params so the form arrives pre-filled; a plain,
+    // unpersonalized link (e.g. shared via native text) simply omits these.
+    const prefillValues = {
+      firstName: String(req.query.firstName || '').trim(),
+      lastName: String(req.query.lastName || '').trim(),
+      email: String(req.query.email || '').trim(),
+      phone: formatPhoneNumberForDisplay(String(req.query.phone || '')),
+    };
+
     return res.status(200).send(renderRsvpPage({
       eventTitle: event.title,
+      eventPeople: event.people,
+      eventCountdownLabel: formatRsvpCountdownLabel(event.eventDateTime),
       eventDateLabel,
       eventTimeLabel,
       rsvpByLabel,
       mode: 'form',
       formAction: `/rsvp/${eventId}`,
+      formValues: prefillValues,
     }));
   } catch (error) {
     console.error('load rsvp page failed', error);
     return res.status(500).send('<h3>Unable to load this RSVP page right now. Please try again later.</h3>');
   }
 });
+
+// Keeps the event owner's contacts snapshot (and the auto-created "<event> • <who/what>" group
+// from sharing) up to date with whoever actually RSVPs — including guests who weren't already
+// a saved contact, so re-sharing an update later reaches them too via that group. Reads and
+// writes the full raw snapshot (not a trimmed view) so unrelated contact fields — photo,
+// address, favorites, etc. — are left untouched, and no-ops entirely on any failure since this
+// is a best-effort background sync, not something that should ever block a guest's RSVP.
+const syncRsvpContactAndGroup = async (options: {
+  ownerUserId: string;
+  eventTitle: string;
+  eventPeople: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+}) => {
+  try {
+    const existingSnapshot = await prisma.userContactsSnapshot.findUnique({ where: { userId: options.ownerUserId } });
+    const rawPayload = (existingSnapshot?.payload && typeof existingSnapshot.payload === 'object' ? existingSnapshot.payload : {}) as Record<string, any>;
+    const contacts: Array<Record<string, any>> = Array.isArray(rawPayload.contacts) ? rawPayload.contacts : [];
+    const groups: Array<Record<string, any>> = Array.isArray(rawPayload.groups) ? rawPayload.groups : [];
+
+    const normalizedEmail = normalizeEmailForComparison(options.email);
+    const normalizedPhone = normalizePhoneNumberForComparison(options.phone);
+    const nowIso = new Date().toISOString();
+
+    let contact = contacts.find((entry) => {
+      if (entry?.deletedAt) {
+        return false;
+      }
+      const entryEmail = normalizeEmailForComparison(String(entry?.email || ''));
+      const entryPhone = normalizePhoneNumberForComparison(String(entry?.mobileNumber || ''));
+      return (normalizedEmail && entryEmail === normalizedEmail) || (normalizedPhone && entryPhone === normalizedPhone);
+    });
+
+    if (!contact) {
+      contact = {
+        id: crypto.randomUUID(),
+        email: options.email || '',
+        firstName: options.firstName || 'Guest',
+        lastName: options.lastName || '',
+        address: '',
+        birthDate: '',
+        mobileNumber: options.phone || undefined,
+        company: '',
+        notes: '',
+        isFavorite: false,
+        groupIds: [],
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        deletedAt: null,
+      };
+      contacts.push(contact);
+    }
+
+    const groupName = `${options.eventTitle} • ${options.eventPeople}`.trim().slice(0, 120);
+    let group = groups.find((entry) => String(entry?.name || '').trim().toLowerCase() === groupName.toLowerCase());
+
+    if (!group) {
+      group = {
+        id: crypto.randomUUID(),
+        name: groupName,
+        description: `Guests for ${options.eventTitle}`,
+        contactIds: [],
+        createdAt: nowIso,
+      };
+      groups.push(group);
+    }
+
+    const contactId = String(contact.id);
+    if (!Array.isArray(group.contactIds)) {
+      group.contactIds = [];
+    }
+    if (!group.contactIds.includes(contactId)) {
+      group.contactIds.push(contactId);
+    }
+
+    const contactGroupIds = Array.isArray(contact.groupIds) ? contact.groupIds : [];
+    if (!contactGroupIds.includes(String(group.id))) {
+      contact.groupIds = [...contactGroupIds, String(group.id)];
+      contact.updatedAt = nowIso;
+    }
+
+    const payload = {
+      ...rawPayload,
+      contacts,
+      groups,
+      updatedAt: nowIso,
+    };
+
+    await prisma.userContactsSnapshot.upsert({
+      where: { userId: options.ownerUserId },
+      create: { userId: options.ownerUserId, payload: payload as Prisma.JsonObject },
+      update: { payload: payload as Prisma.JsonObject },
+    });
+  } catch (error) {
+    console.error('sync rsvp contact/group failed', error);
+  }
+};
 
 app.post('/rsvp/:eventId', async (req, res) => {
   try {
@@ -4154,7 +4398,7 @@ app.post('/rsvp/:eventId', async (req, res) => {
       }));
     }
 
-    if (!event.rsvpEnabled) {
+    if (!isRsvpAcceptingResponses(event)) {
       return res.status(200).send(renderRsvpPage({
         eventTitle: event.title,
         eventDateLabel: '',
@@ -4174,12 +4418,14 @@ app.post('/rsvp/:eventId', async (req, res) => {
     const response = String(req.body?.response || '').trim().toLowerCase();
     const message = String(req.body?.message || '').trim().slice(0, 255);
     const email = String(req.body?.email || '').trim();
-    const phone = String(req.body?.phone || '').trim();
+    const phone = formatPhoneNumberForDisplay(String(req.body?.phone || ''));
 
     const formValues = { firstName, lastName, response, message, email, phone };
 
     const renderError = (errorMessage: string) => res.status(400).send(renderRsvpPage({
       eventTitle: event.title,
+      eventPeople: event.people,
+      eventCountdownLabel: formatRsvpCountdownLabel(event.eventDateTime),
       eventDateLabel,
       eventTimeLabel,
       rsvpByLabel,
@@ -4236,8 +4482,20 @@ app.post('/rsvp/:eventId', async (req, res) => {
       });
     }
 
+    await syncRsvpContactAndGroup({
+      ownerUserId: event.userId,
+      eventTitle: event.title,
+      eventPeople: event.people,
+      firstName,
+      lastName,
+      email,
+      phone,
+    });
+
     return res.status(200).send(renderRsvpPage({
       eventTitle: event.title,
+      eventPeople: event.people,
+      eventCountdownLabel: formatRsvpCountdownLabel(event.eventDateTime),
       eventDateLabel,
       eventTimeLabel,
       rsvpByLabel,
@@ -4654,4 +4912,9 @@ app.listen(port, () => {
   setInterval(() => {
     void processReminderQueue();
   }, reminderQueuePollIntervalMs);
+
+  void pruneExpiredRsvpEvents();
+  setInterval(() => {
+    void pruneExpiredRsvpEvents();
+  }, rsvpCleanupPollIntervalMs);
 });

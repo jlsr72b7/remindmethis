@@ -49,6 +49,8 @@ import {
   fetchRsvpSummary,
   sendRsvpReminder,
   type RsvpSummaryResult,
+  loadUserContactsSnapshot,
+  saveUserContactsSnapshot,
   subscribeApiStorageStatus,
   isApiStorageEnabled,
   validateEmail,
@@ -609,11 +611,15 @@ const schoolSubtypeTitleSet = new Set(
 const getEventSummaryCategory = (event: SpecialDateEvent): EventSummaryCategory => {
   const normalizedTitle = event.title.toLowerCase().trim();
 
-  if (normalizedTitle === 'birthday' || normalizedTitle === 'birthday party' || normalizedTitle.endsWith('birthday party')) {
+  // A plain "Birthday"/"Anniversary" event and a "Birthday Party"/"Anniversary Party" event
+  // are distinct occasions, so only the bare (non-party) title keeps this category — the
+  // party-titled version falls through to the generic party category below, same as any
+  // other party subtype without its own dedicated color/icon (e.g. a plain "Party").
+  if (normalizedTitle === 'birthday') {
     return 'birthday';
   }
 
-  if (normalizedTitle === 'anniversary' || normalizedTitle === 'anniversary party' || normalizedTitle.endsWith('anniversary party')) {
+  if (normalizedTitle === 'anniversary') {
     return 'anniversary';
   }
 
@@ -657,7 +663,7 @@ const getEventSummaryCategory = (event: SpecialDateEvent): EventSummaryCategory 
     return 'holiday';
   }
 
-  if (normalizedTitle === 'party') {
+  if (normalizedTitle === 'party' || normalizedTitle.endsWith(' party')) {
     return 'party';
   }
 
@@ -1930,6 +1936,8 @@ interface ShareGroup {
 interface ShareRecipient {
   key: string;
   label: string;
+  firstName?: string;
+  lastName?: string;
   email?: string;
   phone?: string;
   source: 'contact' | 'group' | 'manual-email' | 'manual-phone';
@@ -2514,6 +2522,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     appendShareRecipients([{
       key: `contact:${contact.id}`,
       label: `${contact.firstName}${contact.lastName ? ` ${contact.lastName}` : ''}`,
+      firstName: contact.firstName || undefined,
+      lastName: contact.lastName || undefined,
       email: contact.email || undefined,
       phone: contact.mobileNumber ? formatPhoneNumberInput(contact.mobileNumber) : undefined,
       source: 'contact',
@@ -2527,6 +2537,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       .map((contact) => ({
         key: `contact:${contact.id}`,
         label: `${contact.firstName}${contact.lastName ? ` ${contact.lastName}` : ''}`,
+        firstName: contact.firstName || undefined,
+        lastName: contact.lastName || undefined,
         email: contact.email || undefined,
         phone: contact.mobileNumber ? formatPhoneNumberInput(contact.mobileNumber) : undefined,
         source: 'group' as const,
@@ -2534,6 +2546,180 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
     appendShareRecipients(groupRecipients);
   }, [appendShareRecipients, shareSelectableContacts]);
+
+  // Automatically saves (or updates) a contacts group named after this event so re-sharing
+  // an update later is a one-tap "Add Group" instead of re-picking every recipient. Reads and
+  // writes the full raw contacts+groups snapshot (not the trimmed ShareContact/ShareGroup view
+  // already in memory) so fields the Contacts screen owns — photo, address, favorites, etc. —
+  // are never touched for existing contacts.
+  const createOrUpdateRsvpShareGroup = async (event: SpecialDateEvent, recipients: ShareRecipient[]) => {
+    if (!userId || !recipients.length) {
+      return;
+    }
+
+    try {
+      let contacts: Array<Record<string, any>> = [];
+      let groups: Array<Record<string, any>> = [];
+      let ownerUserId: string | undefined;
+      let ownerEmail: string | undefined;
+      let schemaVersion: number | undefined;
+
+      if (isApiStorageEnabled()) {
+        const remote = await loadUserContactsSnapshot(userId);
+        const remoteSnapshot = remote?.snapshot as Record<string, any> | null | undefined;
+        if (remoteSnapshot && typeof remoteSnapshot === 'object') {
+          contacts = Array.isArray(remoteSnapshot.contacts) ? remoteSnapshot.contacts : [];
+          groups = Array.isArray(remoteSnapshot.groups) ? remoteSnapshot.groups : [];
+          ownerUserId = remoteSnapshot.ownerUserId;
+          ownerEmail = remoteSnapshot.ownerEmail;
+          schemaVersion = remoteSnapshot.schemaVersion;
+        }
+      }
+
+      if (!contacts.length && !groups.length) {
+        const rawLocal = await AsyncStorage.getItem(getContactsStorageKey(userId));
+        if (rawLocal) {
+          try {
+            const parsedLocal = JSON.parse(rawLocal);
+            contacts = Array.isArray(parsedLocal?.contacts)
+              ? parsedLocal.contacts
+              : Array.isArray(parsedLocal)
+                ? parsedLocal
+                : [];
+            groups = Array.isArray(parsedLocal?.groups) ? parsedLocal.groups : [];
+            ownerUserId = parsedLocal?.ownerUserId;
+            ownerEmail = parsedLocal?.ownerEmail;
+            schemaVersion = parsedLocal?.schemaVersion;
+          } catch (error) {
+            console.warn('Unable to parse local contacts snapshot for RSVP group', error);
+          }
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      const nextContacts = [...contacts];
+      const resolvedContactIds: string[] = [];
+
+      recipients.forEach((recipient) => {
+        let contactId = '';
+
+        if (recipient.key.startsWith('contact:') && !recipient.key.startsWith('contact:device:')) {
+          const candidateId = recipient.key.slice('contact:'.length);
+          if (nextContacts.some((entry) => String(entry?.id || '') === candidateId)) {
+            contactId = candidateId;
+          }
+        }
+
+        const normalizedEmail = recipient.email?.trim().toLowerCase() || '';
+        const normalizedPhone = recipient.phone ? recipient.phone.replace(/\D/g, '').slice(0, 10) : '';
+
+        if (!contactId && (normalizedEmail || normalizedPhone)) {
+          const matched = nextContacts.find((entry) => {
+            if (entry?.deletedAt) {
+              return false;
+            }
+            const entryEmail = String(entry?.email || '').trim().toLowerCase();
+            const entryPhone = String(entry?.mobileNumber || '').replace(/\D/g, '').slice(0, 10);
+            return (normalizedEmail && entryEmail === normalizedEmail) || (normalizedPhone && entryPhone === normalizedPhone);
+          });
+          if (matched) {
+            contactId = String(matched.id);
+          }
+        }
+
+        if (!contactId) {
+          const nameParts = recipient.label.trim().split(/\s+/).filter(Boolean);
+          const newContact = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            email: normalizedEmail,
+            firstName: nameParts[0] || recipient.label.trim() || 'Guest',
+            lastName: nameParts.slice(1).join(' '),
+            address: '',
+            birthDate: '',
+            mobileNumber: recipient.phone || undefined,
+            company: '',
+            notes: '',
+            isFavorite: false,
+            groupIds: [] as string[],
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            deletedAt: null,
+          };
+          nextContacts.push(newContact);
+          contactId = newContact.id;
+        }
+
+        if (contactId && !resolvedContactIds.includes(contactId)) {
+          resolvedContactIds.push(contactId);
+        }
+      });
+
+      if (!resolvedContactIds.length) {
+        return;
+      }
+
+      const groupName = `${event.title} • ${event.people}`.trim().slice(0, 120);
+      const nextGroups = [...groups];
+      const existingGroupIndex = nextGroups.findIndex(
+        (entry) => String(entry?.name || '').trim().toLowerCase() === groupName.toLowerCase(),
+      );
+
+      let groupId: string;
+      if (existingGroupIndex >= 0) {
+        const existingGroup = nextGroups[existingGroupIndex];
+        const mergedContactIds = Array.from(new Set([
+          ...(Array.isArray(existingGroup.contactIds) ? existingGroup.contactIds : []),
+          ...resolvedContactIds,
+        ]));
+        nextGroups[existingGroupIndex] = { ...existingGroup, contactIds: mergedContactIds };
+        groupId = String(existingGroup.id);
+      } else {
+        groupId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        nextGroups.push({
+          id: groupId,
+          name: groupName,
+          description: `Guests for ${event.title}`,
+          contactIds: resolvedContactIds,
+          createdAt: nowIso,
+        });
+      }
+
+      const finalContacts = nextContacts.map((entry) => {
+        const entryId = String(entry?.id || '');
+        if (!resolvedContactIds.includes(entryId)) {
+          return entry;
+        }
+        const currentGroupIds = Array.isArray(entry.groupIds) ? entry.groupIds : [];
+        return currentGroupIds.includes(groupId)
+          ? entry
+          : { ...entry, groupIds: [...currentGroupIds, groupId], updatedAt: nowIso };
+      });
+
+      const payload = {
+        contacts: finalContacts,
+        groups: nextGroups,
+        ownerUserId: ownerUserId || userId,
+        ownerEmail: ownerEmail || userEmail?.trim().toLowerCase() || '',
+        schemaVersion: schemaVersion || 2,
+        updatedAt: nowIso,
+      };
+
+      await AsyncStorage.setItem(getContactsStorageKey(userId), JSON.stringify(payload));
+
+      if (isApiStorageEnabled()) {
+        const saveResult = await saveUserContactsSnapshot(userId, payload);
+        if (!saveResult.success) {
+          console.warn('Unable to save RSVP share group to backend', saveResult.error);
+        }
+      }
+
+      const normalized = normalizeShareContactsSnapshot(JSON.stringify(payload));
+      setShareContacts(normalized.contacts);
+      setShareGroups(normalized.groups);
+    } catch (error) {
+      console.warn('Unable to create or update RSVP share group', error);
+    }
+  };
 
   const pickDeviceContactForShare = useCallback(async () => {
     if (Platform.OS === 'web') {
@@ -2578,6 +2764,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       appendShareRecipients([{
         key: `contact:device:${source.id || Date.now()}`,
         label: `${firstName}${lastName ? ` ${lastName}` : ''}` || 'iPhone contact',
+        firstName: firstName || undefined,
+        lastName: lastName || undefined,
         email: email || undefined,
         phone: mobileNumber ? formatPhoneNumberInput(mobileNumber) : undefined,
         source: 'contact',
@@ -3848,11 +4036,25 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     const updated = events.filter((event) => event.id !== eventId);
     setEvents(updated);
     await saveEvents(updated, userId);
+    // Deleting the Event row cascades (at the database level) to its EventReminders and, if
+    // it had RSVPs enabled, its RsvpInvite/RsvpResponse rows too — nothing further to clean up
+    // server-side, just the ephemeral client-side cache/state referencing this event.
+    setRsvpSummaries((current) => {
+      if (!(eventId in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[eventId];
+      return next;
+    });
+    if (rsvpManagerEventId === eventId) {
+      setRsvpManagerEventId(null);
+    }
     const reloaded = await loadEvents(userId);
     setEvents(reloaded);
     setActiveReminder(null);
     setConfirmDeleteReminder(null);
-    Alert.alert('Removed', 'The event and all associated reminders have been removed.');
+    Alert.alert('Removed', 'The event and all associated reminders and RSVP data have been removed.');
   };
 
   const deleteAllRemindersForEvent = async (eventId: string) => {
@@ -3937,10 +4139,21 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     const updated = events.filter((event) => event.id !== eventId);
     setEvents(updated);
     await saveEvents(updated, userId);
+    setRsvpSummaries((current) => {
+      if (!(eventId in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[eventId];
+      return next;
+    });
+    if (rsvpManagerEventId === eventId) {
+      setRsvpManagerEventId(null);
+    }
     const reloaded = await loadEvents(userId);
     setEvents(reloaded);
     setConfirmCancelEventId(null);
-    Alert.alert('Deleted', 'The event and all associated reminders have been removed.');
+    Alert.alert('Deleted', 'The event and all associated reminders and RSVP data have been removed.');
   };
 
   const formatEventSummary = (event: SpecialDateEvent) => {
@@ -4659,6 +4872,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     senderName: string,
     customMessage: string,
     acceptLink?: string,
+    rsvpRecipient?: { firstName?: string; lastName?: string; email?: string; phone?: string },
   ) => {
     const acceptExplanation = 'As a registered user of the Remind Me This App clicking the Accept link will load the event into your Saved Events folder.';
     const normalizedCustomMessage = customMessage.trim().slice(0, 255);
@@ -4670,7 +4884,19 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     const eventColor = getEventSummaryColor(event);
     const eventIcon = getEventSummaryIcon(event);
     const eventLocationLines = getEventLocationDisplayLines(event.eventLocation);
-    const rsvpLink = event.rsvpEnabled ? `${SHARE_ACCEPT_BASE_URL}/rsvp/${event.id}` : undefined;
+    const rsvpLink = event.rsvpEnabled ? (() => {
+      const baseLink = `${SHARE_ACCEPT_BASE_URL}/rsvp/${event.id}`;
+      // Personalize the link per-recipient (when we know who they are) so their RSVP form
+      // arrives pre-filled with their name/contact info instead of a blank one — this does
+      // mean every recipient gets their own unique link rather than one shared link.
+      const params = new URLSearchParams();
+      if (rsvpRecipient?.firstName) params.set('firstName', rsvpRecipient.firstName);
+      if (rsvpRecipient?.lastName) params.set('lastName', rsvpRecipient.lastName);
+      if (rsvpRecipient?.email) params.set('email', rsvpRecipient.email);
+      if (rsvpRecipient?.phone) params.set('phone', rsvpRecipient.phone);
+      const query = params.toString();
+      return query ? `${baseLink}?${query}` : baseLink;
+    })() : undefined;
     const rsvpByLabel = event.rsvpByDate ? new Date(event.rsvpByDate).toLocaleDateString() : undefined;
 
     // Plain-text channels (SMS/iMessage) can't carry background colors, so the event's
@@ -4817,7 +5043,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         }
       }
 
-      const sharePayload = buildShareDetailsMessage(sharingEvent, senderName, shareMessage, acceptLinkForKnownRecipient);
+      const sharePayload = buildShareDetailsMessage(sharingEvent, senderName, shareMessage, acceptLinkForKnownRecipient, {
+        firstName: recipient.firstName,
+        lastName: recipient.lastName,
+        email: normalizedEmail || undefined,
+        phone: recipient.phone,
+      });
 
       if (matchedRecipientUserId) {
         inviteRecipients.add(matchedRecipientUserId);
@@ -4909,6 +5140,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           phone: recipient.phone || undefined,
         })),
       );
+      await createOrUpdateRsvpShareGroup(sharingEvent, shareRecipients);
     }
 
     if (!launchedAnyChannel && deliveryErrors.length) {
@@ -4971,6 +5203,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       // outside our A2P-registered messaging flow and its compliance requirements entirely.
       const currentUser = userId ? await loadUser(userId) : null;
       const senderName = currentUser?.fullName?.trim() || 'A Remind Me This user';
+      // The native composer sends one shared body to every selected number at once, so there's
+      // no way to personalize the RSVP link per recipient here the way the Send button does —
+      // it gets the plain, un-prefilled link instead.
       const sharePayload = buildShareDetailsMessage(sharingEvent, senderName, shareMessage);
 
       const { result } = await SMS.sendSMSAsync(phoneNumbers, sharePayload.text);
@@ -4984,6 +5219,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
               .filter((recipient) => recipient.phone && phoneNumbers.includes(recipient.phone.trim()))
               .map((recipient) => ({ label: recipient.label, email: recipient.email || undefined, phone: recipient.phone || undefined })),
           );
+          await createOrUpdateRsvpShareGroup(sharingEvent, shareRecipients);
         }
         Alert.alert(
           'Message composer closed',
@@ -5463,7 +5699,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     : null;
 
   useEffect(() => {
-    if (selectedSummaryEvent?.rsvpEnabled && !rsvpSummaries[selectedSummaryEvent.id]) {
+    // Always refetch (never rely on a cached count) so a guest changing their RSVP after this
+    // was last fetched — e.g. switching Yes to No — is reflected as soon as this card reopens.
+    if (selectedSummaryEvent?.rsvpEnabled) {
       void loadRsvpSummaryForEvent(selectedSummaryEvent.id);
     }
   }, [selectedSummaryEvent?.id, selectedSummaryEvent?.rsvpEnabled]);
@@ -6445,6 +6683,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                           <Text style={styles.savedEventDetailsReminderCounter}>{getRsvpSummaryLabel(event)}</Text>
                         </TouchableOpacity>
                       ) : null}
+                      {getEventLocationDisplayLines(event.eventLocation).length ? (
+                        <View style={styles.savedEventDetailsLocationBlock}>
+                          {getEventLocationDisplayLines(event.eventLocation).map((line, index) => (
+                            <Text key={index} style={styles.savedEventDetailsMeta}>{line}</Text>
+                          ))}
+                        </View>
+                      ) : null}
+                      {event.notes?.trim() ? (
+                        <Text style={styles.savedEventDetailsMeta}>Notes: {event.notes.trim()}</Text>
+                      ) : null}
 
                       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.savedEventDetailsActionRow}>
                         <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => {
@@ -6562,6 +6810,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     };
 
     return (
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={0}
+    >
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <Text style={styles.title}>
         {currentView === 'create-reminders' ? 'Reminders' : editingEvent ? 'Modify Event' : 'Create Event'}
@@ -7553,6 +7806,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       </Modal>
 
     </ScrollView>
+    </KeyboardAvoidingView>
     );
   };
 
@@ -7560,7 +7814,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     <KeyboardAvoidingView
       style={{ flex: 1 }}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+      keyboardVerticalOffset={0}
     >
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <Text style={styles.title}>Share Event</Text>
@@ -7633,6 +7887,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 onChangeText={setShareContactSearch}
                 placeholder="Search contacts"
                 autoCapitalize="none"
+                autoCorrect={false}
+                spellCheck={false}
               />
             ) : null}
             {shareSelectableContacts.length ? (
@@ -7764,12 +8020,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       <View style={styles.modalOverlay}>
         <View style={[styles.modalCard, styles.savedEventDetailsCard]}>
           <Text style={styles.savedEventDetailsTitle}>Event details</Text>
-          <View style={styles.savedEventDetailsHeaderRow}>
-            <Text style={styles.savedEventDetailsEventTitle}>{selectedSummaryEvent.title}</Text>
+          <Text style={styles.savedEventDetailsEventTitle}>{selectedSummaryEvent.title}</Text>
+          <View style={styles.savedEventDetailsMetaRow}>
             {getReminderSummaryState(selectedSummaryEvent).isActive ? (
               <TouchableOpacity onPress={() => {
+                const eventId = selectedSummaryEvent.id;
                 setSelectedSummaryEventId(null);
-                setRemindersForEventId(selectedSummaryEvent.id);
+                // Closing this modal and opening another one in the same tick can race with
+                // native modal presentation/dismissal on iOS and appear to freeze the UI, so
+                // wait for the close animation to finish before opening the next modal.
+                setTimeout(() => setRemindersForEventId(eventId), 300);
               }}>
                 <Text style={styles.savedEventDetailsReminderCounter}>Reminders: {getReminderSummaryState(selectedSummaryEvent).count}</Text>
               </TouchableOpacity>
@@ -7778,8 +8038,12 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             )}
             {selectedSummaryEvent.rsvpEnabled ? (
               <TouchableOpacity onPress={() => {
-                setRsvpManagerEventId(selectedSummaryEvent.id);
-                void loadRsvpSummaryForEvent(selectedSummaryEvent.id);
+                const eventId = selectedSummaryEvent.id;
+                setSelectedSummaryEventId(null);
+                setTimeout(() => {
+                  setRsvpManagerEventId(eventId);
+                  void loadRsvpSummaryForEvent(eventId);
+                }, 300);
               }}>
                 <Text style={styles.savedEventDetailsReminderCounter}>{getRsvpSummaryLabel(selectedSummaryEvent)}</Text>
               </TouchableOpacity>
@@ -7788,6 +8052,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           <Text style={styles.savedEventDetailsPeople}>{selectedSummaryEvent.people}</Text>
           <Text style={styles.savedEventDetailsMeta}>Event Date: {formatEventDateOnly(selectedSummaryEvent)}</Text>
           <Text style={styles.savedEventDetailsMeta}>{formatEventTimeOnlyLabel(selectedSummaryEvent)}</Text>
+          {getEventLocationDisplayLines(selectedSummaryEvent.eventLocation).length ? (
+            <View style={styles.savedEventDetailsLocationBlock}>
+              {getEventLocationDisplayLines(selectedSummaryEvent.eventLocation).map((line, index) => (
+                <Text key={index} style={styles.savedEventDetailsMeta}>{line}</Text>
+              ))}
+            </View>
+          ) : null}
+          {selectedSummaryEvent.notes?.trim() ? (
+            <Text style={styles.savedEventDetailsMeta}>Notes: {selectedSummaryEvent.notes.trim()}</Text>
+          ) : null}
 
           <ScrollView
             horizontal
@@ -8974,10 +9248,18 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   savedEventDetailsEventTitle: {
     fontSize: 18,
-    lineHeight: 18,
+    lineHeight: 22,
     fontWeight: '700',
     color: colors.textPrimary,
-    flexShrink: 1,
+    marginBottom: 6,
+  },
+  savedEventDetailsMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    columnGap: 14,
+    rowGap: 4,
+    marginBottom: 8,
   },
   savedEventDetailsReminderCounter: {
     fontSize: 12,
@@ -8996,6 +9278,10 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     lineHeight: 15,
     color: colors.textPrimary,
     marginBottom: 0,
+  },
+  savedEventDetailsLocationBlock: {
+    marginTop: 6,
+    gap: 2,
   },
   savedEventDetailsActionRow: {
     flexDirection: 'row',
