@@ -4540,23 +4540,30 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     const hasValidEndDate = Boolean(parsedEndDate && Number.isFinite(parsedEndDate.getTime()));
     const hasLocation = Boolean(fields.locationName || fields.locationLine1 || fields.locationCity || fields.locationState || fields.locationZip);
 
-    setForm((current) => ({
-      ...current,
-      ...(fields.customType ? { customType: fields.customType } : {}),
-      ...(fields.people ? { people: fields.people } : {}),
-      ...(fields.notes ? { notes: fields.notes } : {}),
-      ...(hasValidDate ? { eventDateTime: parsedDate as Date } : {}),
-      ...(hasValidEndDate ? { eventEndDateTime: parsedEndDate as Date } : {}),
-      ...(typeof fields.eventAllDay === 'boolean' ? { eventAllDay: fields.eventAllDay } : {}),
-      ...(hasLocation ? {
-        eventLocationEnabled: true,
-        ...(fields.locationName ? { eventLocationName: fields.locationName } : {}),
-        ...(fields.locationLine1 ? { eventLocationLine1: fields.locationLine1, eventLocationFormattedAddress: fields.locationLine1 } : {}),
-        ...(fields.locationCity ? { eventLocationCity: fields.locationCity } : {}),
-        ...(fields.locationState ? { eventLocationState: normalizeStateCode(fields.locationState) } : {}),
-        ...(fields.locationZip ? { eventLocationZip: fields.locationZip } : {}),
-      } : {}),
-    }));
+    setForm((current) => {
+      const nextEventAllDay = typeof fields.eventAllDay === 'boolean' ? fields.eventAllDay : current.eventAllDay;
+      const startDate = hasValidDate ? (parsedDate as Date) : null;
+      const shouldDefaultEndDate = Boolean(startDate) && !hasValidEndDate && !nextEventAllDay;
+      const defaultEndDate = shouldDefaultEndDate ? new Date((startDate as Date).getTime() + 60 * 60 * 1000) : null;
+
+      return {
+        ...current,
+        ...(fields.customType ? { customType: fields.customType } : {}),
+        ...(fields.people ? { people: fields.people } : {}),
+        ...(fields.notes ? { notes: fields.notes } : {}),
+        ...(hasValidDate ? { eventDateTime: parsedDate as Date } : {}),
+        ...(hasValidEndDate ? { eventEndDateTime: parsedEndDate as Date } : defaultEndDate ? { eventEndDateTime: defaultEndDate } : {}),
+        ...(typeof fields.eventAllDay === 'boolean' ? { eventAllDay: fields.eventAllDay } : {}),
+        ...(hasLocation ? {
+          eventLocationEnabled: true,
+          ...(fields.locationName ? { eventLocationName: fields.locationName } : {}),
+          ...(fields.locationLine1 ? { eventLocationLine1: fields.locationLine1, eventLocationFormattedAddress: fields.locationLine1 } : {}),
+          ...(fields.locationCity ? { eventLocationCity: fields.locationCity } : {}),
+          ...(fields.locationState ? { eventLocationState: normalizeStateCode(fields.locationState) } : {}),
+          ...(fields.locationZip ? { eventLocationZip: fields.locationZip } : {}),
+        } : {}),
+      };
+    });
   };
 
   const submitVoiceEventText = async () => {
