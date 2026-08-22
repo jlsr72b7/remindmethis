@@ -8581,6 +8581,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     fontSize: 26,
     fontWeight: '700',
     marginBottom: 4,
+    color: colors.textPrimary,
   },
   subtitle: {
     fontSize: 14,
@@ -8748,6 +8749,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     fontWeight: '600',
     marginBottom: 6,
     marginTop: 8,
+    color: colors.textPrimary,
   },
   inlineSelectionRow: {
     flexDirection: 'row',
@@ -8841,7 +8843,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     fontWeight: '600',
   },
   filterPillTextColored: {
-    color: colors.surface,
+    color: colors.onColor,
   },
   filterPillTextNeutral: {
     color: colors.textPrimary,
@@ -8974,6 +8976,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     borderRadius: 10,
     padding: 10,
     marginBottom: 8,
+    color: colors.textPrimary,
   },
   shareContactSearchInput: {
     margin: 10,
@@ -9244,7 +9247,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     textAlign: 'center',
   },
   reminderModeScrollButtonTextSelected: {
-    color: colors.surface,
+    color: colors.onColor,
   },
   reminderModeScrollButtonTextUnselected: {
     color: colors.textSecondary,
@@ -9281,7 +9284,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     fontSize: Platform.OS === 'ios' ? 12 : 13,
   },
   frequencyOptionTextSelected: {
-    color: colors.surface,
+    color: colors.onColor,
   },
   frequencyOptionTextUnselected: {
     color: colors.textSecondary,
@@ -9337,7 +9340,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     borderColor: colors.borderStrong,
   },
   floatingActionPrimaryText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '800',
     fontSize: 15,
     textAlign: 'center',
@@ -9357,11 +9360,11 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     marginBottom: 6,
   },
   primaryButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '700',
   },
   addReminderButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '700',
     fontSize: 11,
     textAlign: 'center',
@@ -9639,7 +9642,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     width: '100%',
   },
   savedReminderPrimaryButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontSize: 18,
     fontWeight: '800',
   },
@@ -9651,7 +9654,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     width: '100%',
   },
   savedReminderDangerButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontSize: 18,
     fontWeight: '800',
   },
@@ -9696,13 +9699,14 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     alignItems: 'center',
   },
   confirmDeleteDeleteButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '700',
   },
   modalTitle: {
     fontSize: 20,
     fontWeight: '700',
     marginBottom: 8,
+    color: colors.textPrimary,
   },
   activeReminderCard: {
     width: '100%',
@@ -9876,7 +9880,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     borderWidth: 0,
   },
   todayDayCellText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '700',
   },
   dayText: {
@@ -9887,7 +9891,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     color: colors.primary,
   },
   selectedDayText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '700',
   },
   nextReminder: {
@@ -9933,7 +9937,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     lineHeight: 18,
   },
   summaryLinkTextColored: {
-    color: colors.surface,
+    color: colors.onColor,
     textDecorationLine: 'none',
   },
   summaryLinkIcon: {

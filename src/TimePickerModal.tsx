@@ -392,7 +392,7 @@ const createTimePickerStyles = (colors: ThemeColors) => StyleSheet.create({
     color: colors.textPrimary,
   },
   periodButtonTextActive: {
-    color: colors.surface,
+    color: colors.onColor,
   },
   saveButton: {
     marginTop: 18,
@@ -405,7 +405,7 @@ const createTimePickerStyles = (colors: ThemeColors) => StyleSheet.create({
     width: '65%',
   },
   saveButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontSize: 20,
     fontWeight: '700',
     letterSpacing: 0.8,

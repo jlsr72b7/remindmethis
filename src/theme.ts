@@ -33,6 +33,11 @@ export interface ThemeColors {
   accentTeal: string;
   shadow: string;
   overlay: string;
+  // Text color for content drawn on top of a solid, saturated background that doesn't itself
+  // change between themes (colored pills/buttons, EVENT_SUMMARY_COLORS chips, etc.) — always a
+  // light color, unlike `surface`, which is intentionally white in light mode but flips dark in
+  // dark mode and so isn't safe to use as "text on a colored button" once dark mode is on.
+  onColor: string;
 }
 
 export const lightColors: ThemeColors = {
@@ -63,6 +68,7 @@ export const lightColors: ThemeColors = {
   accentTeal: '#0f766e',
   shadow: '#0f172a',
   overlay: 'rgba(15, 23, 42, 0.35)',
+  onColor: '#ffffff',
 };
 
 export const darkColors: ThemeColors = {
@@ -93,6 +99,7 @@ export const darkColors: ThemeColors = {
   accentTeal: '#14b8a6',
   shadow: '#000000',
   overlay: 'rgba(0, 0, 0, 0.6)',
+  onColor: '#ffffff',
 };
 
 const THEME_MODE_STORAGE_KEY = 'app-theme-mode';

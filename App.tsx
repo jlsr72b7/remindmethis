@@ -6949,7 +6949,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     marginRight: 12,
   },
   brandBadgeText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontSize: 22,
   },
   brandBadgeImage: {
@@ -7129,7 +7129,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     marginTop: 8,
   },
   submitButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '700',
   },
   rulesBox: {
@@ -7551,7 +7551,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     marginBottom: 0,
   },
   primaryButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '700',
   },
   passwordSection: {
@@ -7573,7 +7573,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     borderColor: colors.warningText,
   },
   accountChangePasswordButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '700',
   },
   contactsModalCard: {
@@ -8387,7 +8387,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     alignItems: 'center',
   },
   deleteButtonText: {
-    color: colors.surface,
+    color: colors.onColor,
     fontWeight: '700',
   },
 });
