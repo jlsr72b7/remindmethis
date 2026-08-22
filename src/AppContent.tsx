@@ -8538,7 +8538,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 )}
 
                 {reminderPages.length > 1 ? (
-                  <View style={styles.summaryPaginationRow}>
+                  <View style={[styles.summaryPaginationRow, styles.reminderModalPaginationRow]}>
                     <TouchableOpacity
                       style={[styles.summaryPagerButton, safeRemindersModalPage === 0 && styles.summaryPagerButtonDisabled]}
                       onPress={() => setRemindersModalPage((page) => Math.max(0, page - 1))}
@@ -8559,7 +8559,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                   </View>
                 ) : null}
 
-                <View style={styles.savedReminderActionsWrap}>
+                <View style={[styles.savedReminderActionsWrap, styles.savedReminderActionsWrapStatic]}>
                   <TouchableOpacity style={styles.savedReminderPrimaryButton} onPress={() => {
                     const eventToEdit = events.find((event) => event.id === reminderEvent.id);
                     if (eventToEdit) {
@@ -9910,6 +9910,11 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.border,
   },
+  reminderModalPaginationRow: {
+    position: 'relative',
+    marginTop: 8,
+    borderRadius: 10,
+  },
   summaryPagerButton: {
     flex: 1,
     minHeight: 34,
@@ -10032,6 +10037,11 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
   savedReminderActionsWrap: {
     marginTop: 12,
     gap: 10,
+  },
+  savedReminderActionsWrapStatic: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 12,
   },
   savedReminderPrimaryButton: {
     backgroundColor: colors.primary,
