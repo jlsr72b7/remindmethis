@@ -306,6 +306,29 @@ const EXTRACT_EVENT_TOOL = {
   },
 } as const;
 
+const EXTRACT_REMINDERS_TOOL = {
+  name: 'extract_reminders',
+  description: "Record one or more specific reminder date-times described in the text, relative to the event's date/time.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      reminders: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            dateTimeIso: { type: 'string', description: 'ISO 8601 date-time (include the UTC offset) for this reminder.' },
+            notes: { type: 'string', description: 'Optional short note for this specific reminder, only if one was mentioned.' },
+          },
+          required: ['dateTimeIso'],
+        },
+        description: 'One entry per distinct reminder moment described. If a recurring pattern is described (e.g. "every day for the week before"), expand it into concrete reminder date-times, capped at 10. Never invent a reminder that was not described or implied.',
+      },
+    },
+    required: ['reminders'],
+  },
+} as const;
+
 const smtpTransport = smtpHost && smtpUser && smtpPass
   ? nodemailer.createTransport({
       host: smtpHost,
@@ -3738,6 +3761,65 @@ app.post('/nlp/parse-event', async (req, res) => {
     return res.json({ success: true, fields: toolUseBlock?.input || {} });
   } catch (error) {
     console.error('parse-event failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/nlp/parse-reminders', async (req, res) => {
+  try {
+    if (!anthropicApiKey) {
+      return res.status(500).json({ error: 'Voice reminder parsing is not configured. Set ANTHROPIC_API_KEY.' });
+    }
+
+    const { userId, text, eventDateTimeIso, eventAllDay, nowIso, timeZone } = req.body ?? {};
+    const trimmedText = String(text || '').trim();
+    if (!userId || !trimmedText) {
+      return res.status(400).json({ error: 'userId and text are required' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    const parsedNowIso = new Date(nowIso);
+    const referenceDate = Number.isFinite(parsedNowIso.getTime()) ? parsedNowIso : new Date();
+    const referenceTimeZone = String(timeZone || 'UTC').trim() || 'UTC';
+    const parsedEventDate = new Date(eventDateTimeIso);
+    const hasEventDate = Number.isFinite(parsedEventDate.getTime());
+
+    const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': anthropicApiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: `You extract one or more specific reminder date-times from a person's freeform, spoken-then-transcribed description of when they want to be reminded about an event. The current date/time is ${referenceDate.toISOString()} in the ${referenceTimeZone} time zone.${hasEventDate ? ` The event itself occurs at ${parsedEventDate.toISOString()}${eventAllDay ? ' (an all-day event)' : ''} — resolve phrases like "the day before", "a week before", "the morning of" relative to that event time.` : ''} Call the extract_reminders tool exactly once with a "reminders" array — one entry per distinct reminder moment described. If a recurring pattern is described (e.g. "every day for the week before"), expand it into concrete reminder date-times, capped at 10. Never invent a reminder that was not described or implied.`,
+        messages: [
+          { role: 'user', content: trimmedText },
+        ],
+        tools: [EXTRACT_REMINDERS_TOOL],
+        tool_choice: { type: 'tool', name: 'extract_reminders' },
+      }),
+    });
+
+    const payload = await anthropicResponse.json() as AnthropicMessageResponse;
+
+    if (!anthropicResponse.ok) {
+      console.error('anthropic parse-reminders failed', payload);
+      return res.status(502).json({ error: 'Unable to understand that right now. Please try again.' });
+    }
+
+    const toolUseBlock = (payload.content || []).find((block) => block.type === 'tool_use');
+    const reminders = (toolUseBlock?.input as { reminders?: Array<{ dateTimeIso?: string; notes?: string }> } | undefined)?.reminders || [];
+
+    return res.json({ success: true, reminders });
+  } catch (error) {
+    console.error('parse-reminders failed', error);
     return res.status(500).json({ error: 'internal server error' });
   }
 });

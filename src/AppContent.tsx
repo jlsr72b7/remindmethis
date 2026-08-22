@@ -56,6 +56,8 @@ import {
   type RsvpSummaryResult,
   parseVoiceEventText,
   type VoiceParsedEventFields,
+  parseVoiceReminderText,
+  type VoiceParsedReminder,
   loadUserContactsSnapshot,
   saveUserContactsSnapshot,
   subscribeApiStorageStatus,
@@ -2113,6 +2115,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [isSubtypePickerVisible, setIsSubtypePickerVisible] = useState(false);
   const [subtypeDraft, setSubtypeDraft] = useState('');
   const [isVoiceEventModalVisible, setIsVoiceEventModalVisible] = useState(false);
+  const [voiceModalMode, setVoiceModalMode] = useState<'event' | 'reminders'>('event');
   const [voiceTranscriptDraft, setVoiceTranscriptDraft] = useState('');
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
   const [isParsingVoiceEvent, setIsParsingVoiceEvent] = useState(false);
@@ -4476,8 +4479,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setIsSubtypePickerVisible(false);
   }, []);
 
-  const openVoiceEventModal = () => {
+  const openVoiceEventModal = (mode: 'event' | 'reminders' = 'event') => {
     Keyboard.dismiss();
+    setVoiceModalMode(mode);
     setVoiceTranscriptDraft('');
     setIsVoiceRecording(false);
     setIsVoiceEventModalVisible(true);
@@ -4567,6 +4571,45 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     });
   };
 
+  const applyVoiceParsedRemindersToForm = (reminders: VoiceParsedReminder[]): boolean => {
+    const title = getEventTitle(form.eventType, form.partySubtype, form.customType, form.schoolSubtype, form.medicalSubtype, form.dentalSubtype, form.workSubtype);
+    const peopleLabel = form.people.trim() || 'You';
+    const sourceDateIso = form.eventDateTime.toISOString();
+
+    const drafts = reminders
+      .map((reminder): SpecialDateEvent | null => {
+        const parsed = reminder.dateTimeIso ? new Date(reminder.dateTimeIso) : null;
+        if (!parsed || !Number.isFinite(parsed.getTime())) {
+          return null;
+        }
+
+        return {
+          id: createEventId(),
+          title: title || 'Reminder',
+          people: peopleLabel,
+          eventDateTime: sourceDateIso,
+          reminderDateTime: parsed.toISOString(),
+          eventAllDay: form.eventAllDay,
+          reminderAllDay: false,
+          frequency: 'once' as ReminderFrequency,
+          notes: reminder.notes || '',
+          notified: false,
+        };
+      })
+      .filter((item): item is SpecialDateEvent => item !== null)
+      .sort((left, right) => new Date(left.reminderDateTime).getTime() - new Date(right.reminderDateTime).getTime());
+
+    if (!drafts.length) {
+      return false;
+    }
+
+    setPendingVariableReminders(drafts);
+    setSeededVariableDraftIds([]);
+    setHasTouchedStaticReminderSchedule(false);
+    setForm((current) => ({ ...current, reminderMode: 'variable' }));
+    return true;
+  };
+
   const submitVoiceEventText = async () => {
     const text = voiceTranscriptDraft.trim();
     if (!text) {
@@ -4579,13 +4622,29 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
     setIsParsingVoiceEvent(true);
     try {
-      const fields = await parseVoiceEventText(userId, text, new Date().toISOString(), effectiveReminderTimeZone);
-      if (!fields) {
-        Alert.alert('Unable to understand that', 'Please try again, or fill in the fields manually.');
-        return;
+      if (voiceModalMode === 'reminders') {
+        const reminders = await parseVoiceReminderText(
+          userId,
+          text,
+          form.eventDateTime.toISOString(),
+          form.eventAllDay,
+          new Date().toISOString(),
+          effectiveReminderTimeZone,
+        );
+        if (!reminders || !applyVoiceParsedRemindersToForm(reminders)) {
+          Alert.alert('Unable to understand that', 'Please try again, or add reminders manually.');
+          return;
+        }
+      } else {
+        const fields = await parseVoiceEventText(userId, text, new Date().toISOString(), effectiveReminderTimeZone);
+        if (!fields) {
+          Alert.alert('Unable to understand that', 'Please try again, or fill in the fields manually.');
+          return;
+        }
+
+        applyVoiceParsedFieldsToForm(fields);
       }
 
-      applyVoiceParsedFieldsToForm(fields);
       if (isVoiceRecording) {
         ExpoSpeechRecognitionModule.stop();
       }
@@ -7156,7 +7215,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           </View>
           <TouchableOpacity
             style={styles.voiceMicButton}
-            onPress={openVoiceEventModal}
+            onPress={() => openVoiceEventModal('event')}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             activeOpacity={0.7}
           >
@@ -7636,7 +7695,17 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
       {currentView === 'create-reminders' ? (
       <View style={styles.card}>
-        <Text style={styles.label}>Reminder Creation Mode</Text>
+        <View style={styles.eventTypeHeaderRow}>
+          <Text style={styles.label}>Reminder Creation Mode</Text>
+          <TouchableOpacity
+            style={styles.voiceMicButton}
+            onPress={() => openVoiceEventModal('reminders')}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.voiceMicButtonIcon}>🎤</Text>
+          </TouchableOpacity>
+        </View>
         <View style={styles.reminderModeScrollContainer}>
           <ScrollView
             horizontal
@@ -8549,10 +8618,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     <Modal transparent visible={isVoiceEventModalVisible} animationType="fade" onRequestClose={closeVoiceEventModal}>
       <View style={styles.modalOverlay}>
         <View style={styles.modalCard}>
-          <Text style={styles.savedEventDetailsTitle}>Create by voice</Text>
+          <Text style={styles.savedEventDetailsTitle}>{voiceModalMode === 'reminders' ? 'Reminders by voice' : 'Create by voice'}</Text>
           <Text style={styles.helperText}>
-            Describe the event you want to schedule — what it is, who it's for, and when and where it's happening.
-            Whatever you don't mention can be filled in afterward.
+            {voiceModalMode === 'reminders'
+              ? "Describe when you want to be reminded — e.g. \"the day before at 6pm and the morning of at 9am.\" Relative times are resolved against this event's date."
+              : "Describe the event you want to schedule — what it is, who it's for, and when and where it's happening. Whatever you don't mention can be filled in afterward."}
           </Text>
 
           <TextInput

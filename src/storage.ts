@@ -1226,6 +1226,31 @@ export async function parseVoiceEventText(
   }
 }
 
+export interface VoiceParsedReminder {
+  dateTimeIso?: string;
+  notes?: string;
+}
+
+export async function parseVoiceReminderText(
+  userId: string,
+  text: string,
+  eventDateTimeIso: string,
+  eventAllDay: boolean,
+  nowIso: string,
+  timeZone: string,
+): Promise<VoiceParsedReminder[] | null> {
+  try {
+    const response = await apiRequest<{ success: boolean; reminders: VoiceParsedReminder[] }>('/nlp/parse-reminders', {
+      method: 'POST',
+      body: JSON.stringify({ userId, text, eventDateTimeIso, eventAllDay, nowIso, timeZone }),
+    });
+    return Array.isArray(response.reminders) ? response.reminders : [];
+  } catch (error) {
+    console.warn('Parsing voice reminder text failed', error);
+    return null;
+  }
+}
+
 export interface RsvpSummaryEntry {
   id: string;
   firstName?: string;
