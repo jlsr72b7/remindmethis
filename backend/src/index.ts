@@ -296,6 +296,7 @@ const EXTRACT_EVENT_TOOL = {
       locationCity: { type: 'string' },
       locationState: { type: 'string', description: 'Two-letter US state code — infer this from the venue/city if not stated explicitly.' },
       locationZip: { type: 'string', description: "Best-effort ZIP code for the venue/city, using general knowledge if not stated explicitly." },
+      locationPhone: { type: 'string', description: "Best-effort phone number for the venue, using general knowledge of that real place if not stated explicitly." },
       notes: {
         type: 'string',
         description: "Any other relevant detail from the text that doesn't fit the fields above.",
@@ -3716,7 +3717,7 @@ app.post('/nlp/parse-event', async (req, res) => {
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
-        system: `You extract structured event/reminder details from a person's freeform, spoken-then-transcribed description of something they want to schedule. The current date/time is ${referenceDate.toISOString()} in the ${referenceTimeZone} time zone — resolve relative dates ("next Tuesday", "tomorrow", "in two weeks") against that. Call the extract_event_details tool exactly once with only the fields you can confidently determine from the text. Omit any field you can't determine — never guess or invent a value, with one exception: for the location address fields (locationLine1/locationCity/locationState/locationZip), if a venue/place name and a city or town were both mentioned but no exact street address was given, use your best general knowledge of that real place to fill in its actual address as a best effort rather than leaving it blank.`,
+        system: `You extract structured event/reminder details from a person's freeform, spoken-then-transcribed description of something they want to schedule. The current date/time is ${referenceDate.toISOString()} in the ${referenceTimeZone} time zone — resolve relative dates ("next Tuesday", "tomorrow", "in two weeks") against that. Call the extract_event_details tool exactly once with only the fields you can confidently determine from the text. Omit any field you can't determine — never guess or invent a value, with one exception: for the location fields (locationLine1/locationCity/locationState/locationZip/locationPhone), if a venue/place name and a city or town were both mentioned but the address and/or phone number weren't stated explicitly, use your best general knowledge of that real place to fill them in as a best effort rather than leaving them blank.`,
         messages: [
           { role: 'user', content: trimmedText },
         ],

@@ -4561,6 +4561,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           ...(fields.locationCity ? { eventLocationCity: fields.locationCity } : {}),
           ...(fields.locationState ? { eventLocationState: normalizeStateCode(fields.locationState) } : {}),
           ...(fields.locationZip ? { eventLocationZip: fields.locationZip } : {}),
+          ...(fields.locationPhone ? { eventLocationPhone: formatPhoneNumberInput(fields.locationPhone) } : {}),
         } : {}),
       };
     });

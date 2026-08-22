@@ -1204,6 +1204,7 @@ export interface VoiceParsedEventFields {
   locationCity?: string;
   locationState?: string;
   locationZip?: string;
+  locationPhone?: string;
   notes?: string;
 }
 
