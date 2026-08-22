@@ -8536,6 +8536,26 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 }) : (
                   <Text style={styles.helperText}>No current reminders.</Text>
                 )}
+                {reminderEntries.length && reminderPages.length > 1 ? (
+                  Array.from({ length: Math.max(0, REMINDERS_MODAL_PAGE_SIZE - currentReminderPageItems.length) }).map((_, index) => (
+                    <View
+                      key={`reminder-placeholder-${index}`}
+                      style={[styles.savedReminderItemCard, styles.savedReminderItemPlaceholderHidden]}
+                      pointerEvents="none"
+                    >
+                      <View style={styles.savedReminderDeleteButton}>
+                        <Text style={styles.savedReminderDeleteButtonText}>Delete</Text>
+                      </View>
+                      <View style={styles.savedReminderItemHeader}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.savedReminderItemTitle}>Placeholder</Text>
+                          <Text style={styles.savedReminderItemSubtext}>Placeholder</Text>
+                          <Text style={styles.savedReminderItemSubtext}>Placeholder</Text>
+                        </View>
+                      </View>
+                    </View>
+                  ))
+                ) : null}
 
                 {reminderPages.length > 1 ? (
                   <View style={[styles.summaryPaginationRow, styles.reminderModalPaginationRow]}>
@@ -10028,6 +10048,9 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     minWidth: 136,
+  },
+  savedReminderItemPlaceholderHidden: {
+    opacity: 0,
   },
   savedReminderDeleteButtonText: {
     color: colors.dangerPressed,
