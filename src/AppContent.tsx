@@ -6462,7 +6462,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           style={[styles.toggleButton, styles.viewControlsCompactButton]}
           onPress={openNewEventEditor}
         >
-          <Text style={styles.toggleButtonIcon}>➕</Text>
+          {/* A plain "+" glyph (not the ➕ emoji) so it actually respects the white color below —
+              emoji render as fixed-color bitmap glyphs and stayed dark/near-invisible in dark mode. */}
+          <Text style={[styles.toggleButtonIcon, styles.createEventPlusIcon]}>+</Text>
         </TooltipButton>
         <TooltipButton
           label={savedEventsView === 'calendar' ? 'List View' : 'Calendar View'}
@@ -8894,6 +8896,10 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
   toggleButtonIcon: {
     fontSize: 20,
     textAlign: 'center',
+  },
+  createEventPlusIcon: {
+    color: colors.textPrimary,
+    fontWeight: '800',
   },
   viewControlsRow: {
     flexDirection: 'row',
