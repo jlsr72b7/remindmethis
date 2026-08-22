@@ -6,6 +6,7 @@ import {
   Button,
   Dimensions,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -2179,6 +2180,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [isSendingShareText, setIsSendingShareText] = useState(false);
   const [isShareTextAvailable, setIsShareTextAvailable] = useState(false);
   const [isRsvpDatePickerVisible, setIsRsvpDatePickerVisible] = useState(false);
+  const [isConfirmingRsvpByDate, setIsConfirmingRsvpByDate] = useState(false);
   const [rsvpByDateDraft, setRsvpByDateDraft] = useState<Date>(new Date());
   const [rsvpPickerMonth, setRsvpPickerMonth] = useState<Date>(new Date());
   const [rsvpSummaries, setRsvpSummaries] = useState<Record<string, RsvpSummaryResult>>({});
@@ -4881,6 +4883,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   };
 
   const openRsvpByDatePicker = (event: SpecialDateEvent) => {
+    // This screen has no text inputs of its own, but a keyboard left open from whatever the
+    // user was doing just before (e.g. typing in the create-event Notes field) can still be
+    // showing and cover the calendar when this modal appears on top of it.
+    Keyboard.dismiss();
     setSharingEvent(event);
     const defaultDraft = new Date();
     defaultDraft.setHours(0, 0, 0, 0);
@@ -4928,13 +4934,18 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   };
 
   const confirmRsvpByDate = async () => {
-    if (!sharingEvent) {
+    if (!sharingEvent || isConfirmingRsvpByDate) {
       return;
     }
 
-    const savedEvent = await setEventRsvpSettings(sharingEvent.id, true, rsvpByDateDraft.toISOString());
-    setIsRsvpDatePickerVisible(false);
-    beginShareFlowForEvent(savedEvent || { ...sharingEvent, rsvpEnabled: true, rsvpByDate: rsvpByDateDraft.toISOString() });
+    setIsConfirmingRsvpByDate(true);
+    try {
+      const savedEvent = await setEventRsvpSettings(sharingEvent.id, true, rsvpByDateDraft.toISOString());
+      setIsRsvpDatePickerVisible(false);
+      beginShareFlowForEvent(savedEvent || { ...sharingEvent, rsvpEnabled: true, rsvpByDate: rsvpByDateDraft.toISOString() });
+    } finally {
+      setIsConfirmingRsvpByDate(false);
+    }
   };
 
   const loadRsvpSummaryForEvent = async (eventId: string) => {
@@ -8380,11 +8391,19 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           </View>
 
           <View style={styles.savedEventDetailsActionRow}>
-            <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={closeRsvpDatePicker}>
+            <TouchableOpacity
+              style={styles.savedEventDetailActionPill}
+              onPress={closeRsvpDatePicker}
+              disabled={isConfirmingRsvpByDate}
+            >
               <Text style={styles.savedEventDetailActionText}>Cancel</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.savedEventDetailActionPill} onPress={() => void confirmRsvpByDate()}>
-              <Text style={styles.savedEventDetailActionText}>Confirm</Text>
+            <TouchableOpacity
+              style={styles.savedEventDetailActionPill}
+              onPress={() => void confirmRsvpByDate()}
+              disabled={isConfirmingRsvpByDate}
+            >
+              <Text style={styles.savedEventDetailActionText}>{isConfirmingRsvpByDate ? 'Confirming…' : 'Confirm'}</Text>
             </TouchableOpacity>
           </View>
         </View>
