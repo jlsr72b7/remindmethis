@@ -4323,6 +4323,7 @@ app.get('/rsvp/:eventId', async (req, res) => {
 // is a best-effort background sync, not something that should ever block a guest's RSVP.
 const syncRsvpContactAndGroup = async (options: {
   ownerUserId: string;
+  eventId: string;
   eventTitle: string;
   eventPeople: string;
   firstName: string;
@@ -4347,6 +4348,18 @@ const syncRsvpContactAndGroup = async (options: {
       const entryEmail = normalizeEmailForComparison(String(entry?.email || ''));
       const entryPhone = normalizePhoneNumberForComparison(String(entry?.mobileNumber || ''));
       return (normalizedEmail && entryEmail === normalizedEmail) || (normalizedPhone && entryPhone === normalizedPhone);
+    });
+
+    console.log('syncRsvpContactAndGroup', {
+      eventId: options.eventId,
+      submittedFirstName: options.firstName,
+      submittedLastName: options.lastName,
+      submittedEmail: options.email,
+      submittedPhone: options.phone,
+      matchedExistingContactId: contact ? String(contact.id) : null,
+      matchedExistingContactFirstName: contact ? contact.firstName : null,
+      matchedExistingContactLastName: contact ? contact.lastName : null,
+      totalContactsInSnapshot: contacts.length,
     });
 
     if (!contact) {
@@ -4384,7 +4397,11 @@ const syncRsvpContactAndGroup = async (options: {
     }
 
     const groupName = `${options.eventTitle} • ${options.eventPeople}`.trim().slice(0, 120);
-    let group = groups.find((entry) => String(entry?.name || '').trim().toLowerCase() === groupName.toLowerCase());
+    let group = groups.find((entry) => (
+      entry?.sourceEventId
+        ? String(entry.sourceEventId) === options.eventId
+        : String(entry?.name || '').trim().toLowerCase() === groupName.toLowerCase()
+    ));
 
     if (!group) {
       group = {
@@ -4393,8 +4410,11 @@ const syncRsvpContactAndGroup = async (options: {
         description: `Guests for ${options.eventTitle}`,
         contactIds: [],
         createdAt: nowIso,
+        sourceEventId: options.eventId,
       };
       groups.push(group);
+    } else {
+      group.sourceEventId = options.eventId;
     }
 
     const contactId = String(contact.id);
@@ -4417,6 +4437,16 @@ const syncRsvpContactAndGroup = async (options: {
       groups,
       updatedAt: nowIso,
     };
+
+    console.log('syncRsvpContactAndGroup writing snapshot', {
+      eventId: options.eventId,
+      contactId,
+      finalFirstName: contact.firstName,
+      finalLastName: contact.lastName,
+      finalEmail: contact.email,
+      finalMobileNumber: contact.mobileNumber,
+      groupId: String(group.id),
+    });
 
     await prisma.userContactsSnapshot.upsert({
       where: { userId: options.ownerUserId },
@@ -4527,6 +4557,7 @@ app.post('/rsvp/:eventId', async (req, res) => {
 
     await syncRsvpContactAndGroup({
       ownerUserId: event.userId,
+      eventId,
       eventTitle: event.title,
       eventPeople: event.people,
       firstName,
