@@ -8445,6 +8445,13 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         <View style={[styles.modalCard, styles.savedEventDetailsCard]}>
           <Text style={styles.savedEventDetailsTitle}>RSVPs • {rsvpManagerEvent.title}</Text>
 
+          <View style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: getEventSummaryColor(rsvpManagerEvent) }]}>
+            {renderEventSummaryIcon(rsvpManagerEvent)}
+            <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
+              {formatEventDateOnly(rsvpManagerEvent)} ({formatEventCountdownLabel(rsvpManagerEvent)}) • {rsvpManagerEvent.title} • {rsvpManagerEvent.people}{formatEventSummaryRowTimeSuffix(rsvpManagerEvent)}
+            </Text>
+          </View>
+
           <ScrollView style={{ maxHeight: 380 }}>
             <Text style={styles.label}>Yes ({rsvpManagerSummary?.yes.length ?? 0})</Text>
             {rsvpManagerSummary?.yes.length ? (
