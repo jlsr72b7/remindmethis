@@ -1153,6 +1153,8 @@ interface AccountScreenProps {
   onDeleteAccount: () => void;
   onReminderTimeZoneUpdated: (timeZone: string) => void;
   initialAccountAction?: 'contacts' | 'calendar-sync' | null;
+  initialGroupIdToRename?: string | null;
+  onInitialGroupRenameHandled?: () => void;
   returnToLanding?: boolean;
   onInitialActionHandled?: () => void;
   onBackToLanding?: () => void;
@@ -1240,6 +1242,8 @@ function AccountScreen({
   onDeleteAccount,
   onReminderTimeZoneUpdated,
   initialAccountAction,
+  initialGroupIdToRename,
+  onInitialGroupRenameHandled,
   returnToLanding,
   onInitialActionHandled,
   onBackToLanding,
@@ -4295,6 +4299,19 @@ function AccountScreen({
     await loadContacts();
   };
 
+  const handleOpenGroupForRename = async (groupId: string) => {
+    setNewGroupName('');
+    setNewGroupDescription('');
+    setContactsMessage(null);
+    resetContactEditor();
+    setShowContactsModal(true);
+    setContactsBackupTickerVersion((value) => value + 1);
+    await loadContacts();
+    setActiveContactsView('groups');
+    setSelectedGroupId(groupId);
+    setGroupsDisplayMode('manage');
+  };
+
   const closeContactsPanel = () => {
     setShowCreateGroupModal(false);
     setShowContactsModal(false);
@@ -4384,6 +4401,15 @@ function AccountScreen({
 
     onInitialActionHandled?.();
   }, [initialAccountAction, onInitialActionHandled]);
+
+  useEffect(() => {
+    if (!initialGroupIdToRename) {
+      return;
+    }
+
+    void handleOpenGroupForRename(initialGroupIdToRename);
+    onInitialGroupRenameHandled?.();
+  }, [initialGroupIdToRename, onInitialGroupRenameHandled]);
 
   useEffect(() => {
     if (!showContactsModal) {
@@ -6343,6 +6369,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState<StoredUser | null>(null);
   const [showAccount, setShowAccount] = useState(false);
   const [requestedAccountAction, setRequestedAccountAction] = useState<'contacts' | 'calendar-sync' | null>(null);
+  const [requestedGroupIdToRename, setRequestedGroupIdToRename] = useState<string | null>(null);
   const [shouldReturnToLandingFromAccount, setShouldReturnToLandingFromAccount] = useState(false);
   const [isMigratingData, setIsMigratingData] = useState(false);
   const [isRestoringSession, setIsRestoringSession] = useState(true);
@@ -6788,6 +6815,8 @@ function App() {
         onUserUpdated={(user) => setCurrentUser(user)}
         onReminderTimeZoneUpdated={setAccountReminderTimeZone}
         initialAccountAction={requestedAccountAction}
+        initialGroupIdToRename={requestedGroupIdToRename}
+        onInitialGroupRenameHandled={() => setRequestedGroupIdToRename(null)}
         returnToLanding={shouldReturnToLandingFromAccount}
         onInitialActionHandled={() => undefined}
         onBackToLanding={() => {
@@ -6838,6 +6867,10 @@ function App() {
           defaultReminderTimeZone={accountReminderTimeZone}
           pendingBirthdayImports={pendingBirthdayImports}
           onBirthdayImportsProcessed={() => setPendingBirthdayImports([])}
+          onRequestGroupRename={(groupId) => {
+            setRequestedGroupIdToRename(groupId);
+            setShowAccount(true);
+          }}
         />
       </View>
     );

@@ -1915,6 +1915,7 @@ interface AppContentProps {
   defaultReminderTimeZone?: string;
   pendingBirthdayImports?: ContactBirthdayImport[];
   onBirthdayImportsProcessed?: () => void;
+  onRequestGroupRename?: (groupId: string) => void;
 }
 
 interface ShareContact {
@@ -2080,7 +2081,7 @@ const normalizeSavedEventLocationsSnapshot = (raw: string | null): SavedEventLoc
   }
 };
 
-export default function AppContent({ userId, userEmail, defaultReminderTimeZone, pendingBirthdayImports, onBirthdayImportsProcessed }: AppContentProps) {
+export default function AppContent({ userId, userEmail, defaultReminderTimeZone, pendingBirthdayImports, onBirthdayImportsProcessed, onRequestGroupRename }: AppContentProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createAppContentStyles(colors), [colors]);
   const { height: windowHeight } = useWindowDimensions();
@@ -2183,6 +2184,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [rsvpSummaries, setRsvpSummaries] = useState<Record<string, RsvpSummaryResult>>({});
   const [rsvpManagerEventId, setRsvpManagerEventId] = useState<string | null>(null);
   const [sendingRsvpReminderId, setSendingRsvpReminderId] = useState<string | null>(null);
+  const [pendingRsvpGroupPrompt, setPendingRsvpGroupPrompt] = useState<{ groupId: string; groupName: string } | null>(null);
   const [hasInitializedReminderScheduleView, setHasInitializedReminderScheduleView] = useState(false);
   const [pendingShareInvites, setPendingShareInvites] = useState<PendingShareInvite[]>([]);
   const [activeShareInvite, setActiveShareInvite] = useState<PendingShareInvite | null>(null);
@@ -2663,9 +2665,14 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
       const groupName = `${event.title} • ${event.people}`.trim().slice(0, 120);
       const nextGroups = [...groups];
-      const existingGroupIndex = nextGroups.findIndex(
-        (entry) => String(entry?.name || '').trim().toLowerCase() === groupName.toLowerCase(),
-      );
+      // Prefer matching by sourceEventId (set on groups created from here on) so a later rename
+      // still resolves correctly; fall back to matching by name for groups created before this
+      // field existed.
+      const existingGroupIndex = nextGroups.findIndex((entry) => (
+        entry?.sourceEventId
+          ? String(entry.sourceEventId) === event.id
+          : String(entry?.name || '').trim().toLowerCase() === groupName.toLowerCase()
+      ));
 
       let groupId: string;
       if (existingGroupIndex >= 0) {
@@ -2674,7 +2681,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           ...(Array.isArray(existingGroup.contactIds) ? existingGroup.contactIds : []),
           ...resolvedContactIds,
         ]));
-        nextGroups[existingGroupIndex] = { ...existingGroup, contactIds: mergedContactIds };
+        nextGroups[existingGroupIndex] = { ...existingGroup, contactIds: mergedContactIds, sourceEventId: event.id };
         groupId = String(existingGroup.id);
       } else {
         groupId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2684,6 +2691,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           description: `Guests for ${event.title}`,
           contactIds: resolvedContactIds,
           createdAt: nowIso,
+          sourceEventId: event.id,
         });
       }
 
@@ -2722,6 +2730,118 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     } catch (error) {
       console.warn('Unable to create or update RSVP share group', error);
     }
+  };
+
+  const loadRawContactsSnapshot = async () => {
+    let contacts: Array<Record<string, any>> = [];
+    let groups: Array<Record<string, any>> = [];
+    let ownerUserId: string | undefined;
+    let ownerEmail: string | undefined;
+    let schemaVersion: number | undefined;
+
+    if (!userId) {
+      return { contacts, groups, ownerUserId, ownerEmail, schemaVersion };
+    }
+
+    if (isApiStorageEnabled()) {
+      const remote = await loadUserContactsSnapshot(userId);
+      const remoteSnapshot = remote?.snapshot as Record<string, any> | null | undefined;
+      if (remoteSnapshot && typeof remoteSnapshot === 'object') {
+        contacts = Array.isArray(remoteSnapshot.contacts) ? remoteSnapshot.contacts : [];
+        groups = Array.isArray(remoteSnapshot.groups) ? remoteSnapshot.groups : [];
+        ownerUserId = remoteSnapshot.ownerUserId;
+        ownerEmail = remoteSnapshot.ownerEmail;
+        schemaVersion = remoteSnapshot.schemaVersion;
+      }
+    }
+
+    if (!contacts.length && !groups.length) {
+      const rawLocal = await AsyncStorage.getItem(getContactsStorageKey(userId));
+      if (rawLocal) {
+        try {
+          const parsedLocal = JSON.parse(rawLocal);
+          contacts = Array.isArray(parsedLocal?.contacts)
+            ? parsedLocal.contacts
+            : Array.isArray(parsedLocal)
+              ? parsedLocal
+              : [];
+          groups = Array.isArray(parsedLocal?.groups) ? parsedLocal.groups : [];
+          ownerUserId = parsedLocal?.ownerUserId;
+          ownerEmail = parsedLocal?.ownerEmail;
+          schemaVersion = parsedLocal?.schemaVersion;
+        } catch (error) {
+          console.warn('Unable to parse local contacts snapshot', error);
+        }
+      }
+    }
+
+    return { contacts, groups, ownerUserId, ownerEmail, schemaVersion };
+  };
+
+  const persistRawContactsSnapshot = async (snapshot: {
+    contacts: Array<Record<string, any>>;
+    groups: Array<Record<string, any>>;
+    ownerUserId?: string;
+    ownerEmail?: string;
+    schemaVersion?: number;
+  }) => {
+    if (!userId) {
+      return;
+    }
+
+    const payload = {
+      contacts: snapshot.contacts,
+      groups: snapshot.groups,
+      ownerUserId: snapshot.ownerUserId || userId,
+      ownerEmail: snapshot.ownerEmail || userEmail?.trim().toLowerCase() || '',
+      schemaVersion: snapshot.schemaVersion || 2,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await AsyncStorage.setItem(getContactsStorageKey(userId), JSON.stringify(payload));
+
+    if (isApiStorageEnabled()) {
+      const saveResult = await saveUserContactsSnapshot(userId, payload);
+      if (!saveResult.success) {
+        console.warn('Unable to save contacts snapshot to backend', saveResult.error);
+      }
+    }
+
+    const normalized = normalizeShareContactsSnapshot(JSON.stringify(payload));
+    setShareContacts(normalized.contacts);
+    setShareGroups(normalized.groups);
+  };
+
+  // Groups created for an event's RSVP carry sourceEventId going forward; older ones (created
+  // before that field existed) are matched by the same "<title> • <people>" name they were
+  // given at creation.
+  const findRsvpGroupForEvent = async (event: SpecialDateEvent): Promise<{ id: string; name: string } | null> => {
+    const snapshot = await loadRawContactsSnapshot();
+    const groupName = `${event.title} • ${event.people}`.trim().toLowerCase();
+    const match = snapshot.groups.find((entry) => (
+      entry?.sourceEventId
+        ? String(entry.sourceEventId) === event.id
+        : String(entry?.name || '').trim().toLowerCase() === groupName
+    ));
+    return match ? { id: String(match.id), name: String(match.name || '') } : null;
+  };
+
+  const deleteRsvpGroup = async (groupId: string) => {
+    const snapshot = await loadRawContactsSnapshot();
+    const nextGroups = snapshot.groups.filter((entry) => String(entry?.id || '') !== groupId);
+    const nextContacts = snapshot.contacts.map((entry) => {
+      const groupIds = Array.isArray(entry?.groupIds) ? entry.groupIds : [];
+      if (!groupIds.includes(groupId)) {
+        return entry;
+      }
+      return {
+        ...entry,
+        groupIds: groupIds.filter((id: string) => id !== groupId),
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    await persistRawContactsSnapshot({ ...snapshot, contacts: nextContacts, groups: nextGroups });
   };
 
   const pickDeviceContactForShare = useCallback(async () => {
@@ -4036,12 +4156,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   };
 
   const deleteReminderEvent = async (eventId: string) => {
+    const eventToDelete = events.find((event) => event.id === eventId);
     const updated = events.filter((event) => event.id !== eventId);
     setEvents(updated);
     await saveEvents(updated, userId);
     // Deleting the Event row cascades (at the database level) to its EventReminders and, if
     // it had RSVPs enabled, its RsvpInvite/RsvpResponse rows too — nothing further to clean up
-    // server-side, just the ephemeral client-side cache/state referencing this event.
+    // server-side, just the ephemeral client-side cache/state referencing this event. The
+    // event's contacts group (if any) is intentionally left alone here — see the Keep/Rename/
+    // Delete prompt below, since deleting it silently isn't wanted.
     setRsvpSummaries((current) => {
       if (!(eventId in current)) {
         return current;
@@ -4057,7 +4180,18 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setEvents(reloaded);
     setActiveReminder(null);
     setConfirmDeleteReminder(null);
-    Alert.alert('Removed', 'The event and all associated reminders and RSVP data have been removed.');
+
+    const associatedGroup = eventToDelete?.rsvpEnabled ? await findRsvpGroupForEvent(eventToDelete) : null;
+    Alert.alert('Removed', 'The event and all associated reminders and RSVP data have been removed.', [
+      {
+        text: 'OK',
+        onPress: () => {
+          if (associatedGroup) {
+            setPendingRsvpGroupPrompt({ groupId: associatedGroup.id, groupName: associatedGroup.name });
+          }
+        },
+      },
+    ]);
   };
 
   const deleteAllRemindersForEvent = async (eventId: string) => {
@@ -4139,6 +4273,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   };
 
   const cancelEvent = async (eventId: string) => {
+    const eventToCancel = events.find((event) => event.id === eventId);
     const updated = events.filter((event) => event.id !== eventId);
     setEvents(updated);
     await saveEvents(updated, userId);
@@ -4156,7 +4291,18 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     const reloaded = await loadEvents(userId);
     setEvents(reloaded);
     setConfirmCancelEventId(null);
-    Alert.alert('Deleted', 'The event and all associated reminders and RSVP data have been removed.');
+
+    const associatedGroup = eventToCancel?.rsvpEnabled ? await findRsvpGroupForEvent(eventToCancel) : null;
+    Alert.alert('Deleted', 'The event and all associated reminders and RSVP data have been removed.', [
+      {
+        text: 'OK',
+        onPress: () => {
+          if (associatedGroup) {
+            setPendingRsvpGroupPrompt({ groupId: associatedGroup.id, groupName: associatedGroup.name });
+          }
+        },
+      },
+    ]);
   };
 
   const formatEventSummary = (event: SpecialDateEvent) => {
@@ -8311,6 +8457,51 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     </Modal>
   ) : null;
 
+  const rsvpGroupPromptModal = pendingRsvpGroupPrompt ? (
+    <Modal transparent visible={Boolean(pendingRsvpGroupPrompt)} animationType="fade" onRequestClose={() => setPendingRsvpGroupPrompt(null)}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <Text style={styles.savedEventDetailsTitle}>Keep the "{pendingRsvpGroupPrompt.groupName}" group?</Text>
+          <Text style={styles.helperText}>
+            This event had a contacts group created for its RSVPs. Deleting the event doesn't delete the group automatically — choose what to do with it.
+          </Text>
+
+          <TouchableOpacity
+            style={[styles.floatingActionButton, styles.floatingActionPrimaryButton, { marginTop: 14 }]}
+            onPress={() => setPendingRsvpGroupPrompt(null)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.floatingActionPrimaryText}>Keep</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.floatingActionButton, styles.floatingActionSecondaryButton, { marginTop: 10 }]}
+            onPress={() => {
+              const groupId = pendingRsvpGroupPrompt.groupId;
+              setPendingRsvpGroupPrompt(null);
+              onRequestGroupRename?.(groupId);
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.floatingActionSecondaryText}>Rename</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.floatingActionButton, styles.savedEventDetailActionPillDanger, { marginTop: 10 }]}
+            onPress={() => {
+              const groupId = pendingRsvpGroupPrompt.groupId;
+              setPendingRsvpGroupPrompt(null);
+              void deleteRsvpGroup(groupId);
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.savedEventDetailActionTextDanger}>Delete</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  ) : null;
+
   return (
     <>
       {currentView === 'share' ? renderShareView() : currentView === 'manage-events' ? renderManageEventsView() : currentView === 'manage-reminders' ? renderManageRemindersView() : renderCreateView()}
@@ -8319,6 +8510,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       {confirmDeleteModal}
       {rsvpDatePickerModal}
       {rsvpManagerModal}
+      {rsvpGroupPromptModal}
       <TimePickerModal
         visible={activeTimePicker !== null}
         title={activeTimePicker?.title || 'Pick time'}
