@@ -7265,13 +7265,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         ) : null}
 
         <View style={styles.floatingActionStripWrap}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.floatingActionStripContent}
-            snapToInterval={170}
-            decelerationRate="fast"
-          >
+          <View style={styles.floatingActionStripContent}>
             <TouchableOpacity
               activeOpacity={0.8}
               style={[styles.floatingActionButton, styles.floatingActionSecondaryButton]}
@@ -7287,7 +7281,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             >
               <Text style={styles.floatingActionPrimaryText}>Save</Text>
             </TouchableOpacity>
-          </ScrollView>
+          </View>
         </View>
       </View>
       ) : null}
@@ -7689,13 +7683,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         ) : null}
 
         <View style={styles.floatingActionStripWrap}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.floatingActionStripContent}
-            snapToInterval={170}
-            decelerationRate="fast"
-          >
+          <View style={styles.floatingActionStripContent}>
             <TouchableOpacity
               activeOpacity={0.8}
               style={[styles.floatingActionButton, styles.floatingActionSecondaryButton, isSavingEvent && styles.actionButtonDisabled]}
@@ -7719,7 +7707,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             >
               <Text style={styles.floatingActionPrimaryText}>{isSavingEvent ? 'Saving…' : 'Save'}</Text>
             </TouchableOpacity>
-          </ScrollView>
+          </View>
         </View>
       </View>
       ) : null}
@@ -9099,6 +9087,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     overflow: 'visible',
   },
   floatingActionStripContent: {
+    flexDirection: 'row',
     paddingHorizontal: 8,
     paddingRight: 28,
     alignItems: 'center',
