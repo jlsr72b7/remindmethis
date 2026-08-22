@@ -7965,13 +7965,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       </View>
 
       <View style={styles.floatingActionStripWrap}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.floatingActionStripContent}
-          snapToInterval={170}
-          decelerationRate="fast"
-        >
+        <View style={styles.floatingActionStripContent}>
           <TouchableOpacity
             activeOpacity={0.8}
             style={[styles.floatingActionButton, styles.floatingActionSecondaryButton, isSendingShare && styles.actionButtonDisabled]}
@@ -8000,7 +7994,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
               <Text style={styles.floatingActionSecondaryText}>{isSendingShareText ? 'Opening…' : 'Share via Text'}</Text>
             </TouchableOpacity>
           ) : null}
-        </ScrollView>
+        </View>
       </View>
     </ScrollView>
     </KeyboardAvoidingView>
@@ -9088,6 +9082,7 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   floatingActionStripContent: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     paddingHorizontal: 8,
     paddingRight: 28,
     alignItems: 'center',
