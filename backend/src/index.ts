@@ -278,7 +278,11 @@ const EXTRACT_EVENT_TOOL = {
       },
       eventDateTimeIso: {
         type: 'string',
-        description: 'Best-guess ISO 8601 date-time (include the UTC offset) for when the event occurs, resolved relative to the current date/time given.',
+        description: 'Best-guess ISO 8601 date-time (include the UTC offset) for when the event starts, resolved relative to the current date/time given.',
+      },
+      eventEndDateTimeIso: {
+        type: 'string',
+        description: 'Best-guess ISO 8601 end date-time (include the UTC offset), only if an explicit end time or duration was mentioned (e.g. "from 2 to 4pm", "until 6", "for two hours"). Omit entirely if no end time was mentioned — do not infer a default duration.',
       },
       eventAllDay: {
         type: 'boolean',

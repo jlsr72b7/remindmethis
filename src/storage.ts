@@ -1197,6 +1197,7 @@ export interface VoiceParsedEventFields {
   workSubtype?: string;
   people?: string;
   eventDateTimeIso?: string;
+  eventEndDateTimeIso?: string;
   eventAllDay?: boolean;
   locationName?: string;
   locationLine1?: string;

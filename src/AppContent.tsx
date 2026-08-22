@@ -4488,6 +4488,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       ExpoSpeechRecognitionModule.stop();
     }
     setIsVoiceRecording(false);
+    setVoiceTranscriptDraft('');
     setIsVoiceEventModalVisible(false);
   };
 
@@ -4535,6 +4536,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
     const parsedDate = fields.eventDateTimeIso ? new Date(fields.eventDateTimeIso) : null;
     const hasValidDate = Boolean(parsedDate && Number.isFinite(parsedDate.getTime()));
+    const parsedEndDate = fields.eventEndDateTimeIso ? new Date(fields.eventEndDateTimeIso) : null;
+    const hasValidEndDate = Boolean(parsedEndDate && Number.isFinite(parsedEndDate.getTime()));
     const hasLocation = Boolean(fields.locationName || fields.locationLine1 || fields.locationCity || fields.locationState || fields.locationZip);
 
     setForm((current) => ({
@@ -4543,6 +4546,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       ...(fields.people ? { people: fields.people } : {}),
       ...(fields.notes ? { notes: fields.notes } : {}),
       ...(hasValidDate ? { eventDateTime: parsedDate as Date } : {}),
+      ...(hasValidEndDate ? { eventEndDateTime: parsedEndDate as Date } : {}),
       ...(typeof fields.eventAllDay === 'boolean' ? { eventAllDay: fields.eventAllDay } : {}),
       ...(hasLocation ? {
         eventLocationEnabled: true,
@@ -4574,6 +4578,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       }
 
       applyVoiceParsedFieldsToForm(fields);
+      if (isVoiceRecording) {
+        ExpoSpeechRecognitionModule.stop();
+      }
+      setIsVoiceRecording(false);
+      setVoiceTranscriptDraft('');
       setIsVoiceEventModalVisible(false);
     } finally {
       setIsParsingVoiceEvent(false);
