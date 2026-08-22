@@ -1151,22 +1151,6 @@ export async function sendShareEmailNotification(payload: {
   }
 }
 
-export async function sendShareSmsNotification(payload: {
-  recipientUserId: string;
-  body: string;
-}) {
-  try {
-    await apiRequest<{ success: boolean }>('/notifications/share-sms', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    return true;
-  } catch (error) {
-    console.warn('Share SMS notification failed', error);
-    return false;
-  }
-}
-
 export async function sendRsvpInvites(
   eventId: string,
   userId: string,
@@ -1181,6 +1165,25 @@ export async function sendRsvpInvites(
   } catch (error) {
     console.warn('Recording RSVP invites failed', error);
     return false;
+  }
+}
+
+export interface RsvpInviteRecord {
+  id: string;
+  label: string;
+  email?: string | null;
+  phone?: string | null;
+}
+
+export async function fetchRsvpInvites(eventId: string, userId: string): Promise<RsvpInviteRecord[]> {
+  try {
+    const response = await apiRequest<{ invites: RsvpInviteRecord[] }>(
+      `/events/${encodeURIComponent(eventId)}/rsvp-invites?userId=${encodeURIComponent(userId)}`,
+    );
+    return Array.isArray(response.invites) ? response.invites : [];
+  } catch (error) {
+    console.warn('Loading RSVP invites failed', error);
+    return [];
   }
 }
 

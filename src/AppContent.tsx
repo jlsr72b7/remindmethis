@@ -43,10 +43,10 @@ import {
   loadReminderSoundSettings,
   saveEvents,
   sendShareEmailNotification,
-  sendShareSmsNotification,
   sendReminderEmailNotification,
   sendReminderSmsNotification,
   sendRsvpInvites,
+  fetchRsvpInvites,
   fetchRsvpSummary,
   sendRsvpReminder,
   type RsvpSummaryResult,
@@ -2178,8 +2178,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [shareRecipients, setShareRecipients] = useState<ShareRecipient[]>([]);
   const [shareMessage, setShareMessage] = useState('');
   const [isSendingShare, setIsSendingShare] = useState(false);
-  const [isSendingShareText, setIsSendingShareText] = useState(false);
-  const [isShareTextAvailable, setIsShareTextAvailable] = useState(false);
   const [isRsvpDatePickerVisible, setIsRsvpDatePickerVisible] = useState(false);
   const [isConfirmingRsvpByDate, setIsConfirmingRsvpByDate] = useState(false);
   const [rsvpByDateDraft, setRsvpByDateDraft] = useState<Date>(new Date());
@@ -2432,30 +2430,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       setApiStorageStatusMessage('Google Calendar auto-sync failed. Use Google Sync in Calendar Sync settings to retry.');
     }
   }, [userId]);
-
-  useEffect(() => {
-    if (currentView !== 'share') {
-      setIsShareTextAvailable(false);
-      return;
-    }
-
-    let isActive = true;
-    SMS.isAvailableAsync()
-      .then((available) => {
-        if (isActive) {
-          setIsShareTextAvailable(available);
-        }
-      })
-      .catch(() => {
-        if (isActive) {
-          setIsShareTextAvailable(false);
-        }
-      });
-
-    return () => {
-      isActive = false;
-    };
-  }, [currentView]);
 
   useEffect(() => {
     if (!userId) {
@@ -5141,6 +5115,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     };
   };
 
+  const MAX_SHARE_TEXT_RECIPIENTS = 10;
+
   const handleSendShare = async () => {
     if (isSendingShare) {
       return;
@@ -5171,10 +5147,33 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     let launchedAnyChannel = false;
     const deliveryErrors: string[] = [];
     const successfulDeliveries: string[] = [];
+    const skippedAlreadyInvited: string[] = [];
     const inviteRecipients = new Set<string>();
     const shareDraftParts: string[] = [];
     const sentEmails = new Set<string>();
-    const sentPhones = new Set<string>();
+    const sentPhonesForTextBatch = new Set<string>();
+    const phoneNumbersToText: string[] = [];
+    const processedRecipients: ShareRecipient[] = [];
+
+    // If this event is already collecting RSVPs, whoever was already invited before shouldn't
+    // get a duplicate invite just because the owner added more people to the list — only the
+    // newly added recipients should actually receive anything this time.
+    let alreadyInvitedKeys = new Set<string>();
+    if (sharingEvent.rsvpEnabled && userId) {
+      const existingInvites = await fetchRsvpInvites(sharingEvent.id, userId);
+      alreadyInvitedKeys = new Set(
+        existingInvites.flatMap((invite) => {
+          const keys: string[] = [];
+          if (invite.email) {
+            keys.push(`email:${invite.email.trim().toLowerCase()}`);
+          }
+          if (invite.phone) {
+            keys.push(`phone:${invite.phone.replace(/\D/g, '').slice(0, 10)}`);
+          }
+          return keys;
+        }),
+      );
+    }
 
     for (const recipient of shareRecipients) {
       const normalizedEmail = recipient.email?.trim().toLowerCase() || '';
@@ -5186,15 +5185,24 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         continue;
       }
 
+      if (alreadyInvitedKeys.size) {
+        const emailKey = normalizedEmail ? `email:${normalizedEmail}` : null;
+        const phoneKey = normalizedRecipientPhone ? `phone:${normalizedRecipientPhone}` : null;
+        if ((emailKey && alreadyInvitedKeys.has(emailKey)) || (phoneKey && alreadyInvitedKeys.has(phoneKey))) {
+          skippedAlreadyInvited.push(recipient.label);
+          continue;
+        }
+      }
+
+      processedRecipients.push(recipient);
+
       let matchedRecipientUserId = '';
-      let matchedRecipientHasVerifiedPhone = false;
       let acceptLinkForKnownRecipient: string | undefined;
 
       if (normalizedEmail) {
         const matchedUser = await findUserByEmail(normalizedEmail);
         if (matchedUser?.id) {
           matchedRecipientUserId = matchedUser.id;
-          matchedRecipientHasVerifiedPhone = Boolean(matchedUser.mobileNumberVerified);
           acceptLinkForKnownRecipient = getAcceptLinkForCurrentPlatform(matchedUser.id, sharingEvent.id);
         }
       }
@@ -5203,7 +5211,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         const matchedByPhoneUser = await findUserByPhone(normalizedRecipientPhone);
         if (matchedByPhoneUser?.id) {
           matchedRecipientUserId = matchedByPhoneUser.id;
-          matchedRecipientHasVerifiedPhone = Boolean(matchedByPhoneUser.mobileNumberVerified);
           acceptLinkForKnownRecipient = getAcceptLinkForCurrentPlatform(matchedByPhoneUser.id, sharingEvent.id);
         }
       }
@@ -5221,9 +5228,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         launchedAnyChannel = true;
       }
 
-      // Even when the recipient already has an account, still send the email/text so they
-      // get an actual notification on their phone/inbox — the in-app invite popup alone is
-      // only visible if they happen to open the app while signed in.
+      // Even when the recipient already has an account, still send the email so they get an
+      // actual notification in their inbox — the in-app invite popup alone is only visible if
+      // they happen to open the app while signed in.
       let deliveredToRecipient = false;
 
       if (normalizedEmail && validateEmail(normalizedEmail)) {
@@ -5249,31 +5256,24 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         }
       }
 
-      // Text is only ever sent to a matched recipient whose own account already has a
-      // validated mobile number — never to an arbitrary phone number a sender types in.
-      // That keeps share SMS within the same consent boundary as reminder SMS.
-      if (matchedRecipientUserId && matchedRecipientHasVerifiedPhone && normalizedRecipientPhone) {
-        if (sentPhones.has(normalizedRecipientPhone)) {
+      // Texting happens once, below, for every recipient with a phone number at once (via the
+      // native Messages composer, never Twilio/the backend) rather than per-recipient here —
+      // expo-sms only supports handing off one shared message to a batch of numbers, not an
+      // automated individual send.
+      if (normalizedRecipientPhone && recipient.phone && !validatePhoneNumber(recipient.phone)) {
+        if (sentPhonesForTextBatch.has(normalizedRecipientPhone)) {
           deliveryErrors.push(`Skipped duplicate phone for ${recipient.label}.`);
+        } else if (phoneNumbersToText.length >= MAX_SHARE_TEXT_RECIPIENTS) {
+          deliveryErrors.push(`Skipped texting ${recipient.label}: text sharing supports up to ${MAX_SHARE_TEXT_RECIPIENTS} recipients at a time.`);
         } else {
-          sentPhones.add(normalizedRecipientPhone);
-          const smsSent = await sendShareSmsNotification({
-            recipientUserId: matchedRecipientUserId,
-            body: sharePayload.text,
-          });
-
-          if (smsSent) {
-            launchedAnyChannel = true;
-            deliveredToRecipient = true;
-            successfulDeliveries.push(`Text to ${recipient.label}`);
-          } else {
-            deliveryErrors.push(`Unable to send text to ${recipient.label}.`);
-          }
+          sentPhonesForTextBatch.add(normalizedRecipientPhone);
+          phoneNumbersToText.push(recipient.phone.trim());
+          deliveredToRecipient = true;
         }
       }
 
       if (!deliveredToRecipient && !matchedRecipientUserId) {
-        deliveryErrors.push(`Skipped ${recipient.label}: no app account match and no valid email or mobile phone was available.`);
+        deliveryErrors.push(`Skipped ${recipient.label}: no valid email or mobile phone was available.`);
       }
     }
 
@@ -5296,16 +5296,51 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     }
 
     if (sharingEvent.rsvpEnabled && userId) {
-      await sendRsvpInvites(
-        sharingEvent.id,
-        userId,
-        shareRecipients.map((recipient) => ({
-          label: recipient.label,
-          email: recipient.email || undefined,
-          phone: recipient.phone || undefined,
-        })),
-      );
+      if (processedRecipients.length) {
+        await sendRsvpInvites(
+          sharingEvent.id,
+          userId,
+          processedRecipients.map((recipient) => ({
+            label: recipient.label,
+            email: recipient.email || undefined,
+            phone: recipient.phone || undefined,
+          })),
+        );
+      }
       await createOrUpdateRsvpShareGroup(sharingEvent, shareRecipients);
+    }
+
+    if (!processedRecipients.length && skippedAlreadyInvited.length) {
+      setIsSendingShare(false);
+      Alert.alert('Already invited', 'Everyone in your list has already received an RSVP invite for this event — no new invites were sent.');
+      return;
+    }
+
+    // Hand off one native composer with everyone who has a phone number, after the per-
+    // recipient emails above. This can't carry per-recipient RSVP personalization (the composer
+    // only supports one shared message body across the whole batch), so it uses the plain,
+    // un-prefilled link.
+    if (phoneNumbersToText.length) {
+      try {
+        const isAvailable = await SMS.isAvailableAsync();
+        if (!isAvailable) {
+          deliveryErrors.push('Text messaging is not available on this device.');
+        } else {
+          const genericSharePayload = buildShareDetailsMessage(sharingEvent, senderName, shareMessage);
+          const { result } = await SMS.sendSMSAsync(phoneNumbersToText, genericSharePayload.text);
+
+          if (result === 'sent') {
+            launchedAnyChannel = true;
+          } else if (result === 'cancelled') {
+            deliveryErrors.push('Text composer was cancelled.');
+          } else {
+            deliveryErrors.push('Unable to confirm whether the text composer was sent.');
+          }
+        }
+      } catch (error) {
+        console.error('Sending share texts failed', error);
+        deliveryErrors.push('Unable to open the text composer right now.');
+      }
     }
 
     if (!launchedAnyChannel && deliveryErrors.length) {
@@ -5316,92 +5351,13 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     }
 
     setIsSendingShare(false);
-    Alert.alert('Share sent', 'Your event has been shared');
+    Alert.alert(
+      'Share sent',
+      skippedAlreadyInvited.length
+        ? `Your event has been shared. ${skippedAlreadyInvited.length} recipient(s) had already been invited and were skipped.`
+        : 'Your event has been shared',
+    );
     cancelShareFlow();
-  };
-
-  const MAX_SHARE_TEXT_RECIPIENTS = 10;
-
-  const handleShareViaText = async () => {
-    if (isSendingShareText) {
-      return;
-    }
-    if (!sharingEvent) {
-      setValidationMessage('Please select an event to share.');
-      setCurrentView('manage-events');
-      return;
-    }
-
-    const phoneNumbers = Array.from(new Set(
-      shareRecipients
-        .map((recipient) => recipient.phone?.trim())
-        .filter((phone): phone is string => !!phone && !validatePhoneNumber(phone)),
-    ));
-
-    if (!phoneNumbers.length) {
-      setValidationMessage('Add at least one recipient with a valid phone number to share via text.');
-      return;
-    }
-
-    if (phoneNumbers.length > MAX_SHARE_TEXT_RECIPIENTS) {
-      setValidationMessage(`Text sharing supports up to ${MAX_SHARE_TEXT_RECIPIENTS} recipients at a time. Remove some phone recipients and try again.`);
-      return;
-    }
-
-    if (shareMessage.trim().length > 255) {
-      setValidationMessage('Message must be 255 characters or fewer.');
-      return;
-    }
-
-    setValidationMessage(null);
-    setIsSendingShareText(true);
-    try {
-      const isAvailable = await SMS.isAvailableAsync();
-      if (!isAvailable) {
-        setIsShareTextAvailable(false);
-        setValidationMessage('Text messaging is not available on this device.');
-        return;
-      }
-
-      // This composes and hands off to the device's own native SMS/iMessage sheet, sent from
-      // the user's own phone number — it never touches our backend or Twilio, so it stays
-      // outside our A2P-registered messaging flow and its compliance requirements entirely.
-      const currentUser = userId ? await loadUser(userId) : null;
-      const senderName = currentUser?.fullName?.trim() || 'A Remind Me This user';
-      // The native composer sends one shared body to every selected number at once, so there's
-      // no way to personalize the RSVP link per recipient here the way the Send button does —
-      // it gets the plain, un-prefilled link instead.
-      const sharePayload = buildShareDetailsMessage(sharingEvent, senderName, shareMessage);
-
-      const { result } = await SMS.sendSMSAsync(phoneNumbers, sharePayload.text);
-
-      if (result === 'sent') {
-        if (sharingEvent.rsvpEnabled && userId) {
-          await sendRsvpInvites(
-            sharingEvent.id,
-            userId,
-            shareRecipients
-              .filter((recipient) => recipient.phone && phoneNumbers.includes(recipient.phone.trim()))
-              .map((recipient) => ({ label: recipient.label, email: recipient.email || undefined, phone: recipient.phone || undefined })),
-          );
-          await createOrUpdateRsvpShareGroup(sharingEvent, shareRecipients);
-        }
-        Alert.alert(
-          'Message composer closed',
-          'The text was handed off to Messages after you tapped send — we can\'t confirm delivery to each recipient from here.',
-        );
-        cancelShareFlow();
-      } else if (result === 'cancelled') {
-        setValidationMessage('Text sharing was cancelled.');
-      } else {
-        setValidationMessage('Unable to confirm whether the text composer was sent.');
-      }
-    } catch (error) {
-      console.error('handleShareViaText failed', error);
-      setValidationMessage('Unable to open the text composer right now.');
-    } finally {
-      setIsSendingShareText(false);
-    }
   };
 
   const respondToActiveShareInvite = async (action: 'accept' | 'dismiss') => {
@@ -8145,17 +8101,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           >
             <Text style={styles.floatingActionPrimaryText}>{isSendingShare ? 'Sending…' : 'Send'}</Text>
           </TouchableOpacity>
-
-          {isShareTextAvailable ? (
-            <TouchableOpacity
-              activeOpacity={0.8}
-              style={[styles.floatingActionButton, styles.floatingActionSecondaryButton, isSendingShareText && styles.actionButtonDisabled]}
-              onPress={() => void handleShareViaText()}
-              disabled={isSendingShareText}
-            >
-              <Text style={styles.floatingActionSecondaryText}>{isSendingShareText ? 'Opening…' : 'Share via Text'}</Text>
-            </TouchableOpacity>
-          ) : null}
         </View>
       </View>
     </ScrollView>

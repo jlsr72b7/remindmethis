@@ -2622,42 +2622,6 @@ app.post('/notifications/share-email', async (req, res) => {
   }
 });
 
-app.post('/notifications/share-sms', async (req, res) => {
-  try {
-    const { recipientUserId, body } = req.body ?? {};
-    const normalizedRecipientUserId = String(recipientUserId || '').trim();
-    const normalizedBody = String(body || '').trim();
-
-    if (!normalizedRecipientUserId || !normalizedBody) {
-      return res.status(400).json({ error: 'recipientUserId and body are required' });
-    }
-
-    if (!smsProvider) {
-      return res.status(503).json({ error: 'SMS is not configured on the server' });
-    }
-
-    const recipient = await prisma.user.findUnique({ where: { id: normalizedRecipientUserId } });
-    if (!recipient || !recipient.mobileNumber) {
-      return res.status(404).json({ error: 'recipient not found or has no mobile number on file' });
-    }
-
-    // Only ever text recipients who have already verified a mobile number on their own
-    // account — never an arbitrary phone number a sender types in. This keeps share SMS
-    // within the same consent boundary as reminder SMS, with no separate opt-in flow needed.
-    if (!isMobileNumberVerified(recipient)) {
-      return res.status(409).json({ error: 'recipient does not have a validated phone number' });
-    }
-
-    const messageWithFooter = `${normalizedBody}\n\nMsg and data rates may apply. Reply STOP to opt out, HELP for help.`;
-    await smsProvider.sendText(recipient.mobileNumber, messageWithFooter);
-
-    return res.json({ success: true });
-  } catch (error) {
-    console.error('share sms notification failed', error);
-    return res.status(500).json({ error: 'internal server error' });
-  }
-});
-
 const handleContactSupportNotification = async (req: express.Request, res: express.Response) => {
   try {
     const {
@@ -4135,6 +4099,36 @@ app.post('/events/:eventId/rsvp-invites', async (req, res) => {
     return res.json({ success: true, created: rows.length });
   } catch (error) {
     console.error('create rsvp invites failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.get('/events/:eventId/rsvp-invites', async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const userId = String(req.query.userId || '').trim();
+
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    const event = await prisma.event.findUnique({ where: { id: eventId }, select: { userId: true } });
+    if (!event || event.userId !== userId) {
+      return res.status(404).json({ error: 'event not found' });
+    }
+
+    const invites = await prisma.rsvpInvite.findMany({ where: { eventId }, orderBy: { createdAt: 'asc' } });
+
+    return res.json({
+      invites: invites.map((invite) => ({
+        id: invite.id,
+        label: invite.label,
+        email: invite.email,
+        phone: invite.phone,
+      })),
+    });
+  } catch (error) {
+    console.error('load rsvp invites failed', error);
     return res.status(500).json({ error: 'internal server error' });
   }
 });
