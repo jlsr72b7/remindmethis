@@ -4846,7 +4846,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       );
 
       if (updatedEvent) {
-        proceedAfterEventSave(updatedEvent, wantsShare, wantsRsvp);
+        proceedAfterEventEdit(updatedEvent, wantsShare, wantsRsvp);
       } else {
         setCurrentView('manage-events');
       }
@@ -5134,6 +5134,21 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       return;
     }
     setCurrentView('manage-events');
+  };
+
+  const proceedAfterEventEdit = (savedEvent: SpecialDateEvent, wantsShare: boolean, wantsRsvp: boolean) => {
+    if (wantsRsvp) {
+      openRsvpByDatePicker(savedEvent);
+      return;
+    }
+    if (wantsShare) {
+      beginShareFlowForEvent(savedEvent);
+      return;
+    }
+    Alert.alert('Event updated', 'Would you like to modify the reminders for this event?', [
+      { text: 'All Good', style: 'cancel', onPress: () => setCurrentView('manage-events') },
+      { text: 'Modify Reminders', onPress: () => openReminderEditForEvent(savedEvent) },
+    ]);
   };
 
   const openReminderEditForEvent = (event: SpecialDateEvent) => {
