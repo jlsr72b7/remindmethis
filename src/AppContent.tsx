@@ -8125,16 +8125,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             <TouchableOpacity
               onPress={editingEvent ? confirmKeepRemindersAsIs : confirmNoReminders}
               activeOpacity={0.8}
-              style={[styles.floatingActionButton, styles.noRemindersButton, { marginTop: 10, alignSelf: 'center' }]}
+              style={[styles.floatingActionButton, styles.floatingActionSecondaryButton, { marginTop: 10, alignSelf: 'center' }]}
             >
-              <View style={styles.noRemindersGradientBands} pointerEvents="none">
-                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#7b828c' }]} />
-                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#6b7280' }]} />
-                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#565e6b' }]} />
-                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#454c56' }]} />
-                <View style={[styles.noRemindersGradientBand, { backgroundColor: '#374151' }]} />
-              </View>
-              <Text style={styles.floatingActionPrimaryText}>{editingEvent ? 'All Good' : 'No Reminders'}</Text>
+              <Text style={styles.floatingActionSecondaryText}>{editingEvent ? 'All Good' : 'No Reminders'}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -9642,21 +9635,6 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 6 },
     elevation: 4,
-  },
-  noRemindersButton: {
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  noRemindersGradientBands: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    flexDirection: 'row',
-  },
-  noRemindersGradientBand: {
-    flex: 1,
   },
   floatingActionPrimaryButton: {
     backgroundColor: colors.primary,
