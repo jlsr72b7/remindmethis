@@ -4846,7 +4846,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       );
 
       if (updatedEvent) {
-        proceedAfterEventEdit(updatedEvent, wantsShare, wantsRsvp);
+        proceedAfterEventSave(updatedEvent, wantsShare, wantsRsvp);
       } else {
         setCurrentView('manage-events');
       }
@@ -5134,21 +5134,6 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       return;
     }
     setCurrentView('manage-events');
-  };
-
-  const proceedAfterEventEdit = (savedEvent: SpecialDateEvent, wantsShare: boolean, wantsRsvp: boolean) => {
-    if (wantsRsvp) {
-      openRsvpByDatePicker(savedEvent);
-      return;
-    }
-    if (wantsShare) {
-      beginShareFlowForEvent(savedEvent);
-      return;
-    }
-    Alert.alert('Event updated', 'Would you like to modify the reminders for this event?', [
-      { text: 'All Good', style: 'cancel', onPress: () => setCurrentView('manage-events') },
-      { text: 'Modify Reminders', onPress: () => openReminderEditForEvent(savedEvent) },
-    ]);
   };
 
   const openReminderEditForEvent = (event: SpecialDateEvent) => {
@@ -5687,6 +5672,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setIsAddRemindersPromptVisible(false);
     setPendingNoReminderSave(true);
     setForm((current) => ({ ...current, reminderMode: 'none' }));
+  };
+
+  const confirmKeepRemindersAsIs = () => {
+    setIsAddRemindersPromptVisible(false);
+    void saveEditedEvent();
   };
 
   useEffect(() => {
@@ -8117,19 +8107,23 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Add/Modify Reminders</Text>
-            <Text style={styles.helperText}>Next, set up reminders for this event.</Text>
+            <Text style={styles.modalTitle}>{editingEvent ? 'Modify Reminders?' : 'Add/Modify Reminders'}</Text>
+            <Text style={styles.helperText}>
+              {editingEvent
+                ? 'Would you like to modify the reminders for this event?'
+                : 'Next, set up reminders for this event.'}
+            </Text>
 
             <TouchableOpacity
               style={[styles.floatingActionButton, styles.floatingActionPrimaryButton, { marginTop: 12, alignSelf: 'center' }]}
               onPress={confirmAddModifyReminders}
               activeOpacity={0.8}
             >
-              <Text style={styles.floatingActionPrimaryText}>OK</Text>
+              <Text style={styles.floatingActionPrimaryText}>{editingEvent ? 'Modify Reminders' : 'OK'}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              onPress={confirmNoReminders}
+              onPress={editingEvent ? confirmKeepRemindersAsIs : confirmNoReminders}
               activeOpacity={0.8}
               style={[styles.floatingActionButton, styles.noRemindersButton, { marginTop: 10, alignSelf: 'center' }]}
             >
@@ -8140,7 +8134,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 <View style={[styles.noRemindersGradientBand, { backgroundColor: '#454c56' }]} />
                 <View style={[styles.noRemindersGradientBand, { backgroundColor: '#374151' }]} />
               </View>
-              <Text style={styles.floatingActionPrimaryText}>No Reminders</Text>
+              <Text style={styles.floatingActionPrimaryText}>{editingEvent ? 'All Good' : 'No Reminders'}</Text>
             </TouchableOpacity>
           </View>
         </View>
