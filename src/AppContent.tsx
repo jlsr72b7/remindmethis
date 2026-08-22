@@ -2116,6 +2116,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [isDeletingConfirmedItem, setIsDeletingConfirmedItem] = useState(false);
   const [isDeletingConfirmedEvent, setIsDeletingConfirmedEvent] = useState(false);
   const [remindersForEventId, setRemindersForEventId] = useState<string | null>(null);
+  const [remindersModalPage, setRemindersModalPage] = useState(0);
   const [currentView, setCurrentView] = useState<'create' | 'create-reminders' | 'share' | 'manage-events' | 'manage-reminders'>('manage-events');
   const [calendarDefaults, setCalendarDefaults] = useState<CalendarDefaultsSettings>(DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
   const [landingTickerVersion, setLandingTickerVersion] = useState(0);
@@ -2218,6 +2219,10 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   useEffect(() => {
     eventsRef.current = events;
   }, [events]);
+
+  useEffect(() => {
+    setRemindersModalPage(0);
+  }, [remindersForEventId]);
 
   const shareSelectableContacts = useMemo(
     () => shareContacts
@@ -8235,12 +8240,19 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     ? (() => {
         const reminderEvent = events.find((event) => event.id === remindersForEventId)!;
         const reminderEntries = getReminderOccurrencesForEvent(reminderEvent.id);
+        const REMINDERS_MODAL_PAGE_SIZE = 4;
+        const reminderPages: typeof reminderEntries[] = [];
+        for (let index = 0; index < reminderEntries.length; index += REMINDERS_MODAL_PAGE_SIZE) {
+          reminderPages.push(reminderEntries.slice(index, index + REMINDERS_MODAL_PAGE_SIZE));
+        }
+        const safeRemindersModalPage = Math.min(remindersModalPage, Math.max(0, reminderPages.length - 1));
+        const currentReminderPageItems = reminderPages[safeRemindersModalPage] || [];
         return (
           <Modal transparent visible={Boolean(remindersForEventId)} animationType="fade" onRequestClose={() => setRemindersForEventId(null)}>
             <View style={styles.modalOverlay}>
               <View style={[styles.modalCard, styles.savedEventDetailsCard]}>
                 <Text style={styles.savedEventDetailsTitle}>Scheduled reminders</Text>
-                {reminderEntries.length ? reminderEntries.map(({ event, occurrence }) => {
+                {reminderEntries.length ? currentReminderPageItems.map(({ event, occurrence }) => {
                   const matchingReminderEntry = (event.variableReminders || []).find((entry) => (
                     new Date(entry.reminderDateTime).getTime() === occurrence.getTime()
                   ));
@@ -8269,6 +8281,28 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 }) : (
                   <Text style={styles.helperText}>No current reminders.</Text>
                 )}
+
+                {reminderPages.length > 1 ? (
+                  <View style={styles.summaryPaginationRow}>
+                    <TouchableOpacity
+                      style={[styles.summaryPagerButton, safeRemindersModalPage === 0 && styles.summaryPagerButtonDisabled]}
+                      onPress={() => setRemindersModalPage((page) => Math.max(0, page - 1))}
+                      disabled={safeRemindersModalPage === 0}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.summaryPagerButtonText}>Back</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.summaryPagerPageText}>Page {safeRemindersModalPage + 1} of {reminderPages.length}</Text>
+                    <TouchableOpacity
+                      style={[styles.summaryPagerButton, safeRemindersModalPage >= reminderPages.length - 1 && styles.summaryPagerButtonDisabled]}
+                      onPress={() => setRemindersModalPage((page) => Math.min(reminderPages.length - 1, page + 1))}
+                      disabled={safeRemindersModalPage >= reminderPages.length - 1}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.summaryPagerButtonText}>Next</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
 
                 <View style={styles.savedReminderActionsWrap}>
                   <TouchableOpacity style={styles.savedReminderPrimaryButton} onPress={() => {
