@@ -5015,7 +5015,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setConfirmDeleteReminder(null);
     startEditingEvent(event);
     if (isNoReminderMode(event.reminderMode ?? 'none')) {
-      setForm((current) => ({ ...current, reminderMode: 'default' }));
+      setForm((current) => ({ ...current, reminderMode: 'variable' }));
     }
     setCurrentView('create-reminders');
   };
@@ -5554,7 +5554,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const confirmAddModifyReminders = () => {
     setIsAddRemindersPromptVisible(false);
     if (isNoReminderMode(form.reminderMode)) {
-      setForm((current) => ({ ...current, reminderMode: 'default' }));
+      setForm((current) => ({ ...current, reminderMode: 'variable' }));
     }
     setCurrentView('create-reminders');
   };
