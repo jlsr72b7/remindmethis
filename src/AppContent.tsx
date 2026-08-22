@@ -7086,6 +7086,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           <>
             <Text style={styles.label}>Custom event type</Text>
             <TextInput
+          placeholderTextColor={colors.textPlaceholder}
               style={styles.input}
               value={form.customType}
               onChangeText={(value) => setForm({ ...form, customType: value })}
@@ -7102,6 +7103,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
         <Text style={styles.label}>Who/What</Text>
         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
           style={styles.input}
           value={form.people}
           onChangeText={(value) => setForm({ ...form, people: value })}
@@ -7112,6 +7114,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           <>
             <Text style={styles.label}>Age as of today</Text>
             <TextInput
+          placeholderTextColor={colors.textPlaceholder}
               style={styles.input}
               value={form.ageAsOfToday}
               onChangeText={(value) => setForm({ ...form, ageAsOfToday: value.replace(/\D/g, '').slice(0, 3) })}
@@ -7166,6 +7169,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             {form.eventLocationEnabled ? (
               <>
                 <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                   style={styles.input}
                   value={form.eventLocationName}
                   onFocus={() => {
@@ -7212,6 +7216,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                 </TouchableOpacity>
 
                 <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                   style={styles.input}
                   value={form.eventLocationLine1}
                   onFocus={() => {
@@ -7235,6 +7240,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                   placeholder="Address line 1"
                 />
                 <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                   style={styles.input}
                   value={form.eventLocationLine2}
                   onChangeText={(value) => setForm({ ...form, eventLocationLine2: value })}
@@ -7259,6 +7265,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                   </View>
                 ) : null}
                 <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                   style={styles.input}
                   value={form.eventLocationCity}
                   onChangeText={(value) => setForm({ ...form, eventLocationCity: value })}
@@ -7278,6 +7285,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                     </Picker>
                   </View>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={[styles.input, styles.eventLocationZipInput]}
                     value={form.eventLocationZip}
                     onChangeText={(value) => setForm({ ...form, eventLocationZip: normalizeZipCode(value) })}
@@ -7287,6 +7295,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
                   />
                 </View>
                 <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                   style={styles.input}
                   value={form.eventLocationPhone}
                   onChangeText={(value) => setForm({ ...form, eventLocationPhone: formatPhoneNumberInput(value) })}
@@ -7371,6 +7380,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
         <Text style={styles.label}>Notes</Text>
         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
           style={[styles.input, styles.notesInput]}
           multiline
           value={form.notes}
@@ -7993,6 +8003,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
             </TouchableOpacity>
             {shareSelectableContacts.length ? (
               <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                 style={[styles.input, styles.shareContactSearchInput]}
                 value={shareContactSearch}
                 onChangeText={setShareContactSearch}
@@ -8051,6 +8062,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
         <Text style={styles.label}>Add email</Text>
         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
           style={styles.input}
           value={shareManualEmail}
           onChangeText={setShareManualEmail}
@@ -8064,6 +8076,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
         <Text style={styles.label}>Add phone</Text>
         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
           style={styles.input}
           value={shareManualPhone}
           onChangeText={setShareManualPhone}
@@ -8076,6 +8089,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
         <Text style={styles.label}>Message</Text>
         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
           style={[styles.input, styles.notesInput]}
           multiline
           value={shareMessage}

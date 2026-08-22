@@ -38,6 +38,12 @@ export interface ThemeColors {
   // light color, unlike `surface`, which is intentionally white in light mode but flips dark in
   // dark mode and so isn't safe to use as "text on a colored button" once dark mode is on.
   onColor: string;
+  // Translucent "frosted glass" card background/border used over a decorative blurred
+  // background (e.g. the sign-in card) — a themed equivalent of `surface`/`border` with alpha,
+  // since a plain hardcoded white translucency stays white-ish in dark mode and washes out the
+  // theme-aware light text drawn on top of it.
+  surfaceGlass: string;
+  borderGlass: string;
 }
 
 export const lightColors: ThemeColors = {
@@ -69,6 +75,8 @@ export const lightColors: ThemeColors = {
   shadow: '#0f172a',
   overlay: 'rgba(15, 23, 42, 0.35)',
   onColor: '#ffffff',
+  surfaceGlass: 'rgba(255,255,255,0.78)',
+  borderGlass: 'rgba(255,255,255,0.7)',
 };
 
 export const darkColors: ThemeColors = {
@@ -100,6 +108,8 @@ export const darkColors: ThemeColors = {
   shadow: '#000000',
   overlay: 'rgba(0, 0, 0, 0.6)',
   onColor: '#ffffff',
+  surfaceGlass: 'rgba(17,24,39,0.78)',
+  borderGlass: 'rgba(51,65,85,0.7)',
 };
 
 const THEME_MODE_STORAGE_KEY = 'app-theme-mode';

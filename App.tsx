@@ -876,6 +876,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
           ) : null}
 
           <TextInput
+          placeholderTextColor={colors.textPlaceholder}
             style={styles.input}
             placeholder="Email address"
             value={email}
@@ -907,6 +908,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
                 <View style={styles.accountInlineField}>
                   <Text style={styles.fieldLabel}>First name *</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={[styles.input, styles.accountCompactInput]}
                     placeholder="First name"
                     value={firstName}
@@ -922,6 +924,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
                 <View style={styles.accountInlineField}>
                   <Text style={styles.fieldLabel}>Last name *</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={[styles.input, styles.accountCompactInput]}
                     placeholder="Last name"
                     value={lastName}
@@ -940,6 +943,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
                 <View style={styles.accountInlineField}>
                   <Text style={styles.fieldLabel}>Mobile phone *</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={[styles.input, styles.accountCompactInput]}
                     placeholder="(555) 555-5555"
                     value={mobileNumber}
@@ -956,6 +960,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
                 <View style={styles.accountInlineField}>
                   <Text style={styles.fieldLabel}>Birth date</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={[styles.input, styles.accountCompactInput]}
                     placeholder="mm/dd/yyyy"
                     value={birthDate}
@@ -1025,6 +1030,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
           {mode !== 'forgot' ? (
             <View style={styles.passwordInputWrap}>
               <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                 style={styles.passwordInput}
                 placeholder="Password"
                 value={password}
@@ -1051,6 +1057,7 @@ function AuthScreen({ mode, onModeChange, onAuthenticated, bootstrapNote }: Auth
           {mode === 'signup' ? (
             <View style={styles.passwordInputWrap}>
               <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                 style={styles.passwordInput}
                 placeholder="Confirm password"
                 value={confirmPassword}
@@ -4454,6 +4461,7 @@ function AccountScreen({
             {message ? <Text style={styles.message}>{message}</Text> : null}
             <View style={styles.passwordInputWrap}>
               <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                 style={styles.passwordInput}
                 placeholder="Current password"
                 value={currentPassword}
@@ -4471,6 +4479,7 @@ function AccountScreen({
             </View>
             <View style={styles.passwordInputWrap}>
               <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                 style={styles.passwordInput}
                 placeholder="New password"
                 value={newPassword}
@@ -4488,6 +4497,7 @@ function AccountScreen({
             </View>
             <View style={styles.passwordInputWrap}>
               <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                 style={styles.passwordInput}
                 placeholder="Confirm new password"
                 value={confirmPassword}
@@ -4632,6 +4642,7 @@ function AccountScreen({
               <>
                 <Text style={styles.fieldLabel}>Google Calendar ID</Text>
                 <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                   style={styles.input}
                   value={googleCalendarIdDraft}
                   onChangeText={setGoogleCalendarIdDraft}
@@ -4645,6 +4656,7 @@ function AccountScreen({
             ) : calendarSyncProviderDraft === 'outlook' ? (
               <>
                 <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                   style={styles.input}
                   value={outlookCalendarEmailDraft}
                   onChangeText={setOutlookCalendarEmailDraft}
@@ -4761,6 +4773,7 @@ function AccountScreen({
 
             <Text style={styles.fieldLabel}>Verification code</Text>
             <TextInput
+          placeholderTextColor={colors.textPlaceholder}
               style={styles.input}
               value={mobileVerificationCode}
               onChangeText={(value) => {
@@ -4922,6 +4935,7 @@ function AccountScreen({
 
                   <Text style={styles.fieldLabel}>Email address</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={styles.input}
                     value={contactDraft.email}
                     onChangeText={(value) => setContactDraft((current) => ({ ...current, email: value }))}
@@ -4934,6 +4948,7 @@ function AccountScreen({
 
                   <Text style={styles.fieldLabel}>First name</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={styles.input}
                     value={contactDraft.firstName}
                     onChangeText={(value) => setContactDraft((current) => ({ ...current, firstName: value }))}
@@ -4942,6 +4957,7 @@ function AccountScreen({
 
                   <Text style={styles.fieldLabel}>Last name</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={styles.input}
                     value={contactDraft.lastName}
                     onChangeText={(value) => setContactDraft((current) => ({ ...current, lastName: value }))}
@@ -4952,6 +4968,7 @@ function AccountScreen({
                     <Text style={styles.fieldLabel}>Address</Text>
 
                     <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                       style={[styles.input, styles.accountCompactInput]}
                       value={contactAddressLine1}
                       onChangeText={setContactAddressLine1}
@@ -4984,6 +5001,7 @@ function AccountScreen({
                     />
 
                     <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                       style={[styles.input, styles.accountCompactInput]}
                       value={contactAddressCity}
                       onChangeText={setContactAddressCity}
@@ -4993,6 +5011,7 @@ function AccountScreen({
                     <View style={styles.accountAddressCityStateZipRow}>
                       <View style={[styles.accountInlineField, styles.accountStateField]}>
                         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                           style={[styles.input, styles.accountCompactInput]}
                           value={contactAddressState}
                           onChangeText={(value) => setContactAddressState(value.replace(/[^a-zA-Z]/g, '').toUpperCase().slice(0, 2))}
@@ -5004,6 +5023,7 @@ function AccountScreen({
 
                       <View style={[styles.accountInlineField, styles.accountZipField]}>
                         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                           style={[styles.input, styles.accountCompactInput]}
                           value={contactAddressZip}
                           onChangeText={(value) => setContactAddressZip(value.replace(/\D/g, '').slice(0, 5))}
@@ -5017,6 +5037,7 @@ function AccountScreen({
 
                   <Text style={styles.fieldLabel}>Birth date</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={styles.input}
                     value={contactDraft.birthDate}
                     onChangeText={(value) => setContactDraft((current) => ({ ...current, birthDate: formatBirthDateInput(value) }))}
@@ -5027,6 +5048,7 @@ function AccountScreen({
 
                   <Text style={styles.fieldLabel}>Mobile phone</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={styles.input}
                     value={contactDraft.mobileNumber}
                     onChangeText={(value) => setContactDraft((current) => ({ ...current, mobileNumber: formatPhoneNumberInput(value) }))}
@@ -5036,6 +5058,7 @@ function AccountScreen({
 
                   <Text style={styles.fieldLabel}>Company</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={styles.input}
                     value={contactDraft.company}
                     onChangeText={(value) => setContactDraft((current) => ({ ...current, company: value }))}
@@ -5044,6 +5067,7 @@ function AccountScreen({
 
                   <Text style={styles.fieldLabel}>Notes</Text>
                   <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                     style={[styles.input, styles.contactsNotesInput]}
                     value={contactDraft.notes}
                     onChangeText={(value) => setContactDraft((current) => ({ ...current, notes: value }))}
@@ -5214,6 +5238,7 @@ function AccountScreen({
                       <View style={styles.contactsSummaryDetailsCard}>
                         <Text style={styles.fieldLabel}>Group name</Text>
                         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                           style={styles.input}
                           value={selectedGroupNameDraft}
                           onChangeText={setSelectedGroupNameDraft}
@@ -5225,6 +5250,7 @@ function AccountScreen({
 
                         <Text style={styles.fieldLabel}>Group description</Text>
                         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                           style={[styles.input, styles.contactsNotesInput]}
                           value={selectedGroupDescriptionDraft}
                           onChangeText={setSelectedGroupDescriptionDraft}
@@ -5453,6 +5479,7 @@ function AccountScreen({
               <View style={[styles.modalCard, styles.contactsSummaryModalCard]}>
                 <Text style={styles.modalTitle}>Create group</Text>
                 <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                   style={styles.input}
                   value={newGroupName}
                   onChangeText={setNewGroupName}
@@ -5460,6 +5487,7 @@ function AccountScreen({
                 />
                 <Text style={styles.fieldLabel}>Group description</Text>
                 <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                   style={[styles.input, styles.contactsNotesInput]}
                   value={newGroupDescription}
                   onChangeText={setNewGroupDescription}
@@ -5657,6 +5685,7 @@ function AccountScreen({
           >
             <Text style={styles.fieldLabel}>Subject</Text>
             <TextInput
+          placeholderTextColor={colors.textPlaceholder}
               style={styles.input}
               value={contactSupportSubject}
               onChangeText={(value) => {
@@ -5671,6 +5700,7 @@ function AccountScreen({
 
             <Text style={styles.fieldLabel}>Message</Text>
             <TextInput
+          placeholderTextColor={colors.textPlaceholder}
               style={[styles.input, styles.contactSupportMessageInput]}
               value={contactSupportMessage}
               onChangeText={(value) => {
@@ -5784,6 +5814,7 @@ function AccountScreen({
                       <View style={styles.accountInlineField}>
                         <Text style={styles.fieldLabel}>First name</Text>
                         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                           style={[styles.input, styles.accountCompactInput]}
                           placeholder="First name"
                           value={firstName}
@@ -5799,6 +5830,7 @@ function AccountScreen({
                       <View style={styles.accountInlineField}>
                         <Text style={styles.fieldLabel}>Last name</Text>
                         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                           style={[styles.input, styles.accountCompactInput]}
                           placeholder="Last name"
                           value={lastName}
@@ -5814,6 +5846,7 @@ function AccountScreen({
                       <View style={styles.accountInlineField}>
                         <Text style={styles.fieldLabel}>Mobile phone</Text>
                         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                           style={[styles.input, styles.accountCompactInput]}
                           placeholder="(000) 000-0000"
                           value={mobileNumber}
@@ -5830,6 +5863,7 @@ function AccountScreen({
                       <View style={styles.accountInlineField}>
                         <Text style={styles.fieldLabel}>Birth date</Text>
                         <TextInput
+          placeholderTextColor={colors.textPlaceholder}
                           style={[styles.input, styles.accountCompactInput]}
                           placeholder="mm/dd/yyyy"
                           value={birthDate}
@@ -6923,7 +6957,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
   authCard: {
     width: '100%',
     maxWidth: 420,
-    backgroundColor: 'rgba(255,255,255,0.78)',
+    backgroundColor: colors.surfaceGlass,
     borderRadius: 20,
     padding: 24,
     shadowColor: colors.shadow,
@@ -6932,7 +6966,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     shadowOffset: { width: 0, height: 10 },
     elevation: 4,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.7)',
+    borderColor: colors.borderGlass,
   },
   heroRow: {
     flexDirection: 'row',
@@ -7085,6 +7119,7 @@ const createAppStyles = (colors: ThemeColors) => StyleSheet.create({
     paddingVertical: 12,
     marginBottom: 12,
     backgroundColor: colors.background,
+    color: colors.textPrimary,
     shadowColor: colors.textPlaceholder,
     shadowOpacity: 0.08,
     shadowRadius: 6,
