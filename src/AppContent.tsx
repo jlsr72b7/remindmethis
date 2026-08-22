@@ -7705,8 +7705,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
       {currentView === 'create-reminders' ? (
       <View style={styles.card}>
-        <View style={styles.eventTypeHeaderRow}>
-          <Text style={styles.label}>Reminder Creation Mode</Text>
+        <View style={[styles.eventTypeHeaderRow, styles.reminderModeHeaderRow]}>
+          <Text style={[styles.label, styles.reminderModeTitleText]}>Reminder Creation Mode</Text>
           <TouchableOpacity
             style={styles.voiceMicButton}
             onPress={() => openVoiceEventModal('reminders')}
@@ -9127,6 +9127,12 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+  },
+  reminderModeHeaderRow: {
+    marginBottom: 18,
+  },
+  reminderModeTitleText: {
+    marginTop: 0,
   },
   voiceMicButton: {
     paddingHorizontal: 4,
