@@ -60,6 +60,9 @@ const googleDefaultCalendarId = process.env.GOOGLE_CALENDAR_ID;
 const googleOauthRedirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI;
 const googlePlacesApiKey = String(process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '').trim();
 const anthropicApiKey = String(process.env.ANTHROPIC_API_KEY || '').trim();
+const elevenLabsApiKey = String(process.env.ELEVENLABS_API_KEY || '').trim();
+// ElevenLabs' standard pre-made "Rachel" voice — a pleasant, natural US-English female voice.
+const elevenLabsVoiceId = String(process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM').trim();
 const outlookOauthClientId = process.env.OUTLOOK_OAUTH_CLIENT_ID;
 const outlookOauthClientSecret = process.env.OUTLOOK_OAUTH_CLIENT_SECRET;
 const outlookOauthRedirectUri = process.env.OUTLOOK_OAUTH_REDIRECT_URI;
@@ -222,7 +225,9 @@ interface GooglePlacesDetailsResponse {
 interface AnthropicMessageResponse {
   content?: Array<{
     type: string;
+    name?: string;
     input?: Record<string, unknown>;
+    text?: string;
   }>;
   error?: {
     message?: string;
@@ -335,6 +340,67 @@ const EXTRACT_REMINDERS_TOOL = {
       },
     },
     required: ['reminders'],
+  },
+} as const;
+
+const MABEL_ASK_TOOL = {
+  name: 'ask_followup',
+  description: 'Ask the user a single, short follow-up question because more information is still needed to complete their request.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      question: { type: 'string', description: 'A short, natural, spoken-friendly question. Ask about only one or two things at a time.' },
+    },
+    required: ['question'],
+  },
+} as const;
+
+const MABEL_CREATE_EVENT_TOOL = {
+  name: 'create_event',
+  description: 'Call this once — and only once — you are confident you have enough information to create the event (and optionally its reminders).',
+  input_schema: {
+    type: 'object',
+    properties: {
+      confirmationSpeech: {
+        type: 'string',
+        description: 'A short, friendly spoken confirmation of what is being created, e.g. "Creating a birthday party for Jake on September 5th at 3pm."',
+      },
+      eventType: {
+        type: 'string',
+        enum: ['birthday', 'party', 'wedding', 'anniversary', 'medical', 'dental', 'work', 'school', 'travel', 'sports', 'other'],
+        description: 'The general category of event.',
+      },
+      customType: { type: 'string', description: "A short custom label, only when eventType is 'other' and no better category fits." },
+      partySubtype: { type: 'string', enum: ['birthday', 'anniversary', 'retirement', 'engagement', 'holiday', 'other'], description: "Only when eventType is 'party'." },
+      schoolSubtype: { type: 'string', enum: ['quiz', 'test', 'paper-due', 'project-due', 'class-presentation', 'other'], description: "Only when eventType is 'school'." },
+      medicalSubtype: { type: 'string', enum: ['appointment', 'surgery', 'blood-work', 'radiology', 'rehab', 'other'], description: "Only when eventType is 'medical'." },
+      dentalSubtype: { type: 'string', enum: ['cleaning', 'extraction', 'check-up', 'root-canal', 'bridge', 'dentures', 'cavities', 'implants', 'crown', 'fitting', 'other'], description: "Only when eventType is 'dental'." },
+      workSubtype: { type: 'string', enum: ['meeting', 'review', 'conference', 'demo', 'workshop', 'presentation', 'interview', 'other'], description: "Only when eventType is 'work'." },
+      people: { type: 'string', description: "Who or what the event is about/for — a person's name, a group, a place, or a short description." },
+      eventDateTimeIso: { type: 'string', description: 'Local wall-clock date-time in the format YYYY-MM-DDTHH:mm:ss (no "Z", no UTC offset) for when the event starts.' },
+      eventEndDateTimeIso: { type: 'string', description: 'Local wall-clock end date-time in the same format, only if an explicit end time or duration was mentioned.' },
+      eventAllDay: { type: 'boolean', description: 'True if no specific time was mentioned, just a date.' },
+      locationName: { type: 'string', description: 'Venue or place name, if mentioned.' },
+      locationLine1: { type: 'string', description: "Street address. If a venue/place name and a city/town were both mentioned but no exact address was given, use your best general knowledge of that real place to fill this in as a best effort." },
+      locationCity: { type: 'string' },
+      locationState: { type: 'string', description: 'Two-letter US state code — infer from the venue/city if not stated explicitly.' },
+      locationZip: { type: 'string', description: 'Best-effort ZIP code for the venue/city if not stated explicitly.' },
+      locationPhone: { type: 'string', description: "Best-effort phone number for the venue, using general knowledge of that real place if not stated explicitly." },
+      notes: { type: 'string', description: "Any other relevant detail that doesn't fit the fields above." },
+      reminders: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            dateTimeIso: { type: 'string', description: 'Local wall-clock date-time in the format YYYY-MM-DDTHH:mm:ss for this reminder.' },
+            notes: { type: 'string' },
+          },
+          required: ['dateTimeIso'],
+        },
+        description: 'Only include this if the user asked for one or more reminders. Expand a described recurring pattern into concrete reminder date-times, capped at 10.',
+      },
+    },
+    required: ['confirmationSpeech', 'eventType', 'people', 'eventDateTimeIso'],
   },
 } as const;
 
@@ -3826,6 +3892,145 @@ app.post('/nlp/parse-reminders', async (req, res) => {
     return res.json({ success: true, reminders });
   } catch (error) {
     console.error('parse-reminders failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/mabel/converse', async (req, res) => {
+  try {
+    if (!anthropicApiKey) {
+      return res.status(500).json({ error: 'Hey Mabel is not configured. Set ANTHROPIC_API_KEY.' });
+    }
+
+    const { userId, messages, nowIso, timeZone } = req.body ?? {};
+    if (!userId || !Array.isArray(messages) || !messages.length) {
+      return res.status(400).json({ error: 'userId and a non-empty messages array are required' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    const conversationMessages = messages
+      .map((entry: unknown) => {
+        const role = (entry as { role?: unknown })?.role;
+        const content = (entry as { content?: unknown })?.content;
+        if ((role !== 'user' && role !== 'assistant') || typeof content !== 'string' || !content.trim()) {
+          return null;
+        }
+        return { role, content: content.trim() };
+      })
+      .filter((entry: unknown): entry is { role: 'user' | 'assistant'; content: string } => entry !== null);
+
+    if (!conversationMessages.length) {
+      return res.status(400).json({ error: 'messages must contain at least one valid entry' });
+    }
+
+    const referenceWallClock = isWallClockText(nowIso) ? nowIso : new Date().toISOString().slice(0, 19);
+    const referenceTimeZone = String(timeZone || 'UTC').trim() || 'UTC';
+
+    const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': anthropicApiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: `You are "Mabel," a friendly, efficient voice assistant embedded in the "Remind Me This" calendar/reminders app. You're having a spoken, back-and-forth conversation to help the user create an event and, if they want, reminders for it. Speak naturally and warmly, but keep questions SHORT — this is a spoken conversation, not a form. Ask about only one or two missing things at a time, and never ask about anything already said or reasonably implied.
+
+Treat ${referenceWallClock} as the current date/time exactly as it would read on a clock in the ${referenceTimeZone} time zone right now — resolve relative dates against that. Whenever you determine a date/time, output it as a plain local wall-clock string in the format YYYY-MM-DDTHH:mm:ss — no "Z", no UTC offset, and do not convert it to UTC yourself.
+
+You have two tools:
+- ask_followup: use this if you still need more information — at minimum you need what the event is, who/what it's for, and a date.
+- create_event: call this once you have at least the event type, who/what it's for, and a date. Time of day, location, and reminders are optional extras — only ask about them if the user brings them up or a specific time clearly matters (don't press for an exact time on something like an all-day birthday). For location fields, if a venue/place name and a city/town are both mentioned but the exact address/phone weren't stated, use your best general knowledge of that real place to fill them in as a best effort.
+
+Never invent information the user didn't provide or clearly imply — leave a field out rather than guessing (except for the location best-effort exception above). Aim to complete the request in as few questions as possible.`,
+        messages: conversationMessages,
+        tools: [MABEL_ASK_TOOL, MABEL_CREATE_EVENT_TOOL],
+        tool_choice: { type: 'auto' },
+      }),
+    });
+
+    const payload = await anthropicResponse.json() as AnthropicMessageResponse;
+
+    if (!anthropicResponse.ok) {
+      console.error('anthropic mabel converse failed', payload);
+      return res.status(502).json({ error: 'Unable to understand that right now. Please try again.' });
+    }
+
+    const toolUseBlock = (payload.content || []).find((block) => block.type === 'tool_use');
+
+    if (!toolUseBlock) {
+      const textBlock = (payload.content || []).find((block) => block.type === 'text');
+      return res.json({ success: true, action: 'ask', question: textBlock?.text || "Sorry, could you say that again?" });
+    }
+
+    if (toolUseBlock.name === 'ask_followup') {
+      const input = toolUseBlock.input as { question?: string } | undefined;
+      return res.json({ success: true, action: 'ask', question: input?.question || "Sorry, could you say that again?" });
+    }
+
+    const input = (toolUseBlock.input || {}) as Record<string, unknown>;
+    const { confirmationSpeech, reminders, ...fields } = input;
+
+    return res.json({
+      success: true,
+      action: 'create',
+      confirmationSpeech: typeof confirmationSpeech === 'string' ? confirmationSpeech : 'Done!',
+      fields,
+      reminders: Array.isArray(reminders) ? reminders : [],
+    });
+  } catch (error) {
+    console.error('mabel converse failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/mabel/tts', async (req, res) => {
+  try {
+    if (!elevenLabsApiKey) {
+      return res.status(500).json({ error: "Mabel's premium voice is not configured. Set ELEVENLABS_API_KEY." });
+    }
+
+    const { userId, text } = req.body ?? {};
+    const trimmedText = String(text || '').trim();
+    if (!userId || !trimmedText) {
+      return res.status(400).json({ error: 'userId and text are required' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    const elevenResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elevenLabsVoiceId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'xi-api-key': elevenLabsApiKey,
+        Accept: 'audio/mpeg',
+      },
+      body: JSON.stringify({
+        text: trimmedText,
+        model_id: 'eleven_turbo_v2_5',
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    });
+
+    if (!elevenResponse.ok) {
+      const errorText = await elevenResponse.text().catch(() => '');
+      console.error('elevenlabs tts failed', elevenResponse.status, errorText);
+      return res.status(502).json({ error: 'Unable to generate speech right now.' });
+    }
+
+    const audioBuffer = Buffer.from(await elevenResponse.arrayBuffer());
+    return res.json({ success: true, audioBase64: audioBuffer.toString('base64') });
+  } catch (error) {
+    console.error('mabel tts failed', error);
     return res.status(500).json({ error: 'internal server error' });
   }
 });

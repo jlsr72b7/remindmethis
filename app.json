@@ -36,7 +36,8 @@
           "speechRecognitionPermission": "Allow Remind Me This to use speech recognition to fill in event details from what you say."
         }
       ],
-      "@bacons/apple-targets"
+      "@bacons/apple-targets",
+      "expo-audio"
     ],
     "ios": {
       "supportsTablet": true,

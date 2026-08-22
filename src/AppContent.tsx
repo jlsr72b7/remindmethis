@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Alert,
   Animated,
+  AppState,
   Button,
   Dimensions,
   Image,
@@ -23,6 +24,9 @@ import {
 import { Picker } from '@react-native-picker/picker';
 import * as Contacts from 'expo-contacts/legacy';
 import * as SMS from 'expo-sms';
+import * as Speech from 'expo-speech';
+import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
+import { File, Paths } from 'expo-file-system';
 import {
   ExpoSpeechRecognitionModule,
   useSpeechRecognitionEvent,
@@ -58,6 +62,11 @@ import {
   type VoiceParsedEventFields,
   parseVoiceReminderText,
   type VoiceParsedReminder,
+  loadMabelSettings,
+  converseWithMabel,
+  synthesizeMabelSpeech,
+  type MabelSettings,
+  type MabelConversationMessage,
   loadUserContactsSnapshot,
   saveUserContactsSnapshot,
   subscribeApiStorageStatus,
@@ -2129,17 +2138,264 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
   const [isParsingVoiceEvent, setIsParsingVoiceEvent] = useState(false);
 
+  // "Hey Mabel" conversational voice agent state. A single native speech-recognition session can
+  // run at a time, so recognitionModeRef tracks who's currently using it — the manual mic-button
+  // voice modal above, Mabel's background wake-word listening, or Mabel actively capturing the
+  // user's spoken request/answer — so the shared result/end/error handlers below know how to
+  // interpret whatever comes in.
+  type MabelRecognitionMode = 'idle' | 'manual' | 'mabel-wake' | 'mabel-capture';
+  const recognitionModeRef = useRef<MabelRecognitionMode>('idle');
+  const latestTranscriptRef = useRef('');
+  const mabelSettingsRef = useRef<MabelSettings>({ enabled: false, voiceProvider: 'device' });
+  const isAppActiveRef = useRef(true);
+  const mabelAudioPlayerRef = useRef<AudioPlayer | null>(null);
+  const mabelTurnCountRef = useRef(0);
+  const MABEL_MAX_TURNS = 8;
+  const [mabelSettings, setMabelSettings] = useState<MabelSettings>({ enabled: false, voiceProvider: 'device' });
+  const [mabelPhase, setMabelPhase] = useState<'idle' | 'wake-listening' | 'listening' | 'thinking' | 'speaking'>('idle');
+  const [mabelMessages, setMabelMessages] = useState<MabelConversationMessage[]>([]);
+
+  useEffect(() => {
+    mabelSettingsRef.current = mabelSettings;
+  }, [mabelSettings]);
+
+  useEffect(() => {
+    if (!userId) {
+      return;
+    }
+    void loadMabelSettings(userId).then(setMabelSettings);
+    // Mabel should be audible even if the phone's silent switch is on — this configures the
+    // shared iOS audio session category used by both expo-audio playback and expo-speech's TTS.
+    void setAudioModeAsync({ playsInSilentMode: true }).catch((error) => {
+      console.warn('Unable to configure audio mode for Hey Mabel', error);
+    });
+  }, [userId]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const wasActive = isAppActiveRef.current;
+      const nowActive = nextState === 'active';
+      isAppActiveRef.current = nowActive;
+
+      if (wasActive && !nowActive) {
+        stopMabelListening();
+        setMabelPhase('idle');
+      } else if (!wasActive && nowActive) {
+        void resumeMabelWakeListening();
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
+  const speakWithDeviceVoice = (text: string): Promise<void> => (
+    new Promise((resolve) => {
+      Speech.speak(text, {
+        language: 'en-US',
+        pitch: 1.05,
+        rate: 1.0,
+        onDone: () => resolve(),
+        onStopped: () => resolve(),
+        onError: () => resolve(),
+      });
+    })
+  );
+
+  const speakMabel = async (text: string): Promise<void> => {
+    setMabelPhase('speaking');
+    if (mabelSettingsRef.current.voiceProvider === 'elevenlabs' && userId) {
+      const audioBase64 = await synthesizeMabelSpeech(userId, text);
+      if (audioBase64) {
+        try {
+          const file = new File(Paths.cache, `mabel-${Date.now()}.mp3`);
+          file.create({ overwrite: true });
+          file.write(audioBase64, { encoding: 'base64' });
+          await new Promise<void>((resolve) => {
+            const player = createAudioPlayer({ uri: file.uri });
+            mabelAudioPlayerRef.current = player;
+            const subscription = player.addListener('playbackStatusUpdate', (status) => {
+              if (status.didJustFinish) {
+                subscription.remove();
+                player.remove();
+                mabelAudioPlayerRef.current = null;
+                resolve();
+              }
+            });
+            player.play();
+          });
+          return;
+        } catch (error) {
+          console.warn('Mabel ElevenLabs playback failed; falling back to device voice', error);
+        }
+      }
+    }
+
+    await speakWithDeviceVoice(text);
+  };
+
+  const stopMabelListening = () => {
+    if (recognitionModeRef.current === 'mabel-wake' || recognitionModeRef.current === 'mabel-capture') {
+      recognitionModeRef.current = 'idle';
+      ExpoSpeechRecognitionModule.abort();
+    }
+  };
+
+  const resumeMabelWakeListening = async () => {
+    if (!mabelSettingsRef.current.enabled || !isAppActiveRef.current || recognitionModeRef.current !== 'idle') {
+      if (recognitionModeRef.current !== 'mabel-wake' && recognitionModeRef.current !== 'mabel-capture') {
+        setMabelPhase('idle');
+      }
+      return;
+    }
+
+    const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (!permission.granted) {
+      setMabelPhase('idle');
+      return;
+    }
+
+    recognitionModeRef.current = 'mabel-wake';
+    setMabelPhase('wake-listening');
+    ExpoSpeechRecognitionModule.start({ lang: 'en-US', interimResults: true, continuous: true });
+  };
+
+  const resetMabelConversation = () => {
+    setMabelMessages([]);
+    mabelTurnCountRef.current = 0;
+    void resumeMabelWakeListening();
+  };
+
+  const startMabelCaptureListening = async () => {
+    const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (!permission.granted) {
+      resetMabelConversation();
+      return;
+    }
+
+    latestTranscriptRef.current = '';
+    recognitionModeRef.current = 'mabel-capture';
+    setMabelPhase('listening');
+    ExpoSpeechRecognitionModule.start({ lang: 'en-US', interimResults: true, continuous: false });
+  };
+
+  const handleMabelUtterance = async (utterance: string) => {
+    if (!userId) {
+      resetMabelConversation();
+      return;
+    }
+
+    setMabelPhase('thinking');
+    const nextMessages: MabelConversationMessage[] = [...mabelMessages, { role: 'user', content: utterance }];
+    setMabelMessages(nextMessages);
+    mabelTurnCountRef.current += 1;
+
+    if (mabelTurnCountRef.current > MABEL_MAX_TURNS) {
+      await speakMabel('Let’s pick this back up another time. Just say "Hey Mabel" when you’re ready to try again.');
+      resetMabelConversation();
+      return;
+    }
+
+    const result = await converseWithMabel(userId, nextMessages, formatLocalWallClockIso(new Date()), effectiveReminderTimeZone);
+    if (!result) {
+      await speakMabel("Sorry, I'm having trouble right now. Please try again in a moment.");
+      resetMabelConversation();
+      return;
+    }
+
+    if (result.action === 'ask') {
+      setMabelMessages((current) => [...current, { role: 'assistant', content: result.question }]);
+      await speakMabel(result.question);
+      void startMabelCaptureListening();
+      return;
+    }
+
+    applyVoiceParsedFieldsToForm(result.fields);
+    if (result.reminders.length) {
+      applyVoiceParsedRemindersToForm(result.reminders);
+    }
+    setCurrentView('create');
+    await speakMabel(`${result.confirmationSpeech} I've filled in the details on the Create Event screen — just tap Save when you're ready.`);
+    resetMabelConversation();
+  };
+
+  const handleMabelWakeWordDetected = () => {
+    if (recognitionModeRef.current !== 'mabel-wake') {
+      return;
+    }
+    recognitionModeRef.current = 'idle';
+    ExpoSpeechRecognitionModule.stop();
+    void (async () => {
+      await speakMabel('How may I help you?');
+      void startMabelCaptureListening();
+    })();
+  };
+
+  useEffect(() => {
+    if (mabelSettings.enabled && isAppActiveRef.current && !isVoiceEventModalVisible && recognitionModeRef.current === 'idle') {
+      void resumeMabelWakeListening();
+    }
+
+    if (!mabelSettings.enabled) {
+      stopMabelListening();
+      setMabelPhase('idle');
+    }
+  }, [mabelSettings.enabled, isVoiceEventModalVisible]);
+
   useSpeechRecognitionEvent('result', (event) => {
     const transcript = event.results?.[0]?.transcript;
-    if (typeof transcript === 'string') {
+    if (typeof transcript !== 'string') {
+      return;
+    }
+
+    if (recognitionModeRef.current === 'manual') {
       setVoiceTranscriptDraft(transcript);
+      return;
+    }
+
+    if (recognitionModeRef.current === 'mabel-wake') {
+      if (/\bhey,?\s*(mabel|mable|maple|mabl)\b/i.test(transcript)) {
+        handleMabelWakeWordDetected();
+      }
+      return;
+    }
+
+    if (recognitionModeRef.current === 'mabel-capture') {
+      latestTranscriptRef.current = transcript;
     }
   });
   useSpeechRecognitionEvent('end', () => {
     setIsVoiceRecording(false);
+
+    if (recognitionModeRef.current === 'mabel-wake') {
+      recognitionModeRef.current = 'idle';
+      void resumeMabelWakeListening();
+      return;
+    }
+
+    if (recognitionModeRef.current === 'mabel-capture') {
+      const finalText = latestTranscriptRef.current.trim();
+      latestTranscriptRef.current = '';
+      recognitionModeRef.current = 'idle';
+      if (finalText) {
+        void handleMabelUtterance(finalText);
+      } else {
+        void (async () => {
+          await speakMabel('Sorry, I didn’t catch that. Just say "Hey Mabel" whenever you’re ready.');
+          resetMabelConversation();
+        })();
+      }
+    }
   });
   useSpeechRecognitionEvent('error', (event) => {
     setIsVoiceRecording(false);
+
+    if (recognitionModeRef.current === 'mabel-wake' || recognitionModeRef.current === 'mabel-capture') {
+      recognitionModeRef.current = 'idle';
+      if (event.error !== 'no-speech' && event.error !== 'aborted') {
+        void resumeMabelWakeListening();
+      }
+      return;
+    }
+
     if (event.error !== 'no-speech' && event.error !== 'aborted') {
       Alert.alert('Speech recognition error', event.message || 'Please try again.');
     }
@@ -4490,6 +4746,8 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
 
   const openVoiceEventModal = (mode: 'event' | 'reminders' = 'event') => {
     Keyboard.dismiss();
+    stopMabelListening();
+    recognitionModeRef.current = 'manual';
     setVoiceModalMode(mode);
     setVoiceTranscriptDraft('');
     setIsVoiceRecording(false);
@@ -4500,9 +4758,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     if (isVoiceRecording) {
       ExpoSpeechRecognitionModule.stop();
     }
+    recognitionModeRef.current = 'idle';
     setIsVoiceRecording(false);
     setVoiceTranscriptDraft('');
     setIsVoiceEventModalVisible(false);
+    void resumeMabelWakeListening();
   };
 
   const startVoiceRecording = async () => {
@@ -4515,6 +4775,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       return;
     }
 
+    recognitionModeRef.current = 'manual';
     setVoiceTranscriptDraft('');
     setIsVoiceRecording(true);
     ExpoSpeechRecognitionModule.start({
@@ -4658,9 +4919,11 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       if (isVoiceRecording) {
         ExpoSpeechRecognitionModule.stop();
       }
+      recognitionModeRef.current = 'idle';
       setIsVoiceRecording(false);
       setVoiceTranscriptDraft('');
       setIsVoiceEventModalVisible(false);
+      void resumeMabelWakeListening();
     } finally {
       setIsParsingVoiceEvent(false);
     }

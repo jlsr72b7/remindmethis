@@ -10,6 +10,7 @@ const REMINDER_DELIVERY_SETTINGS_KEY_PREFIX = 'special-date-reminder-delivery-se
 const REMINDER_DEFAULT_TIME_KEY_PREFIX = 'special-date-reminder-default-time-settings';
 const REMINDER_TIME_ZONE_KEY_PREFIX = 'special-date-reminder-time-zone-settings';
 const CALENDAR_SYNC_SETTINGS_KEY_PREFIX = 'special-date-reminder-calendar-sync-settings';
+const MABEL_SETTINGS_KEY_PREFIX = 'special-date-reminder-mabel-settings';
 const API_BASE_URL = (typeof process !== 'undefined' && process.env && process.env.EXPO_PUBLIC_API_BASE_URL
   ? process.env.EXPO_PUBLIC_API_BASE_URL
   : 'http://localhost:4000').replace(/\/$/, '');
@@ -123,6 +124,13 @@ export interface ReminderDefaultTimeSettings {
 
 export interface ReminderTimeZoneSettings {
   timeZone: string;
+}
+
+export type MabelVoiceProvider = 'device' | 'elevenlabs';
+
+export interface MabelSettings {
+  enabled: boolean;
+  voiceProvider: MabelVoiceProvider;
 }
 
 export type CalendarSyncProvider = 'none' | 'google' | 'outlook' | 'apple';
@@ -244,6 +252,11 @@ const defaultReminderDefaultTimeSettings: ReminderDefaultTimeSettings = {
   clockIntervalMinutes: 5,
 };
 
+const defaultMabelSettings: MabelSettings = {
+  enabled: false,
+  voiceProvider: 'device',
+};
+
 function normalizeClockIntervalMinutes(value: unknown, fallback: 1 | 5 | 15 = 5): 1 | 5 | 15 {
   if (value === 5 || value === 15) {
     return value;
@@ -304,6 +317,10 @@ function getReminderTimeZoneSettingsKey(userId?: string) {
   return `${REMINDER_TIME_ZONE_KEY_PREFIX}:${userId || 'anonymous'}`;
 }
 
+function getMabelSettingsKey(userId?: string) {
+  return `${MABEL_SETTINGS_KEY_PREFIX}:${userId || 'anonymous'}`;
+}
+
 function getCalendarSyncSettingsKey(userId?: string) {
   return `${CALENDAR_SYNC_SETTINGS_KEY_PREFIX}:${userId || 'anonymous'}`;
 }
@@ -360,6 +377,23 @@ function parseReminderDefaultTimeSettings(raw: string | null): ReminderDefaultTi
   } catch (error) {
     console.warn('Failed to parse reminder default time settings; using defaults.', error);
     return defaultReminderDefaultTimeSettings;
+  }
+}
+
+function parseMabelSettings(raw: string | null): MabelSettings {
+  if (!raw) {
+    return defaultMabelSettings;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<MabelSettings>;
+    return {
+      enabled: parsed.enabled ?? defaultMabelSettings.enabled,
+      voiceProvider: parsed.voiceProvider === 'elevenlabs' ? 'elevenlabs' : 'device',
+    };
+  } catch (error) {
+    console.warn('Failed to parse Mabel settings; using defaults.', error);
+    return defaultMabelSettings;
   }
 }
 
@@ -792,6 +826,29 @@ export async function saveReminderDefaultTimeSettings(settings: ReminderDefaultT
     await AsyncStorage.setItem(getReminderDefaultTimeSettingsKey(userId), JSON.stringify(nextSettings));
   } catch (error) {
     console.warn('Failed to save reminder default time settings.', error);
+  }
+}
+
+export async function loadMabelSettings(userId?: string): Promise<MabelSettings> {
+  try {
+    const raw = await AsyncStorage.getItem(getMabelSettingsKey(userId));
+    return parseMabelSettings(raw);
+  } catch (error) {
+    console.warn('Failed to load Mabel settings; using defaults.', error);
+    return defaultMabelSettings;
+  }
+}
+
+export async function saveMabelSettings(settings: MabelSettings, userId?: string) {
+  const nextSettings: MabelSettings = {
+    enabled: Boolean(settings.enabled),
+    voiceProvider: settings.voiceProvider === 'elevenlabs' ? 'elevenlabs' : 'device',
+  };
+
+  try {
+    await AsyncStorage.setItem(getMabelSettingsKey(userId), JSON.stringify(nextSettings));
+  } catch (error) {
+    console.warn('Failed to save Mabel settings.', error);
   }
 }
 
@@ -1247,6 +1304,63 @@ export async function parseVoiceReminderText(
     return Array.isArray(response.reminders) ? response.reminders : [];
   } catch (error) {
     console.warn('Parsing voice reminder text failed', error);
+    return null;
+  }
+}
+
+export interface MabelConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export type MabelConverseResult =
+  | { action: 'ask'; question: string }
+  | { action: 'create'; confirmationSpeech: string; fields: VoiceParsedEventFields; reminders: VoiceParsedReminder[] };
+
+export async function converseWithMabel(
+  userId: string,
+  messages: MabelConversationMessage[],
+  nowIso: string,
+  timeZone: string,
+): Promise<MabelConverseResult | null> {
+  try {
+    const response = await apiRequest<{
+      success: boolean;
+      action: 'ask' | 'create';
+      question?: string;
+      confirmationSpeech?: string;
+      fields?: VoiceParsedEventFields;
+      reminders?: VoiceParsedReminder[];
+    }>('/mabel/converse', {
+      method: 'POST',
+      body: JSON.stringify({ userId, messages, nowIso, timeZone }),
+    });
+
+    if (response.action === 'create') {
+      return {
+        action: 'create',
+        confirmationSpeech: response.confirmationSpeech || 'Done!',
+        fields: response.fields || {},
+        reminders: Array.isArray(response.reminders) ? response.reminders : [],
+      };
+    }
+
+    return { action: 'ask', question: response.question || "Sorry, could you say that again?" };
+  } catch (error) {
+    console.warn('Mabel conversation turn failed', error);
+    return null;
+  }
+}
+
+export async function synthesizeMabelSpeech(userId: string, text: string): Promise<string | null> {
+  try {
+    const response = await apiRequest<{ success: boolean; audioBase64: string }>('/mabel/tts', {
+      method: 'POST',
+      body: JSON.stringify({ userId, text }),
+    });
+    return response.audioBase64 || null;
+  } catch (error) {
+    console.warn('Mabel speech synthesis failed', error);
     return null;
   }
 }

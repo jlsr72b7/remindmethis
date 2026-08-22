@@ -58,6 +58,9 @@ import {
   loadReminderDeliverySettings,
   loadReminderSoundSettings,
   loadReminderTimeZoneSettings,
+  loadMabelSettings,
+  saveMabelSettings,
+  type MabelSettings,
   loadUser,
   loadEvents,
   findGoogleAddressPredictions,
@@ -1310,6 +1313,7 @@ function AccountScreen({
   const [isSavingReminderTimeZone, setIsSavingReminderTimeZone] = useState(false);
   const [calendarDefaults, setCalendarDefaults] = useState<CalendarDefaultsSettings>(DEFAULT_CALENDAR_DEFAULTS_SETTINGS);
   const [contactDataSettings, setContactDataSettings] = useState<ContactDataSettings>(DEFAULT_CONTACT_DATA_SETTINGS);
+  const [mabelSettings, setMabelSettings] = useState<MabelSettings>({ enabled: false, voiceProvider: 'device' });
   const [calendarSyncProviderDraft, setCalendarSyncProviderDraft] = useState<CalendarSyncProvider>('none');
   const [googleCalendarPermission, setGoogleCalendarPermission] = useState<CalendarSyncPermission>('write');
   const [googleCalendarId, setGoogleCalendarId] = useState('');
@@ -1931,6 +1935,12 @@ function AccountScreen({
         setContactDataSettings(DEFAULT_CONTACT_DATA_SETTINGS);
       }
 
+      try {
+        setMabelSettings(await loadMabelSettings(user.id));
+      } catch (error) {
+        console.warn('Unable to load Hey Mabel settings', error);
+      }
+
       await Promise.all([
         refreshGoogleConnectionStatus(),
         refreshOutlookConnectionStatus(),
@@ -1963,6 +1973,19 @@ function AccountScreen({
 
   const handleToggleImportAddresses = () => {
     void persistContactDataSettings({ ...contactDataSettings, importAddressesEnabled: !contactDataSettings.importAddressesEnabled });
+  };
+
+  const persistMabelSettings = useCallback(async (nextSettings: MabelSettings) => {
+    setMabelSettings(nextSettings);
+    await saveMabelSettings(nextSettings, user.id);
+  }, [user.id]);
+
+  const handleToggleMabelEnabled = () => {
+    void persistMabelSettings({ ...mabelSettings, enabled: !mabelSettings.enabled });
+  };
+
+  const handleSelectMabelVoiceProvider = (voiceProvider: MabelSettings['voiceProvider']) => {
+    void persistMabelSettings({ ...mabelSettings, voiceProvider });
   };
 
   useEffect(() => {
@@ -6111,6 +6134,45 @@ function AccountScreen({
                     </View>
                     <Text style={styles.preferenceToggleText}>Add addresses to contacts</Text>
                   </TouchableOpacity>
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.sectionTitle}>Hey Mabel</Text>
+                  <Text style={styles.contactDataStorageNote}>
+                    Enable Mabel to create events and reminders for you just by talking. While
+                    you're in the app, say "Hey Mabel" and she'll ask how she can help.
+                  </Text>
+
+                  <TouchableOpacity style={styles.preferenceToggleRow} onPress={handleToggleMabelEnabled} activeOpacity={0.8}>
+                    <View style={styles.passwordCheckbox}>
+                      {mabelSettings.enabled ? <View style={styles.passwordCheckboxChecked} /> : null}
+                    </View>
+                    <Text style={styles.preferenceToggleText}>Enable Hey Mabel</Text>
+                  </TouchableOpacity>
+
+                  {mabelSettings.enabled ? (
+                    <View style={{ marginTop: 8 }}>
+                      <Text style={styles.preferenceToggleText}>Mabel's voice</Text>
+                      <View style={styles.calendarReligionGridRow}>
+                        {([
+                          { value: 'device' as const, label: 'On-device (free)' },
+                          { value: 'elevenlabs' as const, label: 'Premium (ElevenLabs)' },
+                        ]).map((option) => (
+                          <TouchableOpacity
+                            key={option.value}
+                            style={[styles.preferenceToggleRow, styles.calendarReligionGridCell]}
+                            onPress={() => handleSelectMabelVoiceProvider(option.value)}
+                            activeOpacity={0.8}
+                          >
+                            <View style={styles.passwordCheckbox}>
+                              {mabelSettings.voiceProvider === option.value ? <View style={styles.passwordCheckboxChecked} /> : null}
+                            </View>
+                            <Text style={styles.preferenceToggleText}>{option.label}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+                  ) : null}
                 </View>
               </View>
             ) : null}
