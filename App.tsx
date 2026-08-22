@@ -3260,7 +3260,11 @@ function AccountScreen({
         })
         .filter((entry): entry is ContactGroup => entry !== null);
 
-      return { contacts, groups };
+      const updatedAt = !Array.isArray(parsed) && (parsed as Partial<ContactsSnapshot>).updatedAt
+        ? String((parsed as Partial<ContactsSnapshot>).updatedAt)
+        : undefined;
+
+      return { contacts, groups, updatedAt };
     } catch (error) {
       console.warn('Unable to parse contacts snapshot', error);
       return { contacts: [], groups: [] };
@@ -3308,8 +3312,18 @@ function AccountScreen({
           const remoteSnapshot = normalizeContactsSnapshot(JSON.stringify(remoteSnapshotResult.snapshot));
           const localScore = (snapshot.contacts.length * 10) + snapshot.groups.length;
           const remoteScore = (remoteSnapshot.contacts.length * 10) + remoteSnapshot.groups.length;
+          // Item count alone misses server-side field updates that don't add/remove anything -
+          // e.g. an RSVP correcting a contact's name - which would tie on count and get silently
+          // discarded here in favor of this device's (now stale) local copy. Prefer whichever
+          // side was actually updated more recently instead.
+          const localUpdatedAtMs = snapshot.updatedAt ? new Date(snapshot.updatedAt).getTime() : 0;
+          const remoteUpdatedAtRaw = remoteSnapshotResult.updatedAt || remoteSnapshot.updatedAt;
+          const remoteUpdatedAtMs = remoteUpdatedAtRaw ? new Date(remoteUpdatedAtRaw).getTime() : 0;
+          const remoteIsNewer = Number.isFinite(remoteUpdatedAtMs)
+            && remoteUpdatedAtMs > 0
+            && remoteUpdatedAtMs > localUpdatedAtMs;
 
-          if (remoteScore > localScore) {
+          if (remoteScore > localScore || remoteIsNewer) {
             snapshot = remoteSnapshot;
 
             const migratedPayload: ContactsSnapshot = {

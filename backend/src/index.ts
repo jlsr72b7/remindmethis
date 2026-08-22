@@ -4263,6 +4263,17 @@ app.get('/rsvp/:eventId', async (req, res) => {
     const { eventId } = req.params;
     const event = await prisma.event.findUnique({ where: { id: eventId } });
 
+    console.log('GET /rsvp/:eventId', {
+      eventId,
+      found: Boolean(event),
+      title: event?.title,
+      people: event?.people,
+      rsvpEnabled: event?.rsvpEnabled,
+      rsvpByDate: event?.rsvpByDate,
+      eventDateTime: event?.eventDateTime,
+      acceptingResponses: event ? isRsvpAcceptingResponses(event) : null,
+    });
+
     if (!event) {
       return res.status(404).send(renderRsvpPage({
         eventTitle: 'Event',
