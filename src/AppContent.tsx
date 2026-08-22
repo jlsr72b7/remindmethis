@@ -136,6 +136,8 @@ interface EventFormState {
   reminderDateTime: Date;
   reminderAllDay: boolean;
   reminderTimeZone: string;
+  shareAfterSave: boolean;
+  shareWithRsvp: boolean;
 }
 
 const DEVICE_TIME_ZONE = getDeviceTimeZone();
@@ -467,6 +469,8 @@ const createDefaultForm = (reminderTimeZone: string): EventFormState => {
     reminderDateTime: new Date(0),
     reminderAllDay: false,
     reminderTimeZone,
+    shareAfterSave: false,
+    shareWithRsvp: false,
   };
 };
 
@@ -1016,6 +1020,8 @@ const getEventFormState = (event: SpecialDateEvent): EventFormState => {
     reminderDateTime: new Date(),
     reminderAllDay: false,
     reminderTimeZone: event.reminderTimeZone || getDeviceTimeZone(),
+    shareAfterSave: false,
+    shareWithRsvp: false,
   };
 
   if (normalizedTitle === 'birthday') {
@@ -3965,6 +3971,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       const updated = [newEvent, ...events];
       setEvents(updated);
 
+      const wantsShare = form.shareAfterSave;
+      const wantsRsvp = form.shareWithRsvp;
+
       setEditingEvent(null);
       resetTypeSelectionUi();
       setPendingVariableReminders([]);
@@ -3992,10 +4001,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         variableReminderEntries,
       );
 
-      const savedMessage = variableReminderEntries.length > 0
-        ? 'Your event and reminder(s) have been saved.'
-        : 'Your event has been saved.';
-      promptShareAfterSave(newEvent, 'Saved', savedMessage);
+      proceedAfterEventSave(newEvent, wantsShare, wantsRsvp);
     } catch (error) {
       console.error('saveCurrentEvent failed', error);
       Alert.alert('Save failed', error instanceof Error ? error.message : 'Unknown error');
@@ -4670,6 +4676,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       );
       const updatedEvent = updatedEvents.find((event) => event.id === editingEvent.id) || null;
 
+      const wantsShare = form.shareAfterSave;
+      const wantsRsvp = form.shareWithRsvp;
+
       setEvents(updatedEvents);
       setEditingEvent(null);
       resetTypeSelectionUi();
@@ -4698,7 +4707,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       );
 
       if (updatedEvent) {
-        promptShareAfterSave(updatedEvent, 'Updated', 'The event has been updated.');
+        proceedAfterEventSave(updatedEvent, wantsShare, wantsRsvp);
       } else {
         setCurrentView('manage-events');
       }
@@ -4976,11 +4985,16 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     }
   };
 
-  const promptShareAfterSave = (savedEvent: SpecialDateEvent, title: string, message: string) => {
-    Alert.alert(title, `${message} Would you like to share this event now?`, [
-      { text: 'No', style: 'cancel', onPress: () => setCurrentView('manage-events') },
-      { text: 'Yes', onPress: () => startShareForEvent(savedEvent) },
-    ]);
+  const proceedAfterEventSave = (savedEvent: SpecialDateEvent, wantsShare: boolean, wantsRsvp: boolean) => {
+    if (wantsRsvp) {
+      openRsvpByDatePicker(savedEvent);
+      return;
+    }
+    if (wantsShare) {
+      beginShareFlowForEvent(savedEvent);
+      return;
+    }
+    setCurrentView('manage-events');
   };
 
   const openReminderEditForEvent = (event: SpecialDateEvent) => {
@@ -7110,6 +7124,48 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           placeholder="Enter a person, people, group, place or description"
         />
 
+        <View style={styles.shareRsvpRow}>
+          <TouchableOpacity
+            style={[styles.eventLocationToggleRow, styles.shareRsvpToggle]}
+            onPress={() => {
+              setForm((current) => {
+                const nextShare = !current.shareAfterSave;
+                return {
+                  ...current,
+                  shareAfterSave: nextShare,
+                  shareWithRsvp: nextShare ? current.shareWithRsvp : false,
+                };
+              });
+            }}
+          >
+            <View style={styles.eventLocationRadioOuter}>
+              {form.shareAfterSave ? <View style={styles.eventLocationRadioInner} /> : null}
+            </View>
+            <Text style={styles.eventLocationToggleText}>Share</Text>
+          </TouchableOpacity>
+
+          {isPartyOrWeddingEvent(previewEvent) ? (
+            <TouchableOpacity
+              style={[styles.eventLocationToggleRow, styles.shareRsvpToggle]}
+              onPress={() => {
+                setForm((current) => {
+                  const nextRsvp = !current.shareWithRsvp;
+                  return {
+                    ...current,
+                    shareWithRsvp: nextRsvp,
+                    shareAfterSave: nextRsvp ? true : current.shareAfterSave,
+                  };
+                });
+              }}
+            >
+              <View style={styles.eventLocationRadioOuter}>
+                {form.shareWithRsvp ? <View style={styles.eventLocationRadioInner} /> : null}
+              </View>
+              <Text style={styles.eventLocationToggleText}>with RSVP</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+
         {shouldShowAgeAsOfTodayField ? (
           <>
             <Text style={styles.label}>Age as of today</Text>
@@ -9032,6 +9088,15 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     marginBottom: 8,
+  },
+  shareRsvpRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 24,
+    marginBottom: 8,
+  },
+  shareRsvpToggle: {
+    marginBottom: 0,
   },
   eventLocationRadioOuter: {
     width: 18,
