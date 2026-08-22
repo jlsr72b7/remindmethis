@@ -8185,6 +8185,15 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           <Text style={styles.savedEventDetailsTitle}>RSVP by date</Text>
           <Text style={styles.helperText}>Choose the date by which guests should respond.</Text>
 
+          {sharingEvent ? (
+            <View style={[styles.summaryLink, styles.summaryLinkColored, { backgroundColor: getEventSummaryColor(sharingEvent) }]}>
+              {renderEventSummaryIcon(sharingEvent)}
+              <Text style={[styles.summaryLinkText, styles.summaryLinkTextWrap, styles.summaryLinkTextColored]}>
+                {formatEventDateOnly(sharingEvent)} ({formatEventCountdownLabel(sharingEvent)}) • {sharingEvent.title} • {sharingEvent.people}{formatEventSummaryRowTimeSuffix(sharingEvent)}
+              </Text>
+            </View>
+          ) : null}
+
           <View style={styles.modalHeader}>
             <TouchableOpacity onPress={() => setRsvpPickerMonth(new Date(rsvpPickerMonth.getFullYear(), rsvpPickerMonth.getMonth() - 1, 1))}>
               <Text style={styles.modalNav}>◀</Text>
