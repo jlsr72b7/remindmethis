@@ -4392,19 +4392,34 @@ const syncRsvpContactAndGroup = async (options: {
       };
       contacts.push(contact);
     } else {
-      // The RSVP form is the person's own confirmed name/contact info — e.g. a "non-contact"
-      // recipient added manually at share time only has their email or phone on file with no
-      // real name, so this fills in (or corrects) firstName/lastName/email/phone once they
-      // actually respond, rather than leaving whatever placeholder existed.
-      contact.firstName = options.firstName || contact.firstName;
-      contact.lastName = options.lastName || contact.lastName;
-      if (options.email) {
+      // Fill in whatever the matched contact is missing from the RSVP submission, without
+      // clobbering fields that are already known — e.g. a manual-phone recipient only has a
+      // phone on file (and a "Guest" placeholder name) at share time, so this fills in their
+      // real name/email once they respond, but a genuine existing contact's own saved details
+      // aren't overwritten by whatever they happened to type into the form.
+      const hasRealFirstName = Boolean(String(contact.firstName || '').trim())
+        && String(contact.firstName).trim().toLowerCase() !== 'guest';
+      let contactChanged = false;
+
+      if (!hasRealFirstName && options.firstName) {
+        contact.firstName = options.firstName;
+        contactChanged = true;
+      }
+      if (!String(contact.lastName || '').trim() && options.lastName) {
+        contact.lastName = options.lastName;
+        contactChanged = true;
+      }
+      if (!String(contact.email || '').trim() && options.email) {
         contact.email = options.email;
+        contactChanged = true;
       }
-      if (options.phone) {
+      if (!String(contact.mobileNumber || '').trim() && options.phone) {
         contact.mobileNumber = options.phone;
+        contactChanged = true;
       }
-      contact.updatedAt = nowIso;
+      if (contactChanged) {
+        contact.updatedAt = nowIso;
+      }
     }
 
     const groupName = `${options.eventTitle} • ${options.eventPeople}`.trim().slice(0, 120);
