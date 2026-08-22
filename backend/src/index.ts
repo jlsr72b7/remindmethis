@@ -229,6 +229,15 @@ interface AnthropicMessageResponse {
   };
 }
 
+// Client sends these as naive "no Z, no offset" wall-clock strings (e.g. "2026-08-24T11:00:00")
+// representing local time in the given IANA zone. Deliberately NOT parsed through `new Date()`
+// here — that would reinterpret them using the server process's own timezone (typically UTC on
+// Render), silently shifting the wall-clock digits. They're passed straight through as text so
+// the model reasons in local wall-clock terms only, never doing UTC offset arithmetic itself.
+const isWallClockText = (value: unknown): value is string => (
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)
+);
+
 // Mirrors EventFormState's enums in src/AppContent.tsx so the extracted fields drop straight
 // into the create-event form. The model is told to omit anything it can't confidently determine
 // rather than guess, since a blank field is safer than a wrong one for something like a date.
@@ -278,11 +287,11 @@ const EXTRACT_EVENT_TOOL = {
       },
       eventDateTimeIso: {
         type: 'string',
-        description: 'Best-guess ISO 8601 date-time (include the UTC offset) for when the event starts, resolved relative to the current date/time given.',
+        description: 'Best-guess local wall-clock date-time in the format YYYY-MM-DDTHH:mm:ss (no "Z", no UTC offset) for when the event starts, resolved relative to the current date/time given.',
       },
       eventEndDateTimeIso: {
         type: 'string',
-        description: 'Best-guess ISO 8601 end date-time (include the UTC offset), only if an explicit end time or duration was mentioned (e.g. "from 2 to 4pm", "until 6", "for two hours"). Omit entirely if no end time was mentioned — do not infer a default duration.',
+        description: 'Best-guess local wall-clock end date-time in the format YYYY-MM-DDTHH:mm:ss (no "Z", no UTC offset), only if an explicit end time or duration was mentioned (e.g. "from 2 to 4pm", "until 6", "for two hours"). Omit entirely if no end time was mentioned — do not infer a default duration.',
       },
       eventAllDay: {
         type: 'boolean',
@@ -317,7 +326,7 @@ const EXTRACT_REMINDERS_TOOL = {
         items: {
           type: 'object',
           properties: {
-            dateTimeIso: { type: 'string', description: 'ISO 8601 date-time (include the UTC offset) for this reminder.' },
+            dateTimeIso: { type: 'string', description: 'Local wall-clock date-time in the format YYYY-MM-DDTHH:mm:ss (no "Z", no UTC offset) for this reminder.' },
             notes: { type: 'string', description: 'Optional short note for this specific reminder, only if one was mentioned.' },
           },
           required: ['dateTimeIso'],
@@ -3726,8 +3735,7 @@ app.post('/nlp/parse-event', async (req, res) => {
       return res.status(404).json({ error: 'user not found' });
     }
 
-    const parsedNowIso = new Date(nowIso);
-    const referenceDate = Number.isFinite(parsedNowIso.getTime()) ? parsedNowIso : new Date();
+    const referenceWallClock = isWallClockText(nowIso) ? nowIso : new Date().toISOString().slice(0, 19);
     const referenceTimeZone = String(timeZone || 'UTC').trim() || 'UTC';
 
     const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
@@ -3740,7 +3748,7 @@ app.post('/nlp/parse-event', async (req, res) => {
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
-        system: `You extract structured event/reminder details from a person's freeform, spoken-then-transcribed description of something they want to schedule. The current date/time is ${referenceDate.toISOString()} in the ${referenceTimeZone} time zone — resolve relative dates ("next Tuesday", "tomorrow", "in two weeks") against that. Call the extract_event_details tool exactly once with only the fields you can confidently determine from the text. Omit any field you can't determine — never guess or invent a value, with one exception: for the location fields (locationLine1/locationCity/locationState/locationZip/locationPhone), if a venue/place name and a city or town were both mentioned but the address and/or phone number weren't stated explicitly, use your best general knowledge of that real place to fill them in as a best effort rather than leaving them blank.`,
+        system: `You extract structured event/reminder details from a person's freeform, spoken-then-transcribed description of something they want to schedule. Treat ${referenceWallClock} as the current date/time exactly as it would read on a clock in the ${referenceTimeZone} time zone right now — resolve relative dates ("next Tuesday", "tomorrow", "in two weeks") against that. Whenever you determine a date/time field, output it as a plain local wall-clock string in the exact format YYYY-MM-DDTHH:mm:ss — no "Z", no numeric UTC offset, and do not convert it to UTC yourself; just state the time as it would read on a clock in that same zone. Call the extract_event_details tool exactly once with only the fields you can confidently determine from the text. Omit any field you can't determine — never guess or invent a value, with one exception: for the location fields (locationLine1/locationCity/locationState/locationZip/locationPhone), if a venue/place name and a city or town were both mentioned but the address and/or phone number weren't stated explicitly, use your best general knowledge of that real place to fill them in as a best effort rather than leaving them blank.`,
         messages: [
           { role: 'user', content: trimmedText },
         ],
@@ -3782,11 +3790,9 @@ app.post('/nlp/parse-reminders', async (req, res) => {
       return res.status(404).json({ error: 'user not found' });
     }
 
-    const parsedNowIso = new Date(nowIso);
-    const referenceDate = Number.isFinite(parsedNowIso.getTime()) ? parsedNowIso : new Date();
+    const referenceWallClock = isWallClockText(nowIso) ? nowIso : new Date().toISOString().slice(0, 19);
     const referenceTimeZone = String(timeZone || 'UTC').trim() || 'UTC';
-    const parsedEventDate = new Date(eventDateTimeIso);
-    const hasEventDate = Number.isFinite(parsedEventDate.getTime());
+    const hasEventDate = isWallClockText(eventDateTimeIso);
 
     const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -3798,7 +3804,7 @@ app.post('/nlp/parse-reminders', async (req, res) => {
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
-        system: `You extract one or more specific reminder date-times from a person's freeform, spoken-then-transcribed description of when they want to be reminded about an event. The current date/time is ${referenceDate.toISOString()} in the ${referenceTimeZone} time zone.${hasEventDate ? ` The event itself occurs at ${parsedEventDate.toISOString()}${eventAllDay ? ' (an all-day event)' : ''} — resolve phrases like "the day before", "a week before", "the morning of" relative to that event time.` : ''} Call the extract_reminders tool exactly once with a "reminders" array — one entry per distinct reminder moment described. If a recurring pattern is described (e.g. "every day for the week before"), expand it into concrete reminder date-times, capped at 10. Never invent a reminder that was not described or implied.`,
+        system: `You extract one or more specific reminder date-times from a person's freeform, spoken-then-transcribed description of when they want to be reminded about an event. Treat ${referenceWallClock} as the current date/time exactly as it would read on a clock in the ${referenceTimeZone} time zone right now.${hasEventDate ? ` The event itself occurs at ${eventDateTimeIso} (also a local wall-clock reading in that same zone)${eventAllDay ? ' (an all-day event)' : ''} — resolve phrases like "the day before", "a week before", "the morning of" relative to that event time.` : ''} Whenever you determine a reminder's date-time, output it as a plain local wall-clock string in the exact format YYYY-MM-DDTHH:mm:ss — no "Z", no numeric UTC offset, and do not convert it to UTC yourself; just state the time as it would read on a clock in that same zone. Call the extract_reminders tool exactly once with a "reminders" array — one entry per distinct reminder moment described. If a recurring pattern is described (e.g. "every day for the week before"), expand it into concrete reminder date-times, capped at 10. Never invent a reminder that was not described or implied.`,
         messages: [
           { role: 'user', content: trimmedText },
         ],

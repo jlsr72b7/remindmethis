@@ -445,6 +445,15 @@ const getDefaultEndDate = (startDate: Date) => {
 
 const createEventId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
+// A naive "no Z, no offset" wall-clock string (unlike .toISOString(), which always converts to
+// UTC). Sent to the voice-parsing backend so the model never has to compute a UTC offset by
+// hand — it just reasons in local wall-clock terms, matching how new Date(naiveString) is
+// already interpreted as local time by every JS engine, so the round trip is exact.
+const formatLocalWallClockIso = (date: Date): string => {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+
 const createDefaultForm = (reminderTimeZone: string): EventFormState => {
   const defaultEventDateTime = getDefaultDate();
   return {
@@ -4603,8 +4612,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       return false;
     }
 
-    setPendingVariableReminders(drafts);
-    setSeededVariableDraftIds([]);
+    setPendingVariableReminders((current) => (
+      [...current, ...drafts].sort((left, right) => new Date(left.reminderDateTime).getTime() - new Date(right.reminderDateTime).getTime())
+    ));
     setHasTouchedStaticReminderSchedule(false);
     setForm((current) => ({ ...current, reminderMode: 'variable' }));
     return true;
@@ -4626,9 +4636,9 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         const reminders = await parseVoiceReminderText(
           userId,
           text,
-          form.eventDateTime.toISOString(),
+          formatLocalWallClockIso(form.eventDateTime),
           form.eventAllDay,
-          new Date().toISOString(),
+          formatLocalWallClockIso(new Date()),
           effectiveReminderTimeZone,
         );
         if (!reminders || !applyVoiceParsedRemindersToForm(reminders)) {
@@ -4636,7 +4646,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
           return;
         }
       } else {
-        const fields = await parseVoiceEventText(userId, text, new Date().toISOString(), effectiveReminderTimeZone);
+        const fields = await parseVoiceEventText(userId, text, formatLocalWallClockIso(new Date()), effectiveReminderTimeZone);
         if (!fields) {
           Alert.alert('Unable to understand that', 'Please try again, or fill in the fields manually.');
           return;
