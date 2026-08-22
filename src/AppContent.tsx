@@ -24,6 +24,10 @@ import { Picker } from '@react-native-picker/picker';
 import * as Contacts from 'expo-contacts/legacy';
 import * as SMS from 'expo-sms';
 import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
+import {
   createShareInvite,
   findUserByEmail,
   findUserByPhone,
@@ -50,6 +54,8 @@ import {
   fetchRsvpSummary,
   sendRsvpReminder,
   type RsvpSummaryResult,
+  parseVoiceEventText,
+  type VoiceParsedEventFields,
   loadUserContactsSnapshot,
   saveUserContactsSnapshot,
   subscribeApiStorageStatus,
@@ -2106,6 +2112,26 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
   const [hasSelectedSubtype, setHasSelectedSubtype] = useState(false);
   const [isSubtypePickerVisible, setIsSubtypePickerVisible] = useState(false);
   const [subtypeDraft, setSubtypeDraft] = useState('');
+  const [isVoiceEventModalVisible, setIsVoiceEventModalVisible] = useState(false);
+  const [voiceTranscriptDraft, setVoiceTranscriptDraft] = useState('');
+  const [isVoiceRecording, setIsVoiceRecording] = useState(false);
+  const [isParsingVoiceEvent, setIsParsingVoiceEvent] = useState(false);
+
+  useSpeechRecognitionEvent('result', (event) => {
+    const transcript = event.results?.[0]?.transcript;
+    if (typeof transcript === 'string') {
+      setVoiceTranscriptDraft(transcript);
+    }
+  });
+  useSpeechRecognitionEvent('end', () => {
+    setIsVoiceRecording(false);
+  });
+  useSpeechRecognitionEvent('error', (event) => {
+    setIsVoiceRecording(false);
+    if (event.error !== 'no-speech' && event.error !== 'aborted') {
+      Alert.alert('Speech recognition error', event.message || 'Please try again.');
+    }
+  });
   const [pickerTarget, setPickerTarget] = useState<'event' | 'reminder' | null>(null);
   const [pickerMonth, setPickerMonth] = useState(new Date());
   const [activeTimePicker, setActiveTimePicker] = useState<{ target: TimePickerTarget; title: string } | null>(null);
@@ -4449,6 +4475,110 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     setIsEventTypePickerVisible(false);
     setIsSubtypePickerVisible(false);
   }, []);
+
+  const openVoiceEventModal = () => {
+    Keyboard.dismiss();
+    setVoiceTranscriptDraft('');
+    setIsVoiceRecording(false);
+    setIsVoiceEventModalVisible(true);
+  };
+
+  const closeVoiceEventModal = () => {
+    if (isVoiceRecording) {
+      ExpoSpeechRecognitionModule.stop();
+    }
+    setIsVoiceRecording(false);
+    setIsVoiceEventModalVisible(false);
+  };
+
+  const startVoiceRecording = async () => {
+    const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert(
+        'Microphone access needed',
+        'Please allow microphone and speech recognition access in Settings to create events by speaking.',
+      );
+      return;
+    }
+
+    setVoiceTranscriptDraft('');
+    setIsVoiceRecording(true);
+    ExpoSpeechRecognitionModule.start({
+      lang: 'en-US',
+      interimResults: true,
+      continuous: true,
+    });
+  };
+
+  const stopVoiceRecording = () => {
+    ExpoSpeechRecognitionModule.stop();
+  };
+
+  const applyVoiceParsedFieldsToForm = (fields: VoiceParsedEventFields) => {
+    const validEventTypes: EventTypeValue[] = ['birthday', 'party', 'wedding', 'anniversary', 'medical', 'dental', 'work', 'school', 'travel', 'sports', 'other'];
+    const nextEventType = validEventTypes.includes(fields.eventType as EventTypeValue) ? (fields.eventType as EventTypeValue) : null;
+    if (nextEventType) {
+      handleSelectEventType(nextEventType);
+    }
+
+    const subtypeByEventType: Partial<Record<EventTypeValue, { value?: string; valid: string[] }>> = {
+      party: { value: fields.partySubtype, valid: ['birthday', 'anniversary', 'retirement', 'engagement', 'holiday', 'other'] },
+      school: { value: fields.schoolSubtype, valid: ['quiz', 'test', 'paper-due', 'project-due', 'class-presentation', 'other'] },
+      medical: { value: fields.medicalSubtype, valid: ['appointment', 'surgery', 'blood-work', 'radiology', 'rehab', 'other'] },
+      dental: { value: fields.dentalSubtype, valid: ['cleaning', 'extraction', 'check-up', 'root-canal', 'bridge', 'dentures', 'cavities', 'implants', 'crown', 'fitting', 'other'] },
+      work: { value: fields.workSubtype, valid: ['meeting', 'review', 'conference', 'demo', 'workshop', 'presentation', 'interview', 'other'] },
+    };
+    const subtypeConfig = nextEventType ? subtypeByEventType[nextEventType] : null;
+    if (subtypeConfig?.value && subtypeConfig.valid.includes(subtypeConfig.value)) {
+      handleSelectSubtype(subtypeConfig.value);
+    }
+
+    const parsedDate = fields.eventDateTimeIso ? new Date(fields.eventDateTimeIso) : null;
+    const hasValidDate = Boolean(parsedDate && Number.isFinite(parsedDate.getTime()));
+    const hasLocation = Boolean(fields.locationName || fields.locationLine1 || fields.locationCity || fields.locationState || fields.locationZip);
+
+    setForm((current) => ({
+      ...current,
+      ...(fields.customType ? { customType: fields.customType } : {}),
+      ...(fields.people ? { people: fields.people } : {}),
+      ...(fields.notes ? { notes: fields.notes } : {}),
+      ...(hasValidDate ? { eventDateTime: parsedDate as Date } : {}),
+      ...(typeof fields.eventAllDay === 'boolean' ? { eventAllDay: fields.eventAllDay } : {}),
+      ...(hasLocation ? {
+        eventLocationEnabled: true,
+        ...(fields.locationName ? { eventLocationName: fields.locationName } : {}),
+        ...(fields.locationLine1 ? { eventLocationLine1: fields.locationLine1, eventLocationFormattedAddress: fields.locationLine1 } : {}),
+        ...(fields.locationCity ? { eventLocationCity: fields.locationCity } : {}),
+        ...(fields.locationState ? { eventLocationState: normalizeStateCode(fields.locationState) } : {}),
+        ...(fields.locationZip ? { eventLocationZip: fields.locationZip } : {}),
+      } : {}),
+    }));
+  };
+
+  const submitVoiceEventText = async () => {
+    const text = voiceTranscriptDraft.trim();
+    if (!text) {
+      Alert.alert('Nothing to use', 'Record or type a description first.');
+      return;
+    }
+    if (!userId || isParsingVoiceEvent) {
+      return;
+    }
+
+    setIsParsingVoiceEvent(true);
+    try {
+      const fields = await parseVoiceEventText(userId, text, new Date().toISOString(), effectiveReminderTimeZone);
+      if (!fields) {
+        Alert.alert('Unable to understand that', 'Please try again, or fill in the fields manually.');
+        return;
+      }
+
+      applyVoiceParsedFieldsToForm(fields);
+      setIsVoiceEventModalVisible(false);
+    } finally {
+      setIsParsingVoiceEvent(false);
+    }
+  };
 
   const startEditingEvent = (event: SpecialDateEvent) => {
     const now = getDefaultDate();
@@ -6989,16 +7119,26 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
         {isAnyTypeDropdownVisible ? (
           <Pressable style={styles.dropdownDismissBackdrop} onPress={closeTypeSelectionDropdowns} />
         ) : null}
-        <View style={styles.inlineSelectionRow}>
+        <View style={styles.eventTypeHeaderRow}>
+          <View style={styles.inlineSelectionRow}>
+            <TouchableOpacity
+              onPress={() => {
+                setEventTypeDraft(hasSelectedEventType ? form.eventType : eventTypeDraft);
+                setIsSubtypePickerVisible(false);
+                setIsEventTypePickerVisible((current) => !current);
+              }}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.inlineSelectionValueText}>Event Type</Text>
+            </TouchableOpacity>
+          </View>
           <TouchableOpacity
-            onPress={() => {
-              setEventTypeDraft(hasSelectedEventType ? form.eventType : eventTypeDraft);
-              setIsSubtypePickerVisible(false);
-              setIsEventTypePickerVisible((current) => !current);
-            }}
-            activeOpacity={0.8}
+            style={styles.voiceMicButton}
+            onPress={openVoiceEventModal}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            activeOpacity={0.7}
           >
-            <Text style={styles.inlineSelectionValueText}>Event Type</Text>
+            <Text style={styles.voiceMicButtonIcon}>🎤</Text>
           </TouchableOpacity>
         </View>
         {isEventTypePickerVisible ? (
@@ -8386,6 +8526,62 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
     </Modal>
   ) : null;
 
+  const voiceEventModal = (
+    <Modal transparent visible={isVoiceEventModalVisible} animationType="fade" onRequestClose={closeVoiceEventModal}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <Text style={styles.savedEventDetailsTitle}>Create by voice</Text>
+          <Text style={styles.helperText}>
+            Describe the event you want to schedule — what it is, who it's for, and when and where it's happening.
+            Whatever you don't mention can be filled in afterward.
+          </Text>
+
+          <TextInput
+            placeholderTextColor={colors.textPlaceholder}
+            style={[styles.input, styles.notesInput, styles.voiceTranscriptInput]}
+            multiline
+            value={voiceTranscriptDraft}
+            onChangeText={setVoiceTranscriptDraft}
+            placeholder="Tap the microphone and start talking, or type here…"
+          />
+
+          <TouchableOpacity
+            style={[styles.voiceRecordButton, isVoiceRecording && styles.voiceRecordButtonActive]}
+            onPress={() => {
+              if (isVoiceRecording) {
+                stopVoiceRecording();
+              } else {
+                void startVoiceRecording();
+              }
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.voiceRecordButtonText}>
+              {isVoiceRecording ? '⏹ Stop recording' : '🎤 Start recording'}
+            </Text>
+          </TouchableOpacity>
+
+          <View style={styles.savedEventDetailsActionRow}>
+            <TouchableOpacity
+              style={styles.savedEventDetailActionPill}
+              onPress={closeVoiceEventModal}
+              disabled={isParsingVoiceEvent}
+            >
+              <Text style={styles.savedEventDetailActionText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.savedEventDetailActionPill}
+              onPress={() => void submitVoiceEventText()}
+              disabled={isParsingVoiceEvent}
+            >
+              <Text style={styles.savedEventDetailActionText}>{isParsingVoiceEvent ? 'Understanding…' : 'Use This'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
   const rsvpDatePickerModal = (
     <Modal transparent visible={isRsvpDatePickerVisible} animationType="fade" onRequestClose={closeRsvpDatePicker}>
       <View style={styles.modalOverlay}>
@@ -8585,6 +8781,7 @@ export default function AppContent({ userId, userEmail, defaultReminderTimeZone,
       {activeEventSummaryModal}
       {reminderEventModal}
       {confirmDeleteModal}
+      {voiceEventModal}
       {rsvpDatePickerModal}
       {rsvpManagerModal}
       {rsvpGroupPromptModal}
@@ -8826,6 +9023,18 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: 8,
+  },
+  eventTypeHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  voiceMicButton: {
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+  },
+  voiceMicButtonIcon: {
+    fontSize: 22,
   },
   inlineSelectionValueButton: {
     paddingVertical: 4,
@@ -9280,6 +9489,27 @@ const createAppContentStyles = (colors: ThemeColors) => StyleSheet.create({
   notesInput: {
     minHeight: 70,
     textAlignVertical: 'top',
+  },
+  voiceTranscriptInput: {
+    minHeight: 110,
+    marginTop: 12,
+    marginBottom: 12,
+  },
+  voiceRecordButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: colors.primarySoft,
+    marginBottom: 12,
+  },
+  voiceRecordButtonActive: {
+    backgroundColor: colors.dangerBg,
+  },
+  voiceRecordButtonText: {
+    color: colors.textPrimary,
+    fontWeight: '700',
+    fontSize: 15,
   },
   row: {
     flexDirection: 'row',

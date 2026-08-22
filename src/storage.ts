@@ -1187,6 +1187,43 @@ export async function fetchRsvpInvites(eventId: string, userId: string): Promise
   }
 }
 
+export interface VoiceParsedEventFields {
+  eventType?: string;
+  customType?: string;
+  partySubtype?: string;
+  schoolSubtype?: string;
+  medicalSubtype?: string;
+  dentalSubtype?: string;
+  workSubtype?: string;
+  people?: string;
+  eventDateTimeIso?: string;
+  eventAllDay?: boolean;
+  locationName?: string;
+  locationLine1?: string;
+  locationCity?: string;
+  locationState?: string;
+  locationZip?: string;
+  notes?: string;
+}
+
+export async function parseVoiceEventText(
+  userId: string,
+  text: string,
+  nowIso: string,
+  timeZone: string,
+): Promise<VoiceParsedEventFields | null> {
+  try {
+    const response = await apiRequest<{ success: boolean; fields: VoiceParsedEventFields }>('/nlp/parse-event', {
+      method: 'POST',
+      body: JSON.stringify({ userId, text, nowIso, timeZone }),
+    });
+    return response.fields || {};
+  } catch (error) {
+    console.warn('Parsing voice event text failed', error);
+    return null;
+  }
+}
+
 export interface RsvpSummaryEntry {
   id: string;
   firstName?: string;

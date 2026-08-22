@@ -29,6 +29,13 @@
           "contactsPermission": "Allow Remind Me This to access your contacts so you can import them into your reminder contact list."
         }
       ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow Remind Me This to access the microphone so you can create events by speaking.",
+          "speechRecognitionPermission": "Allow Remind Me This to use speech recognition to fill in event details from what you say."
+        }
+      ],
       "@bacons/apple-targets"
     ],
     "ios": {

@@ -59,6 +59,7 @@ const googleOauthClientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
 const googleDefaultCalendarId = process.env.GOOGLE_CALENDAR_ID;
 const googleOauthRedirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI;
 const googlePlacesApiKey = String(process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '').trim();
+const anthropicApiKey = String(process.env.ANTHROPIC_API_KEY || '').trim();
 const outlookOauthClientId = process.env.OUTLOOK_OAUTH_CLIENT_ID;
 const outlookOauthClientSecret = process.env.OUTLOOK_OAUTH_CLIENT_SECRET;
 const outlookOauthRedirectUri = process.env.OUTLOOK_OAUTH_REDIRECT_URI;
@@ -217,6 +218,85 @@ interface GooglePlacesDetailsResponse {
     message?: string;
   };
 }
+
+interface AnthropicMessageResponse {
+  content?: Array<{
+    type: string;
+    input?: Record<string, unknown>;
+  }>;
+  error?: {
+    message?: string;
+  };
+}
+
+// Mirrors EventFormState's enums in src/AppContent.tsx so the extracted fields drop straight
+// into the create-event form. The model is told to omit anything it can't confidently determine
+// rather than guess, since a blank field is safer than a wrong one for something like a date.
+const EXTRACT_EVENT_TOOL = {
+  name: 'extract_event_details',
+  description: 'Record whatever event/reminder details can be confidently determined from the text.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      eventType: {
+        type: 'string',
+        enum: ['birthday', 'party', 'wedding', 'anniversary', 'medical', 'dental', 'work', 'school', 'travel', 'sports', 'other'],
+        description: 'The general category of event.',
+      },
+      customType: {
+        type: 'string',
+        description: "A short custom label, only when eventType is 'other' and no better category fits.",
+      },
+      partySubtype: {
+        type: 'string',
+        enum: ['birthday', 'anniversary', 'retirement', 'engagement', 'holiday', 'other'],
+        description: "Only when eventType is 'party'.",
+      },
+      schoolSubtype: {
+        type: 'string',
+        enum: ['quiz', 'test', 'paper-due', 'project-due', 'class-presentation', 'other'],
+        description: "Only when eventType is 'school'.",
+      },
+      medicalSubtype: {
+        type: 'string',
+        enum: ['appointment', 'surgery', 'blood-work', 'radiology', 'rehab', 'other'],
+        description: "Only when eventType is 'medical'.",
+      },
+      dentalSubtype: {
+        type: 'string',
+        enum: ['cleaning', 'extraction', 'check-up', 'root-canal', 'bridge', 'dentures', 'cavities', 'implants', 'crown', 'fitting', 'other'],
+        description: "Only when eventType is 'dental'.",
+      },
+      workSubtype: {
+        type: 'string',
+        enum: ['meeting', 'review', 'conference', 'demo', 'workshop', 'presentation', 'interview', 'other'],
+        description: "Only when eventType is 'work'.",
+      },
+      people: {
+        type: 'string',
+        description: "Who or what the event is about/for — a person's name, a group, a place, or a short description (e.g. 'Mom', 'the whole team', 'car inspection').",
+      },
+      eventDateTimeIso: {
+        type: 'string',
+        description: 'Best-guess ISO 8601 date-time (include the UTC offset) for when the event occurs, resolved relative to the current date/time given.',
+      },
+      eventAllDay: {
+        type: 'boolean',
+        description: 'True if no specific time was mentioned, just a date.',
+      },
+      locationName: { type: 'string', description: 'Venue or place name, if mentioned.' },
+      locationLine1: { type: 'string', description: 'Street address, if mentioned.' },
+      locationCity: { type: 'string' },
+      locationState: { type: 'string', description: 'Two-letter US state code, if determinable.' },
+      locationZip: { type: 'string' },
+      notes: {
+        type: 'string',
+        description: "Any other relevant detail from the text that doesn't fit the fields above.",
+      },
+    },
+    required: [],
+  },
+} as const;
 
 const smtpTransport = smtpHost && smtpUser && smtpPass
   ? nodemailer.createTransport({
@@ -3594,6 +3674,62 @@ app.get('/google/places/details', async (req, res) => {
     });
   } catch (error) {
     console.error('google places details failed', error);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+app.post('/nlp/parse-event', async (req, res) => {
+  try {
+    if (!anthropicApiKey) {
+      return res.status(500).json({ error: 'Voice event parsing is not configured. Set ANTHROPIC_API_KEY.' });
+    }
+
+    const { userId, text, nowIso, timeZone } = req.body ?? {};
+    const trimmedText = String(text || '').trim();
+    if (!userId || !trimmedText) {
+      return res.status(400).json({ error: 'userId and text are required' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    const parsedNowIso = new Date(nowIso);
+    const referenceDate = Number.isFinite(parsedNowIso.getTime()) ? parsedNowIso : new Date();
+    const referenceTimeZone = String(timeZone || 'UTC').trim() || 'UTC';
+
+    const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': anthropicApiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: `You extract structured event/reminder details from a person's freeform, spoken-then-transcribed description of something they want to schedule. The current date/time is ${referenceDate.toISOString()} in the ${referenceTimeZone} time zone — resolve relative dates ("next Tuesday", "tomorrow", "in two weeks") against that. Call the extract_event_details tool exactly once with only the fields you can confidently determine from the text. Omit any field you can't determine — never guess or invent a value.`,
+        messages: [
+          { role: 'user', content: trimmedText },
+        ],
+        tools: [EXTRACT_EVENT_TOOL],
+        tool_choice: { type: 'tool', name: 'extract_event_details' },
+      }),
+    });
+
+    const payload = await anthropicResponse.json() as AnthropicMessageResponse;
+
+    if (!anthropicResponse.ok) {
+      console.error('anthropic parse-event failed', payload);
+      return res.status(502).json({ error: 'Unable to understand that right now. Please try again.' });
+    }
+
+    const toolUseBlock = (payload.content || []).find((block) => block.type === 'tool_use');
+
+    return res.json({ success: true, fields: toolUseBlock?.input || {} });
+  } catch (error) {
+    console.error('parse-event failed', error);
     return res.status(500).json({ error: 'internal server error' });
   }
 });
